@@ -1,0 +1,96 @@
+name: ClassNote
+options:
+  bundleIdPrefix: com.beluga.classnote
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEAD_CODE_STRIPPING: YES
+
+packages:
+  GRDB:
+    url: https://github.com/groue/GRDB.swift
+    from: 6.29.0
+  KeyboardShortcuts:
+    url: https://github.com/sindresorhus/KeyboardShortcuts
+    from: 2.2.0
+
+targets:
+  ClassNote:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+      - path: Features
+      - path: Core
+      - path: Resources
+        buildPhase: resources
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: ClassNote
+        CFBundleShortVersionString: "0.1.0"
+        LSMinimumSystemVersion: "14.0"
+        NSHumanReadableCopyright: "© 2026 ClassNote"
+        NSMicrophoneUsageDescription: "ClassNote 需要麦克风权限以录制现场课程音频"
+        NSScreenCaptureUsageDescription: "ClassNote 需要屏幕录制权限以捕获 Zoom/Teams 等会议系统音频,仅使用音频流"
+        NSAppleEventsUsageDescription: "ClassNote 需要辅助功能以支持全局快捷键(可选)"
+        LSApplicationCategoryType: public.app-category.education
+        NSPrincipalClass: NSApplication
+        NSSupportsAutomaticTermination: false
+        NSSupportsSuddenTermination: false
+        LSUIElement: false
+    entitlements:
+      path: App/ClassNote.entitlements
+      properties:
+        com.apple.security.device.audio-input: true
+        com.apple.security.device.camera: false
+        com.apple.security.network.client: true
+        com.apple.security.files.user-selected.read-write: true
+    dependencies:
+      - package: GRDB
+      - package: KeyboardShortcuts
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.beluga.classnote
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+        ENABLE_HARDENED_RUNTIME: YES
+
+  ClassNoteTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/ClassNoteTests
+    dependencies:
+      - target: ClassNote
+    settings:
+      base:
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ClassNote.app/Contents/MacOS/ClassNote"
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.beluga.classnote.tests
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+
+schemes:
+  ClassNote:
+    build:
+      targets:
+        ClassNote: all
+        ClassNoteTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - ClassNoteTests
+    archive:
+      config: Release
