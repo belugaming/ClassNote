@@ -4,24 +4,42 @@ struct LiveSubtitleView: View {
     @ObservedObject var buffer: TranscriptBuffer
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(buffer.segments) { seg in
-                        SubtitleBubble(segment: seg)
-                            .id(seg.rowId)
-                    }
-                    Color.clear.frame(height: 8).id("bottom")
-                }
-                .padding(12)
+        if buffer.segments.isEmpty {
+            VStack(spacing: 14) {
+                Spacer()
+                Image(systemName: "waveform")
+                    .font(.system(size: 54))
+                    .foregroundStyle(Theme.accent.opacity(0.6))
+                Text(L10n.t("live.empty.title"))
+                    .font(.title3.weight(.medium))
+                    .foregroundStyle(.secondary)
+                Text(L10n.t("live.empty.subtitle"))
+                    .font(.callout)
+                    .foregroundStyle(.tertiary)
+                Spacer()
             }
-            .onChange(of: buffer.segments.count) { _, _ in
-                withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo("bottom", anchor: .bottom)
+            .frame(maxWidth: .infinity)
+        } else {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(buffer.segments) { seg in
+                            SubtitleBubble(segment: seg)
+                                .id(seg.rowId)
+                                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                        }
+                        Color.clear.frame(height: 12).id("live-bottom")
+                    }
+                    .padding(16)
+                    .animation(.easeOut(duration: 0.2), value: buffer.segments.count)
+                }
+                .onChange(of: buffer.segments.count) { _, _ in
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo("live-bottom", anchor: .bottom)
+                    }
                 }
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
     }
 }
 
@@ -29,32 +47,47 @@ struct SubtitleBubble: View {
     let segment: LiveSegment
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 12) {
             Text(segment.startTimeLabel)
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 56, alignment: .leading)
-                .padding(.top, 3)
+                .font(.caption.monospacedDigit().weight(.medium))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(Theme.accentSoft))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 68, alignment: .leading)
+                .padding(.top, 4)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 6) {
                 Text(segment.original)
                     .font(.title3)
                     .textSelection(.enabled)
                 if !segment.translated.isEmpty {
                     Text(segment.translated)
                         .font(.body)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.translation)
                         .textSelection(.enabled)
                 } else {
-                    Text("—")
-                        .font(.body)
-                        .foregroundStyle(.tertiary)
+                    HStack(spacing: 4) {
+                        ForEach(0..<3) { i in
+                            Circle()
+                                .fill(Theme.translation.opacity(0.6))
+                                .frame(width: 5, height: 5)
+                                .scaleEffect(1.0)
+                                .opacity(0.6)
+                                .animation(
+                                    .easeInOut(duration: 0.8)
+                                        .repeatForever(autoreverses: true)
+                                        .delay(Double(i) * 0.15),
+                                    value: segment.translated.isEmpty
+                                )
+                        }
+                    }
+                    .padding(.vertical, 2)
                 }
             }
-
             Spacer()
         }
-        .padding(8)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+        .padding(12)
+        .cardBackground(radius: Theme.cornerMedium)
     }
 }

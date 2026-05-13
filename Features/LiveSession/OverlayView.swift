@@ -10,18 +10,25 @@ struct OverlayView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Divider().opacity(0.4)
+            Divider().background(Color.white.opacity(0.15)).padding(.vertical, 6)
             content
                 .frame(maxHeight: .infinity)
         }
-        .padding(10)
+        .padding(12)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.black.opacity(0.75))
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(.black.opacity(0.78))
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(LinearGradient(colors: [
+                        Theme.accent.opacity(0.10),
+                        Color.clear
+                    ], startPoint: .topLeading, endPoint: .bottomTrailing))
+            }
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(.white.opacity(0.15), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.white.opacity(0.15), lineWidth: 1)
         )
         .padding(6)
         .background(
@@ -34,6 +41,7 @@ struct OverlayView: View {
                 win.titlebarAppearsTransparent = true
                 win.standardWindowButton(.miniaturizeButton)?.isHidden = true
                 win.standardWindowButton(.zoomButton)?.isHidden = true
+                win.standardWindowButton(.closeButton)?.isHidden = true
                 win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             }
         )
@@ -43,27 +51,29 @@ struct OverlayView: View {
     private var header: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(appState.isRecording ? Color.red : Color.gray)
+                .fill(appState.isRecording ? Theme.recording : Color.gray)
                 .frame(width: 8, height: 8)
-            Text(appState.isRecording ? "Live · translating" : "Idle")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.white.opacity(0.85))
+                .scaleEffect(appState.isRecording ? 1.0 : 0.85)
+                .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: appState.isRecording)
+            Text(appState.isRecording ? L10n.t("live.statusLive") : L10n.t("live.statusIdle"))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.9))
             Spacer()
             if !appState.isRecording {
                 Button {
                     appState.startNewSession(source: .system)
                 } label: {
                     Image(systemName: "speaker.wave.3.fill")
-                        .foregroundStyle(.white)
+                        .foregroundStyle(Theme.accent)
                 }
                 .buttonStyle(.plain)
-                .help("Start system-audio session")
+                .help(L10n.t("overlay.startSystem"))
             } else {
                 Button {
                     appState.stopRecording()
                 } label: {
                     Image(systemName: "stop.circle.fill")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Theme.recording)
                 }
                 .buttonStyle(.plain)
             }
@@ -75,44 +85,46 @@ struct OverlayView: View {
                     .font(.caption)
             }
             .buttonStyle(.plain)
-            .help("Close overlay (⌘⇧O)")
+            .help(L10n.t("overlay.close"))
         }
-        .padding(.bottom, 6)
     }
 
     @ViewBuilder
     private var content: some View {
         let segs = appState.orchestrator.transcript.segments.suffix(3)
         if segs.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Start a session to see live translation here.")
-                    .foregroundStyle(.white.opacity(0.8))
-                    .font(.callout)
-                Text("Tip: choose System audio to capture a YouTube video playing next door.")
+            VStack(alignment: .leading, spacing: 6) {
+                Text(L10n.t("overlay.empty.title"))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .font(.callout.weight(.medium))
+                Text(L10n.t("overlay.empty.tip"))
                     .foregroundStyle(.white.opacity(0.5))
                     .font(.caption)
             }
             .padding(.vertical, 8)
         } else {
             ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 10) {
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 12) {
                         ForEach(Array(segs)) { seg in
-                            VStack(alignment: .leading, spacing: 2) {
+                            VStack(alignment: .leading, spacing: 4) {
                                 Text(seg.original)
                                     .font(.body)
                                     .foregroundStyle(.white)
                                 Text(seg.translated.isEmpty ? "…" : seg.translated)
                                     .font(.callout)
-                                    .foregroundStyle(.yellow.opacity(0.9))
+                                    .foregroundStyle(Theme.translation)
                             }
                             .id(seg.rowId)
+                            .transition(.opacity)
                         }
                         Color.clear.frame(height: 1).id("overlay-bottom")
                     }
                 }
                 .onChange(of: appState.orchestrator.transcript.segments.count) { _, _ in
-                    withAnimation { proxy.scrollTo("overlay-bottom", anchor: .bottom) }
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo("overlay-bottom", anchor: .bottom)
+                    }
                 }
             }
         }

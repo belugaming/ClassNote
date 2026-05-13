@@ -1,0 +1,316 @@
+import Foundation
+import SwiftUI
+
+/// Lightweight i18n. Detects the user's preferred system language at app start
+/// and exposes a single `t()` lookup. We support zh-Hans and en — when locale is
+/// Chinese-anything, we use zh; otherwise English.
+///
+/// For something this personal, hand-rolled beats Localizable.strings: zero
+/// build-system friction, key+value live next to each other, easy to grep.
+enum L10n {
+    static let isChinese: Bool = {
+        let lang = Locale.current.language.languageCode?.identifier ?? "en"
+        return lang.hasPrefix("zh")
+    }()
+
+    /// Look up a key. If we don't have a Chinese translation, fall back to the
+    /// English value silently — never show the raw key to the user.
+    static func t(_ key: String) -> String {
+        guard isChinese else { return en[key] ?? key }
+        return zh[key] ?? en[key] ?? key
+    }
+
+    private static let en: [String: String] = [
+        // Common
+        "common.cancel": "Cancel",
+        "common.save": "Save",
+        "common.delete": "Delete",
+        "common.create": "Create",
+        "common.close": "Close",
+        "common.ok": "OK",
+        "common.error": "Error",
+        "common.loading": "Loading…",
+
+        // App
+        "app.name": "ClassNote",
+        "app.tagline": "Record, transcribe, translate, organize your lectures.",
+
+        // Main window
+        "main.search.prompt": "Search transcripts…",
+        "main.allSessions": "All sessions",
+        "main.courses": "Courses",
+        "main.newCourse": "New course",
+        "main.newCourse.prompt": "Course name (e.g. CS 6.001 SICP)",
+        "main.empty.title": "Pick or start a session",
+        "main.empty.description": "Use the Record button to begin, or import a video. ⌘N starts a new mic session, ⌘⇧O toggles the floating overlay.",
+        "main.deleteCourse": "Delete course",
+        "main.deleteSession": "Delete session",
+
+        // Toolbar
+        "toolbar.record": "Record",
+        "toolbar.stop": "Stop",
+        "toolbar.record.menu.mic": "Microphone only",
+        "toolbar.record.menu.system": "System audio (Zoom / YouTube)",
+        "toolbar.record.menu.mixed": "Both (mic + system)",
+        "toolbar.overlay": "Overlay",
+        "toolbar.overlay.help": "Toggle floating translation overlay (⌘⇧O)",
+        "toolbar.newSession": "New session",
+        "toolbar.import": "Import…",
+        "toolbar.help.configureKey": "Configure API key in Settings first",
+        "toolbar.help.recordHint": "Click to mic-record. ▽ for other sources.",
+
+        // Session
+        "session.state.recording": "Recording",
+        "session.state.transcribed": "Transcribed",
+        "session.state.summarized": "Summarized",
+        "session.state.idle": "Idle",
+        "session.source.mic": "Microphone",
+        "session.source.system": "System audio",
+        "session.source.mixed": "Mic + System",
+        "session.source.file": "Imported file",
+        "session.tab.transcript": "Bilingual transcript",
+        "session.tab.notes": "AI notes",
+        "session.tab.highlights": "Highlights",
+        "session.action.play": "Play audio",
+        "session.action.stop": "Stop",
+        "session.action.generateNotes": "Generate AI notes",
+        "session.action.generatingNotes": "Generating…",
+        "session.action.retranslate": "Retranslate",
+        "session.action.retranslating": "Retranslating…",
+        "session.empty.transcript.title": "No transcript yet",
+        "session.empty.transcript.desc": "Start recording or import a video to populate the transcript.",
+        "session.empty.notes.title": "No AI notes yet",
+        "session.empty.notes.desc": "Generate a structured Markdown summary from the transcript.",
+        "session.empty.highlights.title": "No highlights",
+        "session.empty.highlights.desc": "Press ⌘⇧M during a live session to bookmark a moment.",
+
+        // Live session
+        "live.title": "Live session",
+        "live.statusLive": "Live · translating",
+        "live.statusIdle": "Idle",
+        "live.translation.toggle": "Translate",
+        "live.highlight": "Highlight",
+        "live.start": "Start",
+        "live.stop": "Stop",
+        "live.empty.title": "Waiting for the first sentence…",
+        "live.empty.subtitle": "Speak, share a Zoom call, or play a video.",
+
+        // Overlay
+        "overlay.empty.title": "Start a session to see live translation.",
+        "overlay.empty.tip": "Tip: pick System audio to capture YouTube playing next to it.",
+        "overlay.startSystem": "Start system-audio session",
+        "overlay.close": "Close overlay (⌘⇧O)",
+
+        // Settings
+        "settings.tab.api": "API",
+        "settings.tab.engines": "Engines",
+        "settings.tab.shortcuts": "Shortcuts",
+        "settings.tab.appearance": "Appearance",
+        "settings.tab.about": "About",
+        "settings.api.presets": "Provider presets",
+        "settings.api.endpoint": "Endpoint & key",
+        "settings.api.baseUrl": "Base URL",
+        "settings.api.key": "API Key",
+        "settings.api.privacy": "Stored locally in SQLite. Never transmitted except to the endpoint you specify.",
+        "settings.api.models": "Per-capability model IDs",
+        "settings.api.stt": "STT model",
+        "settings.api.translation": "Translation model",
+        "settings.api.llm": "Notes / QA model",
+        "settings.api.languages": "Languages",
+        "settings.api.source": "Source (lecture)",
+        "settings.api.target": "Target (translation)",
+        "settings.api.langHelp": "ISO 639-1 codes. Leave source blank for auto-detect.",
+        "settings.api.test": "Test connection",
+        "settings.api.testing": "Testing…",
+        "settings.api.testOk": "OK",
+        "settings.api.testFail": "Failed",
+        "settings.api.saved": "Saved.",
+        "settings.engines.stt": "Speech-to-text backend",
+        "settings.engines.sttPicker": "STT engine",
+        "settings.engines.whisperKitNote": "Local WhisperKit is planned for v1.1. For now, switch to OpenAI Compatible.",
+        "settings.engines.translationSection": "Translation",
+        "settings.engines.liveTranslationToggle": "Enable live translation",
+        "settings.engines.liveHelp": "When off, only the original transcript is captured. You can retranslate later.",
+        "settings.engines.storage": "Storage",
+        "settings.engines.appSupport": "Application Support",
+        "settings.engines.recordings": "Recordings",
+        "settings.engines.reveal": "Reveal in Finder",
+        "settings.shortcuts.global": "Global shortcuts",
+        "settings.shortcuts.toggleRecording": "Toggle recording",
+        "settings.shortcuts.markHighlight": "Mark highlight",
+        "settings.shortcuts.toggleTranslation": "Toggle translation",
+        "settings.shortcuts.toggleOverlay": "Toggle overlay window",
+        "settings.shortcuts.note": "These work anywhere on macOS, even when ClassNote is hidden.",
+        "settings.appearance.language": "Language",
+        "settings.appearance.languageNote": "Restart the app for language changes to take full effect.",
+        "settings.appearance.lang.system": "Follow system",
+        "settings.appearance.lang.zh": "中文",
+        "settings.appearance.lang.en": "English",
+        "settings.about.version": "v0.1.0 — personal build",
+        "settings.about.tagline": "Record, transcribe, translate, and organize your US lectures. Your data stays local.",
+
+        // Menubar
+        "menubar.idle": "ClassNote",
+        "menubar.recording": "Recording",
+        "menubar.duration": "Duration",
+        "menubar.recordMic": "Record · Microphone",
+        "menubar.recordSystem": "Record · System audio",
+        "menubar.recordMixed": "Record · Mic + System",
+        "menubar.stopSession": "Stop session",
+        "menubar.toggleOverlay": "Toggle overlay window",
+        "menubar.markHighlight": "Mark highlight",
+        "menubar.liveTranslation": "Live translation",
+        "menubar.openMain": "Open main window",
+        "menubar.settings": "Settings…",
+        "menubar.quit": "Quit ClassNote",
+    ]
+
+    private static let zh: [String: String] = [
+        // 通用
+        "common.cancel": "取消",
+        "common.save": "保存",
+        "common.delete": "删除",
+        "common.create": "新建",
+        "common.close": "关闭",
+        "common.ok": "好",
+        "common.error": "错误",
+        "common.loading": "加载中…",
+
+        "app.name": "ClassNote",
+        "app.tagline": "录制、转写、翻译、整理你的课堂",
+
+        // 主窗口
+        "main.search.prompt": "搜索逐字稿…",
+        "main.allSessions": "全部会话",
+        "main.courses": "课程",
+        "main.newCourse": "新建课程",
+        "main.newCourse.prompt": "课程名称(如 CS 6.001 SICP)",
+        "main.empty.title": "选择或开启一个会话",
+        "main.empty.description": "点右上角 Record 开始录制,或导入一个视频。⌘N 麦克风一键录制,⌘⇧O 切换浮窗。",
+        "main.deleteCourse": "删除课程",
+        "main.deleteSession": "删除会话",
+
+        // 工具栏
+        "toolbar.record": "录制",
+        "toolbar.stop": "停止",
+        "toolbar.record.menu.mic": "仅麦克风",
+        "toolbar.record.menu.system": "系统音频(Zoom / YouTube)",
+        "toolbar.record.menu.mixed": "麦克风 + 系统音频",
+        "toolbar.overlay": "浮窗",
+        "toolbar.overlay.help": "切换始终置顶的翻译浮窗(⌘⇧O)",
+        "toolbar.newSession": "新建会话",
+        "toolbar.import": "导入…",
+        "toolbar.help.configureKey": "请先在设置中配置 API key",
+        "toolbar.help.recordHint": "点击=麦克风,▽=选择音源",
+
+        // 会话
+        "session.state.recording": "录制中",
+        "session.state.transcribed": "已转写",
+        "session.state.summarized": "已整理",
+        "session.state.idle": "空闲",
+        "session.source.mic": "麦克风",
+        "session.source.system": "系统音频",
+        "session.source.mixed": "麦克风+系统音频",
+        "session.source.file": "导入文件",
+        "session.tab.transcript": "双语逐字稿",
+        "session.tab.notes": "AI 笔记",
+        "session.tab.highlights": "重点标记",
+        "session.action.play": "播放录音",
+        "session.action.stop": "停止",
+        "session.action.generateNotes": "生成 AI 笔记",
+        "session.action.generatingNotes": "生成中…",
+        "session.action.retranslate": "重新翻译",
+        "session.action.retranslating": "重译中…",
+        "session.empty.transcript.title": "还没有逐字稿",
+        "session.empty.transcript.desc": "开始录制或导入视频后,这里会出现内容。",
+        "session.empty.notes.title": "还没有 AI 笔记",
+        "session.empty.notes.desc": "点击上方按钮,从逐字稿生成结构化的 Markdown 总结。",
+        "session.empty.highlights.title": "暂无重点标记",
+        "session.empty.highlights.desc": "录制中按 ⌘⇧M 标记一个重要瞬间。",
+
+        // 实时会话
+        "live.title": "实时会话",
+        "live.statusLive": "正在直播 · 翻译中",
+        "live.statusIdle": "空闲",
+        "live.translation.toggle": "翻译",
+        "live.highlight": "标记",
+        "live.start": "开始",
+        "live.stop": "停止",
+        "live.empty.title": "等待第一句话…",
+        "live.empty.subtitle": "对着麦克风说话,或共享 Zoom 会议,或播放视频",
+
+        // 浮窗
+        "overlay.empty.title": "开始会话即可看到实时翻译",
+        "overlay.empty.tip": "提示:选系统音频可以抓旁边的 YouTube 视频",
+        "overlay.startSystem": "用系统音频开始录制",
+        "overlay.close": "关闭浮窗(⌘⇧O)",
+
+        // 设置
+        "settings.tab.api": "API",
+        "settings.tab.engines": "引擎",
+        "settings.tab.shortcuts": "快捷键",
+        "settings.tab.appearance": "外观",
+        "settings.tab.about": "关于",
+        "settings.api.presets": "供应商预设",
+        "settings.api.endpoint": "终端与密钥",
+        "settings.api.baseUrl": "Base URL",
+        "settings.api.key": "API Key",
+        "settings.api.privacy": "仅存储在本地 SQLite 中,只发送到你指定的终端。",
+        "settings.api.models": "各能力的模型 ID",
+        "settings.api.stt": "转写模型",
+        "settings.api.translation": "翻译模型",
+        "settings.api.llm": "笔记 / 问答 模型",
+        "settings.api.languages": "语言",
+        "settings.api.source": "原文(讲课语言)",
+        "settings.api.target": "译文",
+        "settings.api.langHelp": "ISO 639-1 代码。原文留空表示自动检测。",
+        "settings.api.test": "测试连接",
+        "settings.api.testing": "测试中…",
+        "settings.api.testOk": "正常",
+        "settings.api.testFail": "失败",
+        "settings.api.saved": "已保存",
+        "settings.engines.stt": "语音识别后端",
+        "settings.engines.sttPicker": "语音识别引擎",
+        "settings.engines.whisperKitNote": "本地 WhisperKit 计划在 v1.1 集成。当前请使用 OpenAI 兼容后端。",
+        "settings.engines.translationSection": "翻译",
+        "settings.engines.liveTranslationToggle": "启用实时翻译",
+        "settings.engines.liveHelp": "关闭后,仅捕获原文,可随时回过头来重译。",
+        "settings.engines.storage": "存储",
+        "settings.engines.appSupport": "Application Support",
+        "settings.engines.recordings": "录音文件",
+        "settings.engines.reveal": "在访达中显示",
+        "settings.shortcuts.global": "全局快捷键",
+        "settings.shortcuts.toggleRecording": "开始/停止录制",
+        "settings.shortcuts.markHighlight": "标记重点",
+        "settings.shortcuts.toggleTranslation": "切换翻译开关",
+        "settings.shortcuts.toggleOverlay": "切换浮窗",
+        "settings.shortcuts.note": "全局快捷键在 macOS 任何位置都生效,即便 ClassNote 没在前台。",
+        "settings.appearance.language": "语言",
+        "settings.appearance.languageNote": "切换语言后请重启 App 完整生效。",
+        "settings.appearance.lang.system": "跟随系统",
+        "settings.appearance.lang.zh": "中文",
+        "settings.appearance.lang.en": "English",
+        "settings.about.version": "v0.1.0 · 个人构建",
+        "settings.about.tagline": "录课、转写、翻译、整理 — 留学一站式。所有数据留在你电脑上。",
+
+        // 菜单栏
+        "menubar.idle": "ClassNote",
+        "menubar.recording": "录制中",
+        "menubar.duration": "时长",
+        "menubar.recordMic": "录制 · 麦克风",
+        "menubar.recordSystem": "录制 · 系统音频",
+        "menubar.recordMixed": "录制 · 麦克风+系统",
+        "menubar.stopSession": "停止录制",
+        "menubar.toggleOverlay": "切换浮窗",
+        "menubar.markHighlight": "标记重点",
+        "menubar.liveTranslation": "实时翻译",
+        "menubar.openMain": "打开主窗口",
+        "menubar.settings": "设置…",
+        "menubar.quit": "退出 ClassNote",
+    ]
+}
+
+extension String {
+    /// Sugar: `"main.empty.title".t` — but use `L10n.t(...)` directly when key is dynamic.
+    var t: String { L10n.t(self) }
+}

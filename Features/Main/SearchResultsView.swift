@@ -6,41 +6,54 @@ struct SearchResultsView: View {
     @State private var loading = false
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
-                if loading {
+        Group {
+            if loading {
+                VStack(spacing: 10) {
                     ProgressView()
-                        .padding()
-                } else if results.isEmpty {
-                    ContentUnavailableView("No matches",
-                                            systemImage: "text.magnifyingglass",
-                                            description: Text("No transcript lines match \"\(query)\"."))
-                        .padding(40)
-                } else {
-                    ForEach(results) { hit in
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack {
-                                Text(hit.sessionTitle)
-                                    .font(.caption.bold())
-                                    .foregroundStyle(.secondary)
-                                Text(formatTs(hit.segment.startMs))
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(.tertiary)
-                            }
-                            Text(hit.segment.textOriginal)
-                                .textSelection(.enabled)
-                            if !hit.segment.textTranslated.isEmpty {
-                                Text(hit.segment.textTranslated)
-                                    .foregroundStyle(.secondary)
+                    Text(L10n.t("common.loading"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if results.isEmpty {
+                ContentUnavailableView {
+                    Label("\"\(query)\"", systemImage: "text.magnifyingglass")
+                } description: {
+                    Text(L10n.isChinese ? "没有匹配的逐字稿内容。" : "No transcript lines match this query.")
+                }
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        Text(L10n.isChinese ? "\(results.count) 条命中" : "\(results.count) matches")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 14)
+                            .padding(.top, 10)
+                        ForEach(results) { hit in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(hit.sessionTitle)
+                                        .font(.caption.bold())
+                                        .foregroundStyle(Theme.accent)
+                                    Text(formatTs(hit.segment.startMs))
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.tertiary)
+                                }
+                                Text(hit.segment.textOriginal)
                                     .textSelection(.enabled)
+                                if !hit.segment.textTranslated.isEmpty {
+                                    Text(hit.segment.textTranslated)
+                                        .foregroundStyle(Theme.translation)
+                                        .textSelection(.enabled)
+                                }
                             }
+                            .padding(12)
+                            .cardBackground()
                         }
-                        .padding(10)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)))
                     }
+                    .padding(14)
                 }
             }
-            .padding(12)
         }
         .task(id: query) { await runSearch() }
     }

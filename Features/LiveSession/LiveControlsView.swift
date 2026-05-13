@@ -6,22 +6,34 @@ struct LiveControlsView: View {
     var body: some View {
         HStack(spacing: 10) {
             Toggle(isOn: $appState.translationEnabled) {
-                Label("Translate", systemImage: "character.bubble")
+                Label(L10n.t("live.translation.toggle"), systemImage: "character.bubble")
             }
             .toggleStyle(.button)
+            .tint(Theme.accent)
 
             Button {
                 appState.markHighlight()
             } label: {
-                Label("Highlight", systemImage: "star.circle")
+                Label(L10n.t("live.highlight"), systemImage: "star.circle")
             }
             .disabled(!appState.isRecording)
 
-            Button(role: appState.isRecording ? .destructive : nil) {
-                if appState.isRecording { appState.stopRecording() } else { appState.startNewSession() }
-            } label: {
-                Label(appState.isRecording ? "Stop" : "Start",
-                      systemImage: appState.isRecording ? "stop.circle.fill" : "record.circle")
+            if appState.isRecording {
+                Button(role: .destructive) {
+                    appState.stopRecording()
+                } label: {
+                    Label(L10n.t("live.stop"), systemImage: "stop.circle.fill")
+                }
+                .tint(Theme.recording)
+                .buttonStyle(.borderedProminent)
+            } else {
+                Button {
+                    appState.startNewSession()
+                } label: {
+                    Label(L10n.t("live.start"), systemImage: "record.circle")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
             }
         }
     }

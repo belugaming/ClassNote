@@ -8,25 +8,29 @@ struct SessionDetailView: View {
     @State private var selectedTab: DetailTab = .transcript
 
     enum DetailTab: String, CaseIterable, Identifiable {
-        case transcript = "Bilingual transcript"
-        case notes = "AI notes"
-        case highlights = "Highlights"
+        case transcript, notes, highlights
         var id: String { rawValue }
+        var titleKey: String {
+            switch self {
+            case .transcript: return "session.tab.transcript"
+            case .notes: return "session.tab.notes"
+            case .highlights: return "session.tab.highlights"
+            }
+        }
+        var icon: String {
+            switch self {
+            case .transcript: return "captions.bubble"
+            case .notes: return "sparkles"
+            case .highlights: return "star.fill"
+            }
+        }
     }
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
-            Picker("", selection: $selectedTab) {
-                ForEach(DetailTab.allCases) { tab in
-                    Text(tab.rawValue).tag(tab)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding(8)
-            Divider()
-
+            tabPicker
+            Divider().opacity(0.5)
             Group {
                 switch selectedTab {
                 case .transcript: TranscriptPane(vm: vm)
@@ -39,52 +43,109 @@ struct SessionDetailView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 16) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(vm.session?.session.title ?? "…")
-                    .font(.title2.weight(.semibold))
-                HStack(spacing: 8) {
-                    Text(vm.session?.session.state.capitalized ?? "")
-                    if let s = vm.session?.session {
-                        Text("·")
-                        Text("\(s.sourceKind)")
-                        Text("·")
-                        Text(vm.durationLabel)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 14) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(vm.session?.session.title ?? "…")
+                        .font(.title.weight(.semibold))
+                    HStack(spacing: 6) {
+                        if let s = vm.session?.session {
+                            Text(stateLabel(s.state)).pill(stateColor(s.state))
+                            Text(sourceLabel(s.sourceKind)).pill(Theme.accent)
+                            Text(vm.durationLabel)
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-            Spacer()
-            if vm.isPlaying {
-                Button {
-                    vm.stopPlayback()
-                } label: {
-                    Label("Stop", systemImage: "stop.circle")
+                Spacer()
+
+                if vm.isPlaying {
+                    Button {
+                        vm.stopPlayback()
+                    } label: {
+                        Label(L10n.t("session.action.stop"), systemImage: "stop.circle")
+                    }
+                } else if vm.hasAudio {
+                    Button {
+                        vm.playFromBeginning()
+                    } label: {
+                        Label(L10n.t("session.action.play"), systemImage: "play.circle")
+                    }
                 }
-            } else if vm.hasAudio {
+
                 Button {
-                    vm.playFromBeginning()
+                    Task { await vm.retranslate() }
                 } label: {
-                    Label("Play audio", systemImage: "play.circle")
+                    Label(vm.isRetranslating ? L10n.t("session.action.retranslating") : L10n.t("session.action.retranslate"),
+                          systemImage: "arrow.triangle.2.circlepath")
                 }
+                .disabled(vm.isRetranslating || (vm.session?.segments.isEmpty ?? true))
+
+                Button {
+                    Task { await vm.generateNotes() }
+                } label: {
+                    Label(vm.isGeneratingNotes ? L10n.t("session.action.generatingNotes") : L10n.t("session.action.generateNotes"),
+                          systemImage: "sparkles")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
+                .disabled(vm.isGeneratingNotes || (vm.session?.segments.isEmpty ?? true))
             }
-            Button {
-                Task { await vm.generateNotes() }
-            } label: {
-                Label(vm.isGeneratingNotes ? "Generating…" : "Generate AI notes",
-                      systemImage: "sparkles")
-            }
-            .disabled(vm.isGeneratingNotes || (vm.session?.segments.isEmpty ?? true))
-            Button {
-                Task { await vm.retranslate() }
-            } label: {
-                Label(vm.isRetranslating ? "Retranslating…" : "Retranslate",
-                      systemImage: "arrow.triangle.2.circlepath")
-            }
-            .disabled(vm.isRetranslating || (vm.session?.segments.isEmpty ?? true))
         }
-        .padding(12)
+        .padding(16)
+    }
+
+    private var tabPicker: some View {
+        HStack(spacing: 0) {
+            ForEach(DetailTab.allCases) { tab in
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { selectedTab = tab }
+                } label: {
+                    VStack(spacing: 6) {
+                        HStack(spacing: 6) {
+                            Image(systemName: tab.icon)
+                            Text(L10n.t(tab.titleKey))
+                        }
+                        .font(.callout.weight(selectedTab == tab ? .semibold : .regular))
+                        .foregroundStyle(selectedTab == tab ? Theme.accent : .secondary)
+                        Rectangle()
+                            .fill(selectedTab == tab ? Theme.accent : .clear)
+                            .frame(height: 2)
+                    }
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+            }
+        }
+        .background(Color.primary.opacity(0.02))
+    }
+
+    private func stateLabel(_ s: String) -> String {
+        switch s {
+        case "recording": return L10n.t("session.state.recording")
+        case "summarized": return L10n.t("session.state.summarized")
+        case "transcribed": return L10n.t("session.state.transcribed")
+        default: return s
+        }
+    }
+
+    private func stateColor(_ s: String) -> Color {
+        switch s {
+        case "recording": return Theme.recording
+        case "summarized": return Theme.success
+        default: return .secondary
+        }
+    }
+
+    private func sourceLabel(_ s: String) -> String {
+        switch s {
+        case "system": return L10n.t("session.source.system")
+        case "mixed": return L10n.t("session.source.mixed")
+        case "file": return L10n.t("session.source.file")
+        default: return L10n.t("session.source.mic")
+        }
     }
 }
 
@@ -101,14 +162,16 @@ struct TranscriptPane: View {
                         }
                     }
                 } else {
-                    ContentUnavailableView("No transcript yet",
-                                            systemImage: "captions.bubble",
-                                            description: Text("Start recording or import a video to populate the transcript."))
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .padding(40)
+                    ContentUnavailableView {
+                        Label(L10n.t("session.empty.transcript.title"), systemImage: "captions.bubble")
+                    } description: {
+                        Text(L10n.t("session.empty.transcript.desc"))
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(40)
                 }
             }
-            .padding(12)
+            .padding(14)
         }
     }
 }
@@ -124,29 +187,30 @@ struct SegmentRowView: View {
             } label: {
                 Text(formatTs(segment.startMs))
                     .monospacedDigit()
-                    .font(.caption)
-                    .foregroundStyle(.tint)
+                    .font(.caption.weight(.medium))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Theme.accentSoft))
+                    .foregroundStyle(Theme.accent)
             }
             .buttonStyle(.plain)
-            .frame(width: 56, alignment: .leading)
+            .frame(width: 68, alignment: .leading)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 6) {
                 Text(segment.textOriginal)
+                    .font(.body)
                     .textSelection(.enabled)
                 if !segment.textTranslated.isEmpty {
                     Text(segment.textTranslated)
-                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                        .foregroundStyle(Theme.translation)
                         .textSelection(.enabled)
                 }
             }
             Spacer()
         }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.primary.opacity(0.03))
-        )
+        .padding(10)
+        .cardBackground()
     }
 
     private func formatTs(_ ms: Int64) -> String {
@@ -169,13 +233,15 @@ struct NotesPane: View {
                 Text(rendered)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
+                    .padding(20)
             } else {
-                ContentUnavailableView("No AI notes yet",
-                                        systemImage: "sparkles",
-                                        description: Text("Click 'Generate AI notes' to synthesize a structured markdown summary from the transcript."))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(40)
+                ContentUnavailableView {
+                    Label(L10n.t("session.empty.notes.title"), systemImage: "sparkles")
+                } description: {
+                    Text(L10n.t("session.empty.notes.desc"))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(40)
             }
         }
     }
@@ -184,19 +250,33 @@ struct NotesPane: View {
 struct HighlightsPane: View {
     @ObservedObject var vm: SessionDetailViewModel
     var body: some View {
-        List(vm.highlights) { h in
-            HStack {
-                Image(systemName: "star.fill").foregroundStyle(.yellow)
-                Text(formatTs(h.timestampMs))
-                    .font(.caption.monospacedDigit())
-                Text(h.userNote.isEmpty ? "(marked)" : h.userNote)
-            }
-        }
-        .overlay {
+        Group {
             if vm.highlights.isEmpty {
-                ContentUnavailableView("No highlights",
-                                        systemImage: "star",
-                                        description: Text("Press ⌘⇧M during a live session or use the menubar button to mark a moment."))
+                ContentUnavailableView {
+                    Label(L10n.t("session.empty.highlights.title"), systemImage: "star")
+                } description: {
+                    Text(L10n.t("session.empty.highlights.desc"))
+                }
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(vm.highlights) { h in
+                            HStack(spacing: 10) {
+                                Image(systemName: "star.fill")
+                                    .foregroundStyle(Theme.accent)
+                                Text(formatTs(h.timestampMs))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                Text(h.userNote.isEmpty ? "—" : h.userNote)
+                                    .font(.body)
+                                Spacer()
+                            }
+                            .padding(10)
+                            .cardBackground()
+                        }
+                    }
+                    .padding(14)
+                }
             }
         }
     }

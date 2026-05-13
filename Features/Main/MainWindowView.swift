@@ -26,17 +26,20 @@ struct MainWindowView: View {
                                 Task { await vm.importFile(url: url, courseId: selectedCourseId) }
                             },
                             onDelete: { vm.deleteSession(id: $0) })
-                .navigationSplitViewColumnWidth(min: 280, ideal: 340)
+                .navigationSplitViewColumnWidth(min: 300, ideal: 360)
         } detail: {
-            if showingSearchResults {
-                SearchResultsView(query: searchText)
-            } else if let sid = selectedSessionId {
-                SessionDetailView(sessionId: sid)
-            } else {
-                EmptyStateView(message: "Select a session or create a new one to start.")
+            Group {
+                if showingSearchResults {
+                    SearchResultsView(query: searchText)
+                } else if let sid = selectedSessionId {
+                    SessionDetailView(sessionId: sid)
+                } else {
+                    MainEmptyStateView()
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .searchable(text: $searchText, prompt: "Search transcripts (FTS)…")
+        .searchable(text: $searchText, prompt: Text(L10n.t("main.search.prompt")))
         .onSubmit(of: .search) {
             showingSearchResults = !searchText.trimmingCharacters(in: .whitespaces).isEmpty
         }
@@ -49,67 +52,71 @@ struct MainWindowView: View {
                     Button(role: .destructive) {
                         appState.stopRecording()
                     } label: {
-                        Label("Stop", systemImage: "stop.circle.fill")
+                        Label(L10n.t("toolbar.stop"), systemImage: "stop.circle.fill")
                     }
+                    .tint(Theme.recording)
                 } else {
                     Menu {
                         Button {
                             Task { await vm.startSession(courseId: selectedCourseId, source: .microphone) }
                         } label: {
-                            Label("Microphone only", systemImage: "mic.fill")
+                            Label(L10n.t("toolbar.record.menu.mic"), systemImage: "mic.fill")
                         }
                         Button {
                             Task { await vm.startSession(courseId: selectedCourseId, source: .system) }
                         } label: {
-                            Label("System audio (Zoom / YouTube)", systemImage: "speaker.wave.3.fill")
+                            Label(L10n.t("toolbar.record.menu.system"), systemImage: "speaker.wave.3.fill")
                         }
                         Button {
                             Task { await vm.startSession(courseId: selectedCourseId, source: .mixed) }
                         } label: {
-                            Label("Both (mic + system)", systemImage: "person.wave.2.fill")
+                            Label(L10n.t("toolbar.record.menu.mixed"), systemImage: "person.wave.2.fill")
                         }
                     } label: {
-                        Label("Record", systemImage: "record.circle")
+                        Label(L10n.t("toolbar.record"), systemImage: "record.circle")
                     } primaryAction: {
                         Task { await vm.startSession(courseId: selectedCourseId, source: .microphone) }
                     }
                     .disabled(appState.apiConfig.apiKey.isEmpty && appState.sttBackend == .openAICompatible)
-                    .help(appState.apiConfig.apiKey.isEmpty ? "Configure API key in Settings first" : "Click to mic-record. ▽ for other sources.")
+                    .help(appState.apiConfig.apiKey.isEmpty
+                          ? L10n.t("toolbar.help.configureKey")
+                          : L10n.t("toolbar.help.recordHint"))
                 }
 
                 Button {
                     NotificationCenter.default.post(name: .toggleOverlay, object: nil)
                 } label: {
-                    Label("Overlay", systemImage: "rectangle.on.rectangle")
+                    Label(L10n.t("toolbar.overlay"), systemImage: "rectangle.on.rectangle")
                 }
-                .help("Toggle floating translation overlay (always-on-top)")
+                .help(L10n.t("toolbar.overlay.help"))
             }
         }
-        .task {
-            await vm.refresh()
-        }
+        .task { await vm.refresh() }
         .onChange(of: appState.isRecording) { _, _ in
             Task { await vm.refresh() }
         }
     }
 }
 
-struct EmptyStateView: View {
-    let message: String
+struct MainEmptyStateView: View {
     var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "waveform.badge.mic")
-                .font(.system(size: 60))
-                .foregroundStyle(.tertiary)
-            Text(message)
-                .font(.title3)
+        VStack(spacing: 18) {
+            ZStack {
+                Circle().fill(Theme.accentSoft).frame(width: 120, height: 120)
+                Image(systemName: "waveform.badge.mic")
+                    .font(.system(size: 52, weight: .medium))
+                    .foregroundStyle(Theme.accent)
+            }
+            Text(L10n.t("main.empty.title"))
+                .font(.system(size: 22, weight: .semibold, design: .rounded))
+            Text(L10n.t("main.empty.description"))
+                .font(.callout)
                 .foregroundStyle(.secondary)
-            Text("⌘N starts a new session · ⌘⇧N adds a course · ⌘⇧R toggles recording globally")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 80)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
     }
 }
 
@@ -119,7 +126,11 @@ final class MainWindowViewModel: ObservableObject {
     @Published private var sessionsByCourse: [String?: [Session]] = [:]
 
     func sessions(for courseId: String?) -> [Session] {
-        sessionsByCourse[courseId] ?? []
+        if courseId == nil {
+            // "All sessions" entry: flatten everything.
+            return sessionsByCourse.values.flatMap { $0 }.sorted { $0.startedAt > $1.startedAt }
+        }
+        return sessionsByCourse[courseId] ?? []
     }
 
     func refresh() async {

@@ -12,20 +12,30 @@ struct CourseListView: View {
     var body: some View {
         List(selection: $selection) {
             Section {
-                Label("All sessions", systemImage: "tray.full")
-                    .tag(String?.none as String?)
+                Label {
+                    Text(L10n.t("main.allSessions")).font(.body)
+                } icon: {
+                    Image(systemName: "tray.full")
+                        .foregroundStyle(Theme.accent)
+                }
+                .tag(String?.none as String?)
             }
-            Section("Courses") {
+            Section(L10n.t("main.courses")) {
                 ForEach(courses) { course in
-                    Label(course.name, systemImage: "book.closed")
-                        .tag(String?.some(course.id))
-                        .contextMenu {
-                            Button(role: .destructive) {
-                                onDelete(course.id)
-                            } label: {
-                                Label("Delete course", systemImage: "trash")
-                            }
+                    Label {
+                        Text(course.name).font(.body)
+                    } icon: {
+                        Image(systemName: "book.closed.fill")
+                            .foregroundStyle(Theme.accent)
+                    }
+                    .tag(String?.some(course.id))
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            onDelete(course.id)
+                        } label: {
+                            Label(L10n.t("main.deleteCourse"), systemImage: "trash")
                         }
+                    }
                 }
             }
         }
@@ -35,29 +45,40 @@ struct CourseListView: View {
                 Button {
                     presentNew = true
                 } label: {
-                    Label("New Course", systemImage: "plus")
+                    Label(L10n.t("main.newCourse"), systemImage: "plus.circle.fill")
+                        .foregroundStyle(Theme.accent)
                 }
+                .help(L10n.t("main.newCourse"))
             }
         }
         .sheet(isPresented: $presentNew) {
-            VStack(spacing: 12) {
-                Text("New Course")
-                    .font(.title3)
-                TextField("Course name (e.g. CS 6.001 SICP)", text: $newName)
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Image(systemName: "book.closed.fill")
+                        .font(.title)
+                        .foregroundStyle(Theme.accent)
+                    Text(L10n.t("main.newCourse"))
+                        .font(.title2.weight(.semibold))
+                }
+                TextField(L10n.t("main.newCourse.prompt"), text: $newName)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 320)
+                    .controlSize(.large)
                     .onSubmit { commit() }
                 HStack {
-                    Button("Cancel", role: .cancel) {
+                    Spacer()
+                    Button(L10n.t("common.cancel"), role: .cancel) {
                         presentNew = false
                         newName = ""
                     }
-                    Button("Create") { commit() }
+                    Button(L10n.t("common.create")) { commit() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.accent)
                         .keyboardShortcut(.return)
                         .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
             .padding(20)
+            .frame(width: 360)
         }
     }
 
