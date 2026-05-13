@@ -162,35 +162,57 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
         return joined.isEmpty ? nil : joined
     }
 
-    func transcribeFile(url: URL, language: String?) async throws -> [TranscriptEvent] {
-        // Convert to 16kHz mono WAV first
-        let pcm = try await AudioConverter.convertToPCM16Mono16k(inputURL: url)
-        // Slice into 30s chunks with verbose_json to get timestamps
-        var events: [TranscriptEvent] = []
-        let bytesPerSecond = 16000 * 2
-        let sliceSec = 30
-        let sliceBytes = bytesPerSecond * sliceSec
-        var offset = 0
-        var baseMs: Int64 = 0
-        while offset < pcm.count {
-            let end = min(offset + sliceBytes, pcm.count)
-            let slice = pcm[offset..<end]
-            let wav = WavEncoder.encode(pcm16: Data(slice), sampleRate: 16000, channels: 1)
-            let segments = try await Self.postTranscriptionVerbose(wav: wav,
-                                                                    config: config,
-                                                                    language: language)
-            for seg in segments {
-                events.append(TranscriptEvent(
-                    startMs: baseMs + Int64(seg.start * 1000),
-                    endMs: baseMs + Int64(seg.end * 1000),
-                    text: seg.text,
-                    isFinal: true))
+    func transcribeFile(url: URL,
+                        language: String?) -> AsyncThrowingStream<FileTranscriptionEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let pcm = try await AudioConverter.convertToPCM16Mono16k(inputURL: url)
+                    let bytesPerSecond = 16000 * 2
+                    let sliceSec = 30
+                    let sliceBytes = bytesPerSecond * sliceSec
+                    let total = max(1, (pcm.count + sliceBytes - 1) / sliceBytes)
+                    continuation.yield(.progress(completed: 0, total: total))
+
+                    var offset = 0
+                    var baseMs: Int64 = 0
+                    var completed = 0
+                    var promptCarry: String = ""
+                    while offset < pcm.count {
+                        try Task.checkCancellation()
+                        let end = min(offset + sliceBytes, pcm.count)
+                        let slice = pcm[offset..<end]
+                        let wav = WavEncoder.encode(pcm16: Data(slice), sampleRate: 16000, channels: 1)
+                        let segments = try await Self.postTranscriptionVerbose(
+                            wav: wav,
+                            config: config,
+                            language: language,
+                            prompt: promptCarry.isEmpty ? nil : promptCarry)
+                        for seg in segments {
+                            let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard Self.shouldEmit(text, minChars: minEmitChars) else { continue }
+                            let event = TranscriptEvent(
+                                startMs: baseMs + Int64(seg.start * 1000),
+                                endMs: baseMs + Int64(seg.end * 1000),
+                                text: text,
+                                isFinal: true)
+                            continuation.yield(.segment(event))
+                            promptCarry = String((promptCarry + " " + text).suffix(240))
+                                .trimmingCharacters(in: .whitespaces)
+                        }
+                        let ms = Int64(Double(end - offset) / Double(bytesPerSecond) * 1000)
+                        baseMs += ms
+                        offset = end
+                        completed += 1
+                        continuation.yield(.progress(completed: completed, total: total))
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
             }
-            let ms = Int64(Double(end - offset) / Double(bytesPerSecond) * 1000)
-            baseMs += ms
-            offset = end
+            continuation.onTermination = { _ in task.cancel() }
         }
-        return events
     }
 
     // MARK: - HTTP

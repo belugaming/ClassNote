@@ -16,6 +16,11 @@ private struct InnerView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if orchestrator.isImporting {
+                ImportProgressBar(completed: orchestrator.importCompleted,
+                                  total: orchestrator.importTotal,
+                                  fraction: orchestrator.importProgress)
+            }
             Divider().opacity(0.4)
             LiveSubtitleView(buffer: orchestrator.transcript)
         }
@@ -34,14 +39,14 @@ private struct InnerView: View {
                     .font(.title2.weight(.semibold))
                 HStack(spacing: 8) {
                     Circle()
-                        .fill(appState.isRecording ? Theme.recording : Color.secondary)
+                        .fill(statusDotColor)
                         .frame(width: 8, height: 8)
-                        .opacity(appState.isRecording ? 1 : 0.5)
-                        .scaleEffect(appState.isRecording ? 1.0 : 0.85)
-                        .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: appState.isRecording)
-                    Text(appState.isRecording ? L10n.t("live.statusLive") : L10n.t("live.statusIdle"))
+                        .opacity(isActive ? 1 : 0.5)
+                        .scaleEffect(isActive ? 1.0 : 0.85)
+                        .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: isActive)
+                    Text(statusLabel)
                         .font(.caption.weight(.medium))
-                        .foregroundStyle(appState.isRecording ? Theme.recording : .secondary)
+                        .foregroundStyle(statusDotColor)
                     Text("·")
                     Text(formatDuration(appState.orchestrator.currentTimestampMs))
                         .monospacedDigit()
@@ -56,6 +61,22 @@ private struct InnerView: View {
             LiveControlsView()
         }
         .padding(16)
+    }
+
+    private var isActive: Bool {
+        appState.isRecording || orchestrator.isImporting
+    }
+
+    private var statusDotColor: Color {
+        if orchestrator.isImporting { return Theme.accent }
+        if appState.isRecording { return Theme.recording }
+        return .secondary
+    }
+
+    private var statusLabel: String {
+        if orchestrator.isImporting { return L10n.t("live.statusImporting") }
+        if appState.isRecording { return L10n.t("live.statusLive") }
+        return L10n.t("live.statusIdle")
     }
 
     private var sourceLabel: String {
@@ -74,5 +95,36 @@ private struct InnerView: View {
         let sec = s % 60
         if h > 0 { return String(format: "%d:%02d:%02d", h, m, sec) }
         return String(format: "%02d:%02d", m, sec)
+    }
+}
+
+private struct ImportProgressBar: View {
+    let completed: Int
+    let total: Int
+    let fraction: Double?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                ProgressView(value: fraction ?? 0)
+                    .progressViewStyle(.linear)
+                    .tint(Theme.accent)
+                Text(counterText)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 60, alignment: .trailing)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(Theme.accentSoft.opacity(0.4))
+    }
+
+    private var counterText: String {
+        if total <= 0 { return L10n.t("live.import.preparing") }
+        if let f = fraction {
+            return "\(completed)/\(total) · \(Int(f * 100))%"
+        }
+        return "\(completed)/\(total)"
     }
 }

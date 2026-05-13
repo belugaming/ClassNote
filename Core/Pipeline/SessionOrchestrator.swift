@@ -8,11 +8,20 @@ final class SessionOrchestrator: ObservableObject {
     @Published private(set) var currentSession: Session? = nil
     @Published private(set) var statusText: String = "Idle"
     @Published private(set) var currentTimestampMs: Int64 = 0
+    @Published private(set) var isImporting: Bool = false
+    @Published private(set) var importCompleted: Int = 0
+    @Published private(set) var importTotal: Int = 0
     @Published var source: AudioSourceKind = .microphone
     @Published var transcript = TranscriptBuffer()
 
+    var importProgress: Double? {
+        guard isImporting, importTotal > 0 else { return nil }
+        return Double(importCompleted) / Double(importTotal)
+    }
+
     private var audioManager: AudioSourceManager?
     private var sttTask: Task<Void, Never>?
+    private var importTask: Task<Void, Never>?
     private var translateTasks: [Int64: Task<Void, Never>] = [:]
     private var tickerTask: Task<Void, Never>?
 
@@ -70,48 +79,66 @@ final class SessionOrchestrator: ObservableObject {
         try await SessionRepository.shared.insert(sess)
         self.currentSession = sess
         self.currentSessionId = sess.id
+        self.source = .file
         self.statusText = "Importing \(url.lastPathComponent)"
         self.transcript.reset()
+        self.currentTimestampMs = 0
+        self.isImporting = true
+        self.importCompleted = 0
+        self.importTotal = 0
 
-        let manager = AudioSourceManager()
-        self.audioManager = manager
-
-        // For file import we do a one-shot transcribe using verbose_json to keep timestamps accurate.
         let stt = EngineFactory.makeSTT(config: config, backend: .openAICompatible)
         let translator = EngineFactory.makeTranslator(config: config)
+        let sessionId = sess.id
 
-        Task { @MainActor in
+        importTask?.cancel()
+        importTask = Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            var lastEndMs: Int64 = 0
             do {
-                let events = try await stt.transcribeFile(url: url, language: config.sourceLanguage)
-                for event in events {
-                    let seg = Segment(id: nil,
-                                       sessionId: sess.id,
-                                       startMs: event.startMs,
-                                       endMs: event.endMs,
-                                       speakerId: nil,
-                                       textOriginal: event.text,
-                                       textTranslated: "",
-                                       isFinal: true,
-                                       confidence: 0,
-                                       version: 1)
-                    let rowId = try await SegmentRepository.shared.insert(seg)
-                    transcript.appendFinal(rowId: rowId, startMs: event.startMs, endMs: event.endMs, original: event.text)
-
-                    if AppState.shared.translationEnabled {
-                        translate(rowId: rowId, text: event.text,
-                                  translator: translator, config: config)
+                let stream = stt.transcribeFile(url: url, language: config.sourceLanguage)
+                for try await ev in stream {
+                    switch ev {
+                    case .progress(let completed, let total):
+                        self.importCompleted = completed
+                        self.importTotal = total
+                    case .segment(let event):
+                        let seg = Segment(id: nil,
+                                           sessionId: sessionId,
+                                           startMs: event.startMs,
+                                           endMs: event.endMs,
+                                           speakerId: nil,
+                                           textOriginal: event.text,
+                                           textTranslated: "",
+                                           isFinal: true,
+                                           confidence: 0,
+                                           version: 1)
+                        let rowId = try await SegmentRepository.shared.insert(seg)
+                        self.transcript.appendFinal(rowId: rowId,
+                                                    startMs: event.startMs,
+                                                    endMs: event.endMs,
+                                                    original: event.text)
+                        self.currentTimestampMs = event.endMs
+                        lastEndMs = max(lastEndMs, event.endMs)
+                        if AppState.shared.translationEnabled {
+                            self.translate(rowId: rowId, text: event.text,
+                                           translator: translator, config: config)
+                        }
                     }
                 }
-                try await SessionRepository.shared.setEnded(sess.id,
+                try await SessionRepository.shared.setEnded(sessionId,
                                                              endedAt: Int64(Date().timeIntervalSince1970 * 1000),
-                                                             durationMs: events.last?.endMs ?? 0,
+                                                             durationMs: lastEndMs,
                                                              audioPath: url.path)
-                statusText = "Import finished"
+                self.statusText = "Import finished"
+            } catch is CancellationError {
+                self.statusText = "Import cancelled"
             } catch {
                 NSLog("[ClassNote] ingestFile failed: \(error)")
-                statusText = "Import failed: \(error.localizedDescription)"
+                self.statusText = "Import failed: \(error.localizedDescription)"
                 AppState.shared.setError(error.localizedDescription)
             }
+            self.isImporting = false
         }
         return sess.id
     }
@@ -119,6 +146,8 @@ final class SessionOrchestrator: ObservableObject {
     func stop() async {
         sttTask?.cancel()
         sttTask = nil
+        importTask?.cancel()
+        importTask = nil
         tickerTask?.cancel()
         tickerTask = nil
         for (_, t) in translateTasks { t.cancel() }
@@ -135,6 +164,7 @@ final class SessionOrchestrator: ObservableObject {
                                                           durationMs: finalMs,
                                                           audioPath: audioPath)
         }
+        isImporting = false
         statusText = "Stopped"
     }
 

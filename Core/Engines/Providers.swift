@@ -24,6 +24,14 @@ struct TranscriptEvent: Sendable, Identifiable, Hashable {
     }
 }
 
+/// Events emitted during file import. `progress` updates fire on every slice
+/// boundary (including before the first slice, with completed=0) so the UI can
+/// draw a determinate progress bar without polling.
+enum FileTranscriptionEvent: Sendable {
+    case progress(completed: Int, total: Int)
+    case segment(TranscriptEvent)
+}
+
 protocol STTProvider: Sendable {
     /// Streams transcript events. The caller is expected to feed audio chunks into the provider.
     /// For cloud chunked providers this will internally batch audio and call REST; for WhisperKit
@@ -31,8 +39,11 @@ protocol STTProvider: Sendable {
     func transcribe(audio: AsyncStream<AudioChunk>,
                     language: String?) -> AsyncThrowingStream<TranscriptEvent, Error>
 
-    /// One-shot transcription for file imports.
-    func transcribeFile(url: URL, language: String?) async throws -> [TranscriptEvent]
+    /// Streaming transcription for file imports. Emits a `.progress` after each
+    /// slice and a `.segment` per Whisper segment within that slice, so the UI
+    /// can show incremental subtitles and a determinate progress bar.
+    func transcribeFile(url: URL,
+                        language: String?) -> AsyncThrowingStream<FileTranscriptionEvent, Error>
 }
 
 protocol TranslationProvider: Sendable {

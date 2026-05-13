@@ -2,6 +2,7 @@ import SwiftUI
 
 struct LiveControlsView: View {
     @EnvironmentObject var appState: AppState
+    @ObservedObject private var orchestrator = AppState.shared.orchestrator
 
     var body: some View {
         HStack(spacing: 10) {
@@ -11,14 +12,24 @@ struct LiveControlsView: View {
             .toggleStyle(.button)
             .tint(Theme.accent)
 
-            Button {
-                appState.markHighlight()
-            } label: {
-                Label(L10n.t("live.highlight"), systemImage: "star.circle")
+            if !orchestrator.isImporting {
+                Button {
+                    appState.markHighlight()
+                } label: {
+                    Label(L10n.t("live.highlight"), systemImage: "star.circle")
+                }
+                .disabled(!appState.isRecording)
             }
-            .disabled(!appState.isRecording)
 
-            if appState.isRecording {
+            if orchestrator.isImporting {
+                Button(role: .destructive) {
+                    Task { await appState.orchestrator.stop() }
+                } label: {
+                    Label(L10n.t("live.import.cancel"), systemImage: "xmark.circle.fill")
+                }
+                .tint(Theme.recording)
+                .buttonStyle(.borderedProminent)
+            } else if appState.isRecording {
                 Button(role: .destructive) {
                     appState.stopRecording()
                 } label: {
