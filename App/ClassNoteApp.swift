@@ -80,11 +80,6 @@ private struct LiveSessionOpener: View {
             .onReceive(NotificationCenter.default.publisher(for: .openLiveSession)) { note in
                 if let sid = note.object as? String {
                     openWindow(id: "live-session", value: sid)
-                    // Also open the floating overlay if not already open.
-                    if !overlayOpen {
-                        openWindow(id: "overlay")
-                        overlayOpen = true
-                    }
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .toggleOverlay)) { _ in

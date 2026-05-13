@@ -183,6 +183,46 @@ actor HighlightRepository {
                 .fetchAll(db)
         }
     }
+
+    func updateExplanation(id: Int64,
+                           rangeStartMs: Int64,
+                           rangeEndMs: Int64,
+                           promptKey: String,
+                           model: String,
+                           markdown: String,
+                           generatedAt: Int64) async throws {
+        try await Database.shared.dbPool.write { db in
+            try db.execute(sql: """
+                UPDATE highlight
+                SET range_start_ms=?, range_end_ms=?,
+                    explanation_md=?, explanation_prompt=?, explanation_model=?,
+                    explanation_generated_at=?
+                WHERE id=?
+                """,
+                arguments: [rangeStartMs, rangeEndMs,
+                            markdown, promptKey, model,
+                            generatedAt, id])
+        }
+    }
+
+    func updateRange(id: Int64, rangeStartMs: Int64, rangeEndMs: Int64) async throws {
+        try await Database.shared.dbPool.write { db in
+            try db.execute(sql: "UPDATE highlight SET range_start_ms=?, range_end_ms=? WHERE id=?",
+                           arguments: [rangeStartMs, rangeEndMs, id])
+        }
+    }
+
+    func clearExplanation(id: Int64) async throws {
+        try await Database.shared.dbPool.write { db in
+            try db.execute(sql: """
+                UPDATE highlight
+                SET range_start_ms=NULL, range_end_ms=NULL,
+                    explanation_md=NULL, explanation_prompt=NULL, explanation_model=NULL,
+                    explanation_generated_at=NULL
+                WHERE id=?
+                """, arguments: [id])
+        }
+    }
 }
 
 actor NoteRepository {

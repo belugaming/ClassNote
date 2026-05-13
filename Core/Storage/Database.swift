@@ -120,6 +120,17 @@ final class Database {
             try db.execute(sql: "INSERT OR IGNORE INTO api_config(id) VALUES (1);")
         }
 
+        migrator.registerMigration("v2_highlight_explanation") { db in
+            try db.alter(table: "highlight") { t in
+                t.add(column: "range_start_ms", .integer)
+                t.add(column: "range_end_ms", .integer)
+                t.add(column: "explanation_md", .text)
+                t.add(column: "explanation_prompt", .text)
+                t.add(column: "explanation_model", .text)
+                t.add(column: "explanation_generated_at", .integer)
+            }
+        }
+
         return migrator
     }
 }

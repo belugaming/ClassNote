@@ -30,7 +30,6 @@ struct OverlayView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(Color.white.opacity(0.15), lineWidth: 1)
         )
-        .padding(6)
         .background(
             WindowAccessor { win in
                 win.level = .floating

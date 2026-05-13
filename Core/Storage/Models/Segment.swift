@@ -37,6 +37,14 @@ struct Highlight: Codable, FetchableRecord, MutablePersistableRecord, Identifiab
     var timestampMs: Int64
     var userNote: String
     var createdAt: Int64
+    var rangeStartMs: Int64?
+    var rangeEndMs: Int64?
+    var explanationMd: String?
+    var explanationPrompt: String?
+    var explanationModel: String?
+    var explanationGeneratedAt: Int64?
+
+    static let defaultRangeRadius = 2
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -44,6 +52,12 @@ struct Highlight: Codable, FetchableRecord, MutablePersistableRecord, Identifiab
         case timestampMs = "timestamp_ms"
         case userNote = "user_note"
         case createdAt = "created_at"
+        case rangeStartMs = "range_start_ms"
+        case rangeEndMs = "range_end_ms"
+        case explanationMd = "explanation_md"
+        case explanationPrompt = "explanation_prompt"
+        case explanationModel = "explanation_model"
+        case explanationGeneratedAt = "explanation_generated_at"
     }
 
     static let databaseTableName = "highlight"

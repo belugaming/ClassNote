@@ -3,8 +3,11 @@ import AVFoundation
 
 /// OpenAI-compatible chunked STT. Implements /v1/audio/transcriptions.
 ///
-/// Streaming strategy: instead of naive 3s hard cuts, we commit audio on silence
-/// boundaries so sentences stay intact:
+/// Streaming strategy: commit audio on silence boundaries, then let Whisper do
+/// its own sentence-level segmentation inside each committed chunk via
+/// `response_format=verbose_json`. We emit one TranscriptEvent per Whisper
+/// segment rather than per HTTP call, so a 10-second chunk with 3 sentences
+/// becomes 3 live-subtitle lines instead of one blob.
 ///   - minVoicedSec  : keep buffering voiced audio up to this duration
 ///   - silenceHoldSec: once past `minVoicedSec`, commit after this much trailing silence
 ///   - maxChunkSec   : hard upper bound so we never hold audio forever
@@ -12,9 +15,9 @@ import AVFoundation
 final class OpenAICompatibleSTT: STTProvider, Sendable {
     private let config: ApiConfig
     private let targetSampleRate: Int = 16000
-    private let minVoicedSec: Double = 6.0
-    private let silenceHoldSec: Double = 0.7
-    private let maxChunkSec: Double = 20.0
+    private let minVoicedSec: Double = 3.0
+    private let silenceHoldSec: Double = 0.5
+    private let maxChunkSec: Double = 12.0
     private let rmsThreshold: Double = 0.01
     private let minEmitChars: Int = 3
 
@@ -41,27 +44,49 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
                     func flush() async throws {
                         guard !buffer.isEmpty else { return }
                         let wav = WavEncoder.encode(pcm16: buffer, sampleRate: self.targetSampleRate, channels: 1)
-                        let (raw, _) = try await Self.postTranscription(
-                            wav: wav,
-                            config: self.config,
-                            language: language,
-                            prompt: promptCarry.isEmpty ? nil : promptCarry
-                        )
-                        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                        // Reset counters regardless of outcome.
                         let startMs = bufferStartMs
                         let endMs = bufferEndMs
                         buffer.removeAll(keepingCapacity: true)
                         voicedBytes = 0
                         silentTrailBytes = 0
 
-                        if Self.shouldEmit(text, minChars: self.minEmitChars) {
-                            continuation.yield(TranscriptEvent(startMs: startMs,
-                                                                endMs: endMs,
+                        let segments = try await Self.postTranscriptionVerbose(
+                            wav: wav,
+                            config: self.config,
+                            language: language,
+                            prompt: promptCarry.isEmpty ? nil : promptCarry
+                        )
+
+                        // Emit each Whisper segment as its own event so the UI
+                        // gets sentence-level granularity without us guessing
+                        // where the boundaries are.
+                        var emittedAny = false
+                        for seg in segments {
+                            let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard Self.shouldEmit(text, minChars: self.minEmitChars) else { continue }
+                            let segStart = startMs + Int64(seg.start * 1000)
+                            let segEnd = min(endMs, startMs + Int64(seg.end * 1000))
+                            continuation.yield(TranscriptEvent(startMs: segStart,
+                                                                endMs: segEnd,
                                                                 text: text,
                                                                 isFinal: true))
-                            // Carry recent context (last ~200 chars) as the next prompt for continuity.
-                            promptCarry = String((promptCarry + " " + text).suffix(240)).trimmingCharacters(in: .whitespaces)
+                            promptCarry = String((promptCarry + " " + text).suffix(240))
+                                .trimmingCharacters(in: .whitespaces)
+                            emittedAny = true
+                        }
+                        // Fallback: if verbose_json returned no segments (rare —
+                        // some providers only fill `text`), try to emit the
+                        // concatenated text as a single event.
+                        if !emittedAny, let joined = Self.joinedText(segments) {
+                            let t = joined.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if Self.shouldEmit(t, minChars: self.minEmitChars) {
+                                continuation.yield(TranscriptEvent(startMs: startMs,
+                                                                    endMs: endMs,
+                                                                    text: t,
+                                                                    isFinal: true))
+                                promptCarry = String((promptCarry + " " + t).suffix(240))
+                                    .trimmingCharacters(in: .whitespaces)
+                            }
                         }
                     }
 
@@ -128,6 +153,15 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
         return true
     }
 
+    /// Fallback used when `segments` comes back empty but the API still
+    /// returned something useful in `text`. We stash the full-text on each
+    /// VerboseSegment when only one synthetic segment is produced.
+    static func joinedText(_ segments: [VerboseSegment]) -> String? {
+        let joined = segments.map { $0.text }.joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return joined.isEmpty ? nil : joined
+    }
+
     func transcribeFile(url: URL, language: String?) async throws -> [TranscriptEvent] {
         // Convert to 16kHz mono WAV first
         let pcm = try await AudioConverter.convertToPCM16Mono16k(inputURL: url)
@@ -162,14 +196,17 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
     // MARK: - HTTP
 
     struct VerboseSegment: Decodable {
-        let id: Int
+        let id: Int?
         let start: Double
         let end: Double
         let text: String
     }
 
     struct VerboseResponse: Decodable {
-        let text: String
+        // Many OpenAI-compatible providers diverge here: some omit `text` and
+        // only return `segments`; others omit `segments` and only return
+        // `text`. Make both optional and let the caller reconcile.
+        let text: String?
         let segments: [VerboseSegment]?
     }
 
@@ -195,9 +232,25 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
             throw EngineError.httpError(status: resp.statusCode,
                                         body: String(data: data, encoding: .utf8) ?? "")
         }
-        let obj = try JSONDecoder().decode(VerboseResponse.self, from: data)
-        if let segs = obj.segments { return segs }
-        return [VerboseSegment(id: 0, start: 0, end: 0, text: obj.text)]
+        // Try verbose first.
+        if let obj = try? JSONDecoder().decode(VerboseResponse.self, from: data) {
+            if let segs = obj.segments, !segs.isEmpty {
+                return segs
+            }
+            if let text = obj.text, !text.isEmpty {
+                return [VerboseSegment(id: 0, start: 0, end: 0, text: text)]
+            }
+        }
+        // Fallback: provider may have ignored verbose_json and returned the
+        // plain `{"text": ...}` shape.
+        if let simple = try? JSONDecoder().decode(SimpleResponse.self, from: data),
+           !simple.text.isEmpty {
+            return [VerboseSegment(id: 0, start: 0, end: 0, text: simple.text)]
+        }
+        // Last resort: treat the response body as raw text.
+        let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if raw.isEmpty { return [] }
+        return [VerboseSegment(id: 0, start: 0, end: 0, text: raw)]
     }
 
     static func postMultipart(wav: Data, config: ApiConfig, language: String?, verbose: Bool, prompt: String? = nil) async throws -> (HTTPURLResponse, Data) {
