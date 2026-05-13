@@ -115,6 +115,69 @@ final class OpenAIHTTPIntegrationTests: XCTestCase {
         for try await chunk in stream { collected += chunk }
         XCTAssertEqual(collected, "你好")
     }
+
+    func testStreamingSTTBuffersUntilSilence() async throws {
+        // The new STT commits on silence boundaries. If we feed 7s of loud audio
+        // followed by 1s of silence, we expect exactly one transcription call.
+        let requests = RequestCounter()
+        await server.setHandler { requestLine, _ in
+            await requests.bump()
+            if requestLine.contains("/audio/transcriptions") {
+                return MockHTTPResponse(status: 200,
+                                        headers: ["Content-Type": "application/json"],
+                                        body: #"{"text":"This is a full sentence from the lecture."}"#)
+            }
+            return MockHTTPResponse(status: 404, headers: [:], body: "")
+        }
+
+        var config = ApiConfig.default
+        config.baseUrl = "http://127.0.0.1:\(port)/v1"
+        config.apiKey = "test-key"
+        let stt = OpenAICompatibleSTT(config: config)
+
+        // Build synthetic audio: 7s voiced tone + 1.2s silence.
+        let stream = AsyncStream<AudioChunk> { continuation in
+            Task {
+                let sr = 16000
+                let chunkMs = 200
+                let samplesPerChunk = sr * chunkMs / 1000
+                var ts: Int64 = 0
+                // Voiced portion: 35 chunks × 200ms = 7s
+                for i in 0..<35 {
+                    var data = Data(capacity: samplesPerChunk * 2)
+                    for j in 0..<samplesPerChunk {
+                        let t = Double(i * samplesPerChunk + j) / Double(sr)
+                        let s = Int16(sin(2 * .pi * 440 * t) * 0.7 * 32767.0)
+                        withUnsafeBytes(of: s.littleEndian) { data.append(contentsOf: $0) }
+                    }
+                    continuation.yield(AudioChunk(pcmData: data, sampleRate: sr, timestamp: ts))
+                    ts += Int64(chunkMs)
+                }
+                // Silent portion: 6 chunks × 200ms = 1.2s, should trigger commit
+                for _ in 0..<6 {
+                    let data = Data(repeating: 0, count: samplesPerChunk * 2)
+                    continuation.yield(AudioChunk(pcmData: data, sampleRate: sr, timestamp: ts))
+                    ts += Int64(chunkMs)
+                }
+                continuation.finish()
+            }
+        }
+
+        var events: [TranscriptEvent] = []
+        for try await evt in stt.transcribe(audio: stream, language: "en") {
+            events.append(evt)
+        }
+        XCTAssertGreaterThanOrEqual(events.count, 1, "Expected at least one transcription event")
+        XCTAssertLessThanOrEqual(events.count, 2, "Expected at most 2 events (single sentence + maybe tail flush)")
+        XCTAssertTrue(events[0].text.contains("lecture"))
+        let calls = await requests.count
+        XCTAssertLessThanOrEqual(calls, 2)
+    }
+}
+
+actor RequestCounter {
+    private(set) var count = 0
+    func bump() { count += 1 }
 }
 
 // MARK: - Tiny mock HTTP server

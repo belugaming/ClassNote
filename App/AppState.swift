@@ -34,12 +34,25 @@ final class AppState: ObservableObject {
         self.apiConfig = cfg
     }
 
-    func startNewSession() {
+    func startNewSession(source: AudioSourceKind = .microphone) {
         Task { @MainActor in
-            guard let sessionId = try? await orchestrator.startNewSession(courseId: nil) else { return }
+            guard let sessionId = try? await orchestrator.startNewSession(courseId: nil, source: source) else { return }
             self.currentSessionId = sessionId
             self.isRecording = true
             NotificationCenter.default.post(name: .openLiveSession, object: sessionId)
+        }
+    }
+
+    func startNewSession(courseId: String?, source: AudioSourceKind) async -> String? {
+        do {
+            let sessionId = try await orchestrator.startNewSession(courseId: courseId, source: source)
+            self.currentSessionId = sessionId
+            self.isRecording = true
+            NotificationCenter.default.post(name: .openLiveSession, object: sessionId)
+            return sessionId
+        } catch {
+            self.setError(error.localizedDescription)
+            return nil
         }
     }
 
@@ -66,6 +79,7 @@ final class AppState: ObservableObject {
 
 extension Notification.Name {
     static let openLiveSession = Notification.Name("openLiveSession")
+    static let toggleOverlay = Notification.Name("toggleOverlay")
 }
 
 enum SttBackend: String, CaseIterable, Identifiable {

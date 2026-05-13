@@ -33,6 +33,7 @@ struct SessionListView: View {
                 } label: {
                     Label("New Session", systemImage: "mic.circle.fill")
                 }
+                .help("Quick-start a mic session (use the Record menu for other sources)")
                 Button {
                     importing = true
                 } label: {

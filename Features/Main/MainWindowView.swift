@@ -20,7 +20,7 @@ struct MainWindowView: View {
                             selection: $selectedSessionId,
                             sessions: vm.sessions(for: selectedCourseId),
                             onStartSession: {
-                                Task { await vm.startSession(courseId: selectedCourseId) }
+                                Task { await vm.startSession(courseId: selectedCourseId, source: .microphone) }
                             },
                             onImport: { url in
                                 Task { await vm.importFile(url: url, courseId: selectedCourseId) }
@@ -45,14 +45,44 @@ struct MainWindowView: View {
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    Task { await vm.startSession(courseId: selectedCourseId) }
-                } label: {
-                    Label(appState.isRecording ? "Stop" : "Record",
-                          systemImage: appState.isRecording ? "stop.circle.fill" : "record.circle")
+                if appState.isRecording {
+                    Button(role: .destructive) {
+                        appState.stopRecording()
+                    } label: {
+                        Label("Stop", systemImage: "stop.circle.fill")
+                    }
+                } else {
+                    Menu {
+                        Button {
+                            Task { await vm.startSession(courseId: selectedCourseId, source: .microphone) }
+                        } label: {
+                            Label("Microphone only", systemImage: "mic.fill")
+                        }
+                        Button {
+                            Task { await vm.startSession(courseId: selectedCourseId, source: .system) }
+                        } label: {
+                            Label("System audio (Zoom / YouTube)", systemImage: "speaker.wave.3.fill")
+                        }
+                        Button {
+                            Task { await vm.startSession(courseId: selectedCourseId, source: .mixed) }
+                        } label: {
+                            Label("Both (mic + system)", systemImage: "person.wave.2.fill")
+                        }
+                    } label: {
+                        Label("Record", systemImage: "record.circle")
+                    } primaryAction: {
+                        Task { await vm.startSession(courseId: selectedCourseId, source: .microphone) }
+                    }
+                    .disabled(appState.apiConfig.apiKey.isEmpty && appState.sttBackend == .openAICompatible)
+                    .help(appState.apiConfig.apiKey.isEmpty ? "Configure API key in Settings first" : "Click to mic-record. ▽ for other sources.")
                 }
-                .disabled(appState.apiConfig.apiKey.isEmpty && appState.sttBackend == .openAICompatible)
-                .help(appState.apiConfig.apiKey.isEmpty ? "Configure API key in Settings first" : "")
+
+                Button {
+                    NotificationCenter.default.post(name: .toggleOverlay, object: nil)
+                } label: {
+                    Label("Overlay", systemImage: "rectangle.on.rectangle")
+                }
+                .help("Toggle floating translation overlay (always-on-top)")
             }
         }
         .task {
@@ -130,20 +160,14 @@ final class MainWindowViewModel: ObservableObject {
         }
     }
 
-    func startSession(courseId: String?) async {
+    func startSession(courseId: String?, source: AudioSourceKind = .microphone) async {
         let app = AppState.shared
         if app.isRecording {
             app.stopRecording()
-        } else {
-            do {
-                let sid = try await app.orchestrator.startNewSession(courseId: courseId)
-                app.currentSessionId = sid
-                app.isRecording = true
-                await refresh()
-            } catch {
-                app.setError(error.localizedDescription)
-            }
+            return
         }
+        _ = await app.startNewSession(courseId: courseId, source: source)
+        await refresh()
     }
 
     func importFile(url: URL, courseId: String?) async {

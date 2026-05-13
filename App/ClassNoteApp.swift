@@ -38,6 +38,16 @@ struct ClassNoteApp: App {
         .defaultSize(width: 900, height: 600)
         .defaultPosition(.center)
 
+        Window("Overlay", id: "overlay") {
+            OverlayView()
+                .environmentObject(appState)
+                .frame(minWidth: 320, minHeight: 160)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
+        .defaultSize(width: 380, height: 220)
+        .defaultPosition(.topTrailing)
+
         Settings {
             SettingsView()
                 .environmentObject(appState)
@@ -58,6 +68,8 @@ struct ClassNoteApp: App {
 /// the environment's openWindow to pop the live session window.
 private struct LiveSessionOpener: View {
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
+    @State private var overlayOpen = false
 
     var body: some View {
         Color.clear
@@ -65,6 +77,20 @@ private struct LiveSessionOpener: View {
             .onReceive(NotificationCenter.default.publisher(for: .openLiveSession)) { note in
                 if let sid = note.object as? String {
                     openWindow(id: "live-session", value: sid)
+                    // Also open the floating overlay if not already open.
+                    if !overlayOpen {
+                        openWindow(id: "overlay")
+                        overlayOpen = true
+                    }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .toggleOverlay)) { _ in
+                if overlayOpen {
+                    dismissWindow(id: "overlay")
+                    overlayOpen = false
+                } else {
+                    openWindow(id: "overlay")
+                    overlayOpen = true
                 }
             }
     }

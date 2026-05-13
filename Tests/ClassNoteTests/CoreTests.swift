@@ -140,3 +140,26 @@ final class TranscriptBufferTests: XCTestCase {
         XCTAssertEqual(buf.recent(1), ["How are you"])
     }
 }
+
+final class ShouldEmitTests: XCTestCase {
+    func testRejectsEmptyAndJunk() {
+        XCTAssertFalse(OpenAICompatibleSTT.shouldEmit("", minChars: 3))
+        XCTAssertFalse(OpenAICompatibleSTT.shouldEmit("   ", minChars: 3))
+        XCTAssertFalse(OpenAICompatibleSTT.shouldEmit("...", minChars: 3))
+        XCTAssertFalse(OpenAICompatibleSTT.shouldEmit("The.", minChars: 3))
+        XCTAssertFalse(OpenAICompatibleSTT.shouldEmit("you", minChars: 3))
+        XCTAssertFalse(OpenAICompatibleSTT.shouldEmit("Thank you.", minChars: 3))
+        XCTAssertFalse(OpenAICompatibleSTT.shouldEmit("[BLANK_AUDIO]", minChars: 3))
+    }
+
+    func testAcceptsRealSentences() {
+        XCTAssertTrue(OpenAICompatibleSTT.shouldEmit("Welcome to the lecture.", minChars: 3))
+        XCTAssertTrue(OpenAICompatibleSTT.shouldEmit("Today we will cover eigenvectors.", minChars: 3))
+        XCTAssertTrue(OpenAICompatibleSTT.shouldEmit("大家好", minChars: 3))
+    }
+
+    func testRejectsTooFewLetters() {
+        XCTAssertFalse(OpenAICompatibleSTT.shouldEmit("!!", minChars: 3))
+        XCTAssertFalse(OpenAICompatibleSTT.shouldEmit(". . .", minChars: 3))
+    }
+}

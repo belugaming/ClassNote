@@ -2,11 +2,21 @@ import Foundation
 import AVFoundation
 
 /// OpenAI-compatible chunked STT. Implements /v1/audio/transcriptions.
-/// For live streaming, buffers incoming PCM into ~3s WAV chunks and posts each.
+///
+/// Streaming strategy: instead of naive 3s hard cuts, we commit audio on silence
+/// boundaries so sentences stay intact:
+///   - minVoicedSec  : keep buffering voiced audio up to this duration
+///   - silenceHoldSec: once past `minVoicedSec`, commit after this much trailing silence
+///   - maxChunkSec   : hard upper bound so we never hold audio forever
+/// We also pass the previous final text as Whisper's `prompt` to get cleaner continuity.
 final class OpenAICompatibleSTT: STTProvider, Sendable {
     private let config: ApiConfig
-    private let chunkDurationSec: Double = 3.0
     private let targetSampleRate: Int = 16000
+    private let minVoicedSec: Double = 6.0
+    private let silenceHoldSec: Double = 0.7
+    private let maxChunkSec: Double = 20.0
+    private let rmsThreshold: Double = 0.01
+    private let minEmitChars: Int = 3
 
     init(config: ApiConfig) {
         self.config = config
@@ -20,38 +30,74 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
                     var buffer = Data()
                     var bufferStartMs: Int64 = 0
                     var bufferEndMs: Int64 = 0
-                    let chunkBytes = Int(Double(targetSampleRate) * chunkDurationSec) * 2  // Int16 mono
+                    var voicedBytes = 0
+                    var silentTrailBytes = 0
+                    var promptCarry: String = ""
+                    let bytesPerSec = targetSampleRate * 2
+                    let maxBytes = Int(self.maxChunkSec * Double(bytesPerSec))
+                    let minVoicedBytes = Int(self.minVoicedSec * Double(bytesPerSec))
+                    let silenceHoldBytes = Int(self.silenceHoldSec * Double(bytesPerSec))
 
-                    for await chunk in audio {
-                        if buffer.isEmpty { bufferStartMs = chunk.timestamp }
-                        buffer.append(chunk.pcmData)
-                        bufferEndMs = chunk.timestamp + Int64(chunk.pcmData.count / 2 * 1000 / chunk.sampleRate)
-                        if buffer.count >= chunkBytes {
-                            let wav = WavEncoder.encode(pcm16: buffer, sampleRate: targetSampleRate, channels: 1)
-                            let (text, _) = try await Self.postTranscription(wav: wav,
-                                                                              config: self.config,
-                                                                              language: language)
-                            if !text.trimmingCharacters(in: .whitespaces).isEmpty {
-                                continuation.yield(TranscriptEvent(startMs: bufferStartMs,
-                                                                    endMs: bufferEndMs,
-                                                                    text: text,
-                                                                    isFinal: true))
-                            }
-                            buffer.removeAll(keepingCapacity: true)
-                        }
-                    }
-                    // Flush tail
-                    if !buffer.isEmpty {
-                        let wav = WavEncoder.encode(pcm16: buffer, sampleRate: targetSampleRate, channels: 1)
-                        let (text, _) = try await Self.postTranscription(wav: wav,
-                                                                          config: self.config,
-                                                                          language: language)
-                        if !text.trimmingCharacters(in: .whitespaces).isEmpty {
-                            continuation.yield(TranscriptEvent(startMs: bufferStartMs,
-                                                                endMs: bufferEndMs,
+                    func flush() async throws {
+                        guard !buffer.isEmpty else { return }
+                        let wav = WavEncoder.encode(pcm16: buffer, sampleRate: self.targetSampleRate, channels: 1)
+                        let (raw, _) = try await Self.postTranscription(
+                            wav: wav,
+                            config: self.config,
+                            language: language,
+                            prompt: promptCarry.isEmpty ? nil : promptCarry
+                        )
+                        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                        // Reset counters regardless of outcome.
+                        let startMs = bufferStartMs
+                        let endMs = bufferEndMs
+                        buffer.removeAll(keepingCapacity: true)
+                        voicedBytes = 0
+                        silentTrailBytes = 0
+
+                        if Self.shouldEmit(text, minChars: self.minEmitChars) {
+                            continuation.yield(TranscriptEvent(startMs: startMs,
+                                                                endMs: endMs,
                                                                 text: text,
                                                                 isFinal: true))
+                            // Carry recent context (last ~200 chars) as the next prompt for continuity.
+                            promptCarry = String((promptCarry + " " + text).suffix(240)).trimmingCharacters(in: .whitespaces)
                         }
+                    }
+
+                    for await chunk in audio {
+                        let chunkBytes = chunk.pcmData.count
+                        let rms = VADGate.rms(pcm16: chunk.pcmData)
+                        let isVoiced = rms >= self.rmsThreshold
+
+                        if buffer.isEmpty {
+                            bufferStartMs = chunk.timestamp
+                            silentTrailBytes = 0
+                        }
+                        buffer.append(chunk.pcmData)
+                        let chunkDurMs = Int64(Double(chunkBytes) / Double(bytesPerSec) * 1000)
+                        bufferEndMs = chunk.timestamp + chunkDurMs
+
+                        if isVoiced {
+                            voicedBytes += chunkBytes
+                            silentTrailBytes = 0
+                        } else {
+                            silentTrailBytes += chunkBytes
+                        }
+
+                        // Commit conditions (priority order):
+                        // 1. Hard cap: max chunk duration reached.
+                        // 2. Natural: enough voice collected AND we've hit trailing silence.
+                        if buffer.count >= maxBytes {
+                            try await flush()
+                        } else if voicedBytes >= minVoicedBytes && silentTrailBytes >= silenceHoldBytes {
+                            try await flush()
+                        }
+                    }
+
+                    // End of stream: flush whatever is pending.
+                    if !buffer.isEmpty && voicedBytes > bytesPerSec / 2 {
+                        try await flush()
                     }
                     continuation.finish()
                 } catch {
@@ -60,6 +106,26 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// Reject empty / trivially short / obvious hallucination outputs.
+    static func shouldEmit(_ text: String, minChars: Int) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return false }
+        if trimmed.count < minChars { return false }
+        // Common Whisper hallucinations on near-silent audio.
+        let junk: Set<String> = [
+            "The.", "The", "you", "You.", "you.",
+            "Thank you.", "thank you",
+            "...", ". . .",
+            "Subtitles by the Amara.org community",
+            "[BLANK_AUDIO]"
+        ]
+        if junk.contains(trimmed) { return false }
+        // If the whole output is a single word with no spaces or just punctuation noise, reject.
+        let lettersAndDigits = trimmed.unicodeScalars.filter { CharacterSet.letters.union(.decimalDigits).contains($0) }
+        if lettersAndDigits.count < 3 { return false }
+        return true
     }
 
     func transcribeFile(url: URL, language: String?) async throws -> [TranscriptEvent] {
@@ -111,8 +177,8 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
         let text: String
     }
 
-    static func postTranscription(wav: Data, config: ApiConfig, language: String?) async throws -> (String, Data) {
-        let (resp, data) = try await postMultipart(wav: wav, config: config, language: language, verbose: false)
+    static func postTranscription(wav: Data, config: ApiConfig, language: String?, prompt: String? = nil) async throws -> (String, Data) {
+        let (resp, data) = try await postMultipart(wav: wav, config: config, language: language, verbose: false, prompt: prompt)
         if !(200..<300).contains(resp.statusCode) {
             throw EngineError.httpError(status: resp.statusCode,
                                         body: String(data: data, encoding: .utf8) ?? "")
@@ -123,8 +189,8 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
         return (String(data: data, encoding: .utf8) ?? "", data)
     }
 
-    static func postTranscriptionVerbose(wav: Data, config: ApiConfig, language: String?) async throws -> [VerboseSegment] {
-        let (resp, data) = try await postMultipart(wav: wav, config: config, language: language, verbose: true)
+    static func postTranscriptionVerbose(wav: Data, config: ApiConfig, language: String?, prompt: String? = nil) async throws -> [VerboseSegment] {
+        let (resp, data) = try await postMultipart(wav: wav, config: config, language: language, verbose: true, prompt: prompt)
         if !(200..<300).contains(resp.statusCode) {
             throw EngineError.httpError(status: resp.statusCode,
                                         body: String(data: data, encoding: .utf8) ?? "")
@@ -134,9 +200,9 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
         return [VerboseSegment(id: 0, start: 0, end: 0, text: obj.text)]
     }
 
-    static func postMultipart(wav: Data, config: ApiConfig, language: String?, verbose: Bool) async throws -> (HTTPURLResponse, Data) {
+    static func postMultipart(wav: Data, config: ApiConfig, language: String?, verbose: Bool, prompt: String? = nil) async throws -> (HTTPURLResponse, Data) {
         guard !config.apiKey.isEmpty else { throw EngineError.missingApiKey }
-        var comps = URLComponents(string: config.baseUrl.hasSuffix("/") ? config.baseUrl + "audio/transcriptions" : config.baseUrl + "/audio/transcriptions")
+        let comps = URLComponents(string: config.baseUrl.hasSuffix("/") ? config.baseUrl + "audio/transcriptions" : config.baseUrl + "/audio/transcriptions")
         guard let url = comps?.url else { throw EngineError.networkError("Invalid base URL") }
 
         let boundary = "----ClassNote-\(UUID().uuidString)"
@@ -155,6 +221,9 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
         appendField(name: "model", value: config.sttModel)
         if let lang = language, !lang.isEmpty {
             appendField(name: "language", value: lang)
+        }
+        if let p = prompt, !p.isEmpty {
+            appendField(name: "prompt", value: p)
         }
         if verbose {
             appendField(name: "response_format", value: "verbose_json")

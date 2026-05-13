@@ -194,6 +194,7 @@ struct ShortcutsSettingsView: View {
                 KeyboardShortcuts.Recorder("Toggle recording", name: .toggleRecording)
                 KeyboardShortcuts.Recorder("Mark highlight", name: .markHighlight)
                 KeyboardShortcuts.Recorder("Toggle translation", name: .toggleTranslation)
+                KeyboardShortcuts.Recorder("Toggle overlay window", name: .toggleOverlay)
             }
             Section {
                 Text("These work anywhere on macOS, even when ClassNote is hidden.")

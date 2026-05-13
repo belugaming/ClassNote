@@ -20,12 +20,33 @@ struct MenuBarExtraView: View {
             Divider()
 
             Button {
-                if appState.isRecording { appState.stopRecording() } else { appState.startNewSession() }
+                if appState.isRecording { appState.stopRecording() }
+                else { appState.startNewSession(source: .microphone) }
             } label: {
-                Label(appState.isRecording ? "Stop session" : "Start new session",
+                Label(appState.isRecording ? "Stop session" : "Record · Microphone",
                       systemImage: appState.isRecording ? "stop.circle.fill" : "mic.circle.fill")
             }
             .keyboardShortcut("r", modifiers: [.command, .shift])
+
+            if !appState.isRecording {
+                Button {
+                    appState.startNewSession(source: .system)
+                } label: {
+                    Label("Record · System audio", systemImage: "speaker.wave.3.fill")
+                }
+                Button {
+                    appState.startNewSession(source: .mixed)
+                } label: {
+                    Label("Record · Mic + System", systemImage: "person.wave.2.fill")
+                }
+            }
+
+            Button {
+                NotificationCenter.default.post(name: .toggleOverlay, object: nil)
+            } label: {
+                Label("Toggle overlay window", systemImage: "rectangle.on.rectangle")
+            }
+            .keyboardShortcut("o", modifiers: [.command, .shift])
 
             Button {
                 appState.markHighlight()

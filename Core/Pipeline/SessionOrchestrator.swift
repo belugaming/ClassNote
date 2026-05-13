@@ -15,7 +15,6 @@ final class SessionOrchestrator: ObservableObject {
     private var sttTask: Task<Void, Never>?
     private var translateTasks: [Int64: Task<Void, Never>] = [:]
     private var tickerTask: Task<Void, Never>?
-    private let vad = VADGate()
 
     /// Starts a new session, opens audio capture, begins STT/translation pipeline.
     /// Returns the new session id.
@@ -135,8 +134,8 @@ final class SessionOrchestrator: ObservableObject {
         tickerTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 200_000_000)
-                if let start = await self?.audioManager?.state.startedAt {
-                    await MainActor.run {
+                await MainActor.run {
+                    if let start = self?.audioManager?.state.startedAt {
                         self?.currentTimestampMs = Int64(Date().timeIntervalSince(start) * 1000)
                     }
                 }
@@ -150,25 +149,17 @@ final class SessionOrchestrator: ObservableObject {
         let stt = EngineFactory.makeSTT(config: config, backend: backend)
         let translator = EngineFactory.makeTranslator(config: config)
 
-        // VAD-gated filtered stream
-        let filtered = AsyncStream<AudioChunk> { continuation in
-            let task = Task { [vad, manager] in
-                for await chunk in manager.chunks {
-                    if await vad.shouldPass(chunk: chunk) {
-                        continuation.yield(chunk)
-                    }
-                }
-                continuation.finish()
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
+        // Feed all chunks (including short silences) to STT — it does its own
+        // silence-aware sentence buffering. A naive VAD pre-filter would prevent
+        // it from seeing the trailing silence that signals "end of sentence".
+        let stream = manager.chunks
 
         sttTask = Task { [weak self, transcript, config] in
             guard let self = self else { return }
             let sid = self.currentSessionId ?? ""
-            let stream = stt.transcribe(audio: filtered, language: config.sourceLanguage.isEmpty ? nil : config.sourceLanguage)
+            let ttStream = stt.transcribe(audio: stream, language: config.sourceLanguage.isEmpty ? nil : config.sourceLanguage)
             do {
-                for try await event in stream {
+                for try await event in ttStream {
                     let seg = Segment(id: nil,
                                        sessionId: sid,
                                        startMs: event.startMs,
