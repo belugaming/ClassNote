@@ -60,9 +60,11 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.beluga.classnote
-        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "-"
-        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_HARDENED_RUNTIME: NO
+        DEVELOPMENT_TEAM: ""
+        PROVISIONING_PROFILE_SPECIFIER: ""
 
   ClassNoteTests:
     type: bundle.unit-test
@@ -77,8 +79,9 @@ targets:
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ClassNote.app/Contents/MacOS/ClassNote"
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.beluga.classnote.tests
-        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
 
 schemes:
   ClassNote:
