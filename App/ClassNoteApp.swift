@@ -14,6 +14,7 @@ struct ClassNoteApp: App {
                 .environmentObject(appState)
                 .frame(minWidth: 1000, minHeight: 640)
                 .background(LiveSessionOpener().environmentObject(appState))
+                .id(appState.languageRefreshToken)
         }
         .defaultSize(width: 1240, height: 780)
         .commands {
@@ -33,6 +34,7 @@ struct ClassNoteApp: App {
                 LiveSessionView(sessionId: id)
                     .environmentObject(appState)
                     .frame(minWidth: 720, minHeight: 520)
+                    .id(appState.languageRefreshToken)
             }
         }
         .defaultSize(width: 900, height: 600)
@@ -42,6 +44,7 @@ struct ClassNoteApp: App {
             OverlayView()
                 .environmentObject(appState)
                 .frame(minWidth: 320, minHeight: 160)
+                .id(appState.languageRefreshToken)
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)

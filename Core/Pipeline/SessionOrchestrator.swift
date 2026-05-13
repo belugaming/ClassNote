@@ -43,7 +43,17 @@ final class SessionOrchestrator: ObservableObject {
             throw EngineError.unsupported("Use ingestFile for file import")
         }
 
-        try await manager.start(source: src, outputURL: outputURL)
+        do {
+            try await manager.start(source: src, outputURL: outputURL)
+        } catch {
+            // Clean up on failure so next attempt starts fresh.
+            self.audioManager = nil
+            self.currentSession = nil
+            self.currentSessionId = nil
+            self.statusText = "Failed to start capture"
+            try? await SessionRepository.shared.delete(id: sess.id)
+            throw error
+        }
         statusText = "Recording"
 
         startTicker()

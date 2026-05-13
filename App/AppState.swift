@@ -15,6 +15,10 @@ final class AppState: ObservableObject {
     @Published var translationEnabled: Bool = true
     @Published var sttBackend: SttBackend = .openAICompatible
 
+    /// Bumped whenever the user changes the language. Views observe this to
+    /// re-render all L10n strings without needing an app restart.
+    @Published var languageRefreshToken: UUID = UUID()
+
     let orchestrator: SessionOrchestrator
 
     private init() {
@@ -36,10 +40,15 @@ final class AppState: ObservableObject {
 
     func startNewSession(source: AudioSourceKind = .microphone) {
         Task { @MainActor in
-            guard let sessionId = try? await orchestrator.startNewSession(courseId: nil, source: source) else { return }
-            self.currentSessionId = sessionId
-            self.isRecording = true
-            NotificationCenter.default.post(name: .openLiveSession, object: sessionId)
+            do {
+                let sessionId = try await orchestrator.startNewSession(courseId: nil, source: source)
+                self.currentSessionId = sessionId
+                self.isRecording = true
+                NotificationCenter.default.post(name: .openLiveSession, object: sessionId)
+            } catch {
+                self.setError(error.localizedDescription)
+                self.isRecording = false
+            }
         }
     }
 
@@ -52,6 +61,7 @@ final class AppState: ObservableObject {
             return sessionId
         } catch {
             self.setError(error.localizedDescription)
+            self.isRecording = false
             return nil
         }
     }
@@ -74,6 +84,13 @@ final class AppState: ObservableObject {
 
     func setError(_ message: String) {
         self.lastError = message
+    }
+
+    /// Switch UI language. Persists choice and re-publishes a token so any
+    /// view observing `languageRefreshToken` re-renders with new strings.
+    func setLanguage(_ lang: L10n.LanguageOverride) {
+        L10n.override = lang
+        languageRefreshToken = UUID()
     }
 }
 

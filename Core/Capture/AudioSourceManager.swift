@@ -41,6 +41,7 @@ final class AudioSourceManager: NSObject {
     private var assetWriterInput: AVAssetWriterInput?
     private var scStream: SCStream?
     private var scStreamOutputHandler: SCStreamOutputHandler?
+    private var scStreamDelegate: SCStreamDelegateAdapter?
     private var converter: AVAudioConverter?
     private var targetFormat: AVAudioFormat!
     private var startHostTime: AVAudioTime?
@@ -97,6 +98,7 @@ final class AudioSourceManager: NSObject {
         }
         scStream = nil
         scStreamOutputHandler = nil
+        scStreamDelegate = nil
 
         if let input = assetWriterInput {
             input.markAsFinished()
@@ -173,18 +175,35 @@ final class AudioSourceManager: NSObject {
 
     // MARK: - System audio (ScreenCaptureKit)
 
+    private var systemAudioSampleCount: Int = 0
+
     private func startSystemAudio() async throws {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let display = content.displays.first else {
-            throw EngineError.unsupported("No displays available for ScreenCaptureKit")
+        // Preflight: if the user has never granted Screen Recording permission,
+        // SCShareableContent silently returns zero displays. Prompt first.
+        if !CGPreflightScreenCaptureAccess() {
+            NSLog("[ClassNote] SCK preflight says no permission yet; prompting.")
+            _ = CGRequestScreenCaptureAccess()
+            throw EngineError.unsupported("需要屏幕录制权限来捕获系统音频。请在系统设置 → 隐私与安全性 → 屏幕录制 里授权 ClassNote,然后重启 App。/ Screen Recording permission required. Grant in System Settings → Privacy & Security → Screen Recording, then relaunch.")
         }
+
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        } catch {
+            NSLog("[ClassNote] SCShareableContent error: %@", error.localizedDescription)
+            throw EngineError.unsupported("无法访问屏幕录制内容: \(error.localizedDescription) / Cannot access screen content: \(error.localizedDescription)")
+        }
+
+        guard let display = content.displays.first else {
+            throw EngineError.unsupported("没有找到可用的显示器 / No displays available for ScreenCaptureKit")
+        }
+
         let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
         let cfg = SCStreamConfiguration()
         cfg.capturesAudio = true
         cfg.excludesCurrentProcessAudio = true
         cfg.sampleRate = 48000
         cfg.channelCount = 2
-        // We still need to set a video size for SCK even for audio-only; keep minimal.
         cfg.width = 2
         cfg.height = 2
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: 1)
@@ -195,10 +214,38 @@ final class AudioSourceManager: NSObject {
             self?.handleSystemSample(sampleBuffer)
         }
         self.scStreamOutputHandler = handler
-        let stream = SCStream(filter: filter, configuration: cfg, delegate: nil)
-        try stream.addStreamOutput(handler, type: .audio, sampleHandlerQueue: DispatchQueue(label: "classnote.sck.audio"))
-        self.scStream = stream
-        try await stream.startCapture()
+
+        let delegate = SCStreamDelegateAdapter { error in
+            NSLog("[ClassNote] SCStream stopped with error: %@", error.localizedDescription)
+            Task { @MainActor in
+                AppState.shared.setError("系统音频捕获异常 / System audio capture error: \(error.localizedDescription)")
+            }
+        }
+        self.scStreamDelegate = delegate
+
+        let stream = SCStream(filter: filter, configuration: cfg, delegate: delegate)
+        do {
+            try stream.addStreamOutput(handler, type: .audio, sampleHandlerQueue: DispatchQueue(label: "classnote.sck.audio"))
+            try await stream.startCapture()
+            self.scStream = stream
+            NSLog("[ClassNote] SCK startCapture OK")
+        } catch {
+            NSLog("[ClassNote] SCStream startCapture failed: %@", error.localizedDescription)
+            throw EngineError.unsupported("启动系统音频捕获失败 / System audio capture failed to start: \(error.localizedDescription)")
+        }
+
+        // Watchdog: if we don't receive any samples within 5s, warn the user.
+        systemAudioSampleCount = 0
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            await MainActor.run {
+                guard let self = self, self.running else { return }
+                if self.systemAudioSampleCount == 0 {
+                    NSLog("[ClassNote] SCK: no audio samples after 5s — source likely silent or permission not effective")
+                    AppState.shared.setError("5 秒内没收到系统音频 — 请检查系统是否有声音在播放,或重新授权屏幕录制权限。/ No system audio received in 5s — check if any audio is playing, or re-grant Screen Recording permission.")
+                }
+            }
+        }
     }
 
     nonisolated private func handleSystemSample(_ sampleBuffer: CMSampleBuffer) {
@@ -208,6 +255,7 @@ final class AudioSourceManager: NSObject {
     }
 
     private func processSystemSample(_ sampleBuffer: CMSampleBuffer) {
+        systemAudioSampleCount += 1
         guard let desc = CMSampleBufferGetFormatDescription(sampleBuffer),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee
         else { return }
@@ -345,6 +393,16 @@ final class SCStreamOutputHandler: NSObject, SCStreamOutput {
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio else { return }
         handler(sampleBuffer)
+    }
+}
+
+final class SCStreamDelegateAdapter: NSObject, SCStreamDelegate {
+    let onError: @Sendable (Error) -> Void
+    init(onError: @escaping @Sendable (Error) -> Void) {
+        self.onError = onError
+    }
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        onError(error)
     }
 }
 

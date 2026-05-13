@@ -6,13 +6,14 @@ struct SettingsView: View {
     @State private var selection: Tab = .api
 
     enum Tab: String, CaseIterable, Hashable {
-        case api, engines, shortcuts, about
+        case api, engines, shortcuts, appearance, about
 
         var titleKey: String {
             switch self {
             case .api: return "settings.tab.api"
             case .engines: return "settings.tab.engines"
             case .shortcuts: return "settings.tab.shortcuts"
+            case .appearance: return "settings.tab.appearance"
             case .about: return "settings.tab.about"
             }
         }
@@ -21,6 +22,7 @@ struct SettingsView: View {
             case .api: return "network"
             case .engines: return "waveform.circle"
             case .shortcuts: return "keyboard"
+            case .appearance: return "paintpalette"
             case .about: return "info.circle"
             }
         }
@@ -37,11 +39,40 @@ struct SettingsView: View {
             ShortcutsSettingsView()
                 .tabItem { Label(L10n.t("settings.tab.shortcuts"), systemImage: "keyboard") }
                 .tag(Tab.shortcuts)
+            AppearanceSettingsView()
+                .tabItem { Label(L10n.t("settings.tab.appearance"), systemImage: "paintpalette") }
+                .tag(Tab.appearance)
             AboutView()
                 .tabItem { Label(L10n.t("settings.tab.about"), systemImage: "info.circle") }
                 .tag(Tab.about)
         }
         .frame(minWidth: 640, minHeight: 540)
+        .id(appState.languageRefreshToken)   // force full re-render on language switch
+    }
+}
+
+struct AppearanceSettingsView: View {
+    @EnvironmentObject var appState: AppState
+    @State private var selection: L10n.LanguageOverride = L10n.override
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                SettingsSection(title: L10n.t("settings.appearance.language"),
+                                footer: L10n.t("settings.appearance.languageNote")) {
+                    Picker("", selection: $selection) {
+                        ForEach(L10n.LanguageOverride.allCases, id: \.rawValue) { opt in
+                            Text(opt.displayName).tag(opt)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: selection) { _, newValue in
+                        appState.setLanguage(newValue)
+                    }
+                }
+            }
+            .padding(20)
+        }
     }
 }
 

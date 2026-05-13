@@ -38,6 +38,10 @@ targets:
         CFBundleDisplayName: ClassNote
         CFBundleShortVersionString: "0.1.0"
         CFBundleIconName: AppIcon
+        CFBundleLocalizations:
+          - en
+          - zh-Hans
+        CFBundleDevelopmentRegion: en
         LSMinimumSystemVersion: "14.0"
         NSHumanReadableCopyright: "© 2026 ClassNote"
         NSMicrophoneUsageDescription: "ClassNote 需要麦克风权限以录制现场课程音频"

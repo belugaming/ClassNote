@@ -8,10 +8,42 @@ import SwiftUI
 /// For something this personal, hand-rolled beats Localizable.strings: zero
 /// build-system friction, key+value live next to each other, easy to grep.
 enum L10n {
-    static let isChinese: Bool = {
-        let lang = Locale.current.language.languageCode?.identifier ?? "en"
-        return lang.hasPrefix("zh")
-    }()
+    /// User-overridable language preference. nil = follow system.
+    private static let userOverrideKey = "uiLanguageOverride"
+
+    static var override: LanguageOverride {
+        get {
+            let raw = UserDefaults.standard.string(forKey: userOverrideKey) ?? "system"
+            return LanguageOverride(rawValue: raw) ?? .system
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: userOverrideKey)
+        }
+    }
+
+    static var isChinese: Bool {
+        switch override {
+        case .zh: return true
+        case .en: return false
+        case .system:
+            // `Locale.current` is gated by the app's CFBundleLocalizations and
+            // can wrongly fall back to English. `Locale.preferredLanguages`
+            // reflects what the user actually picked in System Settings.
+            let preferred = Locale.preferredLanguages.first ?? "en"
+            return preferred.lowercased().hasPrefix("zh")
+        }
+    }
+
+    enum LanguageOverride: String, CaseIterable {
+        case system, zh, en
+        var displayName: String {
+            switch self {
+            case .system: return L10n.t("settings.appearance.lang.system")
+            case .zh: return L10n.t("settings.appearance.lang.zh")
+            case .en: return L10n.t("settings.appearance.lang.en")
+            }
+        }
+    }
 
     /// Look up a key. If we don't have a Chinese translation, fall back to the
     /// English value silently — never show the raw key to the user.

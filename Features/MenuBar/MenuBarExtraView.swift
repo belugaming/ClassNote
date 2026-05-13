@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MenuBarExtraView: View {
     @EnvironmentObject var appState: AppState
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -90,10 +91,15 @@ struct MenuBarExtraView: View {
                     win.makeKeyAndOrderFront(nil)
                 }
             }
+
+            // openSettings env value is the macOS 14+ way to launch the
+            // Settings scene from menu bar extras without relying on the
+            // deprecated showSettingsWindow: action.
             MenubarButton(label: L10n.t("menubar.settings"),
                           icon: "gearshape",
                           tint: .secondary) {
-                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                openSettings()
+                NSApp.activate(ignoringOtherApps: true)
             }
 
             Divider()

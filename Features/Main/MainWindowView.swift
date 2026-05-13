@@ -95,6 +95,13 @@ struct MainWindowView: View {
         .onChange(of: appState.isRecording) { _, _ in
             Task { await vm.refresh() }
         }
+        .alert(L10n.t("common.error"),
+               isPresented: Binding(get: { appState.lastError != nil },
+                                    set: { if !$0 { appState.lastError = nil } })) {
+            Button("OK") { appState.lastError = nil }
+        } message: {
+            Text(appState.lastError ?? "")
+        }
     }
 }
 
