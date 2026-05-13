@@ -5,10 +5,19 @@ struct LiveSessionView: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
+        InnerView(appState: appState, orchestrator: appState.orchestrator)
+    }
+}
+
+private struct InnerView: View {
+    @ObservedObject var appState: AppState
+    @ObservedObject var orchestrator: SessionOrchestrator
+
+    var body: some View {
         VStack(spacing: 0) {
             header
             Divider().opacity(0.4)
-            LiveSubtitleView(buffer: appState.orchestrator.transcript)
+            LiveSubtitleView(buffer: orchestrator.transcript)
         }
         .background(
             LinearGradient(colors: [

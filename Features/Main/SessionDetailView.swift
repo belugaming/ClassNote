@@ -300,9 +300,11 @@ struct HighlightListPane: View {
                             Text(formatTs(h.timestampMs))
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(.secondary)
-                            Text(h.userNote.isEmpty ? "—" : h.userNote)
-                                .font(.callout)
-                                .lineLimit(1)
+                            if !h.userNote.isEmpty {
+                                Text(h.userNote)
+                                    .font(.callout)
+                                    .lineLimit(1)
+                            }
                             Spacer()
                             if h.explanationMd != nil {
                                 Image(systemName: "sparkles")

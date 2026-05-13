@@ -8,6 +8,15 @@ struct OverlayView: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
+        InnerOverlayView(appState: appState, orchestrator: appState.orchestrator)
+    }
+}
+
+private struct InnerOverlayView: View {
+    @ObservedObject var appState: AppState
+    @ObservedObject var orchestrator: SessionOrchestrator
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider().background(Color.white.opacity(0.15)).padding(.vertical, 6)
@@ -90,7 +99,7 @@ struct OverlayView: View {
 
     @ViewBuilder
     private var content: some View {
-        let segs = appState.orchestrator.transcript.segments.suffix(3)
+        let segs = orchestrator.transcript.segments.suffix(3)
         if segs.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 Text(L10n.t("overlay.empty.title"))
@@ -120,7 +129,7 @@ struct OverlayView: View {
                         Color.clear.frame(height: 1).id("overlay-bottom")
                     }
                 }
-                .onChange(of: appState.orchestrator.transcript.segments.count) { _, _ in
+                .onChange(of: orchestrator.transcript.segments.count) { _, _ in
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo("overlay-bottom", anchor: .bottom)
                     }

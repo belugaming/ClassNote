@@ -1,4 +1,5 @@
 import SwiftUI
+import LaTeXSwiftUI
 
 /// Block-level Markdown renderer for AI notes.
 ///
@@ -79,6 +80,17 @@ struct MarkdownView: View {
             Divider().padding(.vertical, 4)
         case .table(let headers, let rows):
             renderTable(headers: headers, rows: rows)
+        case .mathBlock(let tex):
+            HStack {
+                Spacer()
+                LaTeX("$$\(tex)$$")
+                    .parsingMode(.all)
+                    .blockMode(.blockViews)
+                    .textSelection(.enabled)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 4)
         }
     }
 
@@ -113,11 +125,14 @@ struct MarkdownView: View {
         }
     }
 
-    private func inlineText(_ raw: String) -> Text {
-        let attr = (try? AttributedString(markdown: raw,
-                                          options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-            ?? AttributedString(raw)
-        return Text(attr)
+    private func inlineText(_ raw: String) -> some View {
+        // LaTeX handles `$...$`, `\(...\)`, `$$...$$`, `\[...\]` and passes
+        // the rest through its own Markdown-aware text rendering (bold, italic,
+        // inline code, links). That covers both math and inline Markdown.
+        LaTeX(raw)
+            .parsingMode(.all)
+            .blockMode(.blockViews)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func headingFont(_ level: Int) -> Font {
@@ -141,6 +156,7 @@ enum MarkdownBlock {
     case quote(String)
     case rule
     case table(headers: [String], rows: [[String]])
+    case mathBlock(String)
 }
 
 enum MarkdownParser {
@@ -156,6 +172,43 @@ enum MarkdownParser {
             if trimmed.isEmpty {
                 i += 1
                 continue
+            }
+
+            // Display math block: $$ ... $$ (may be single-line or multi-line).
+            // Strip the fences and pass the body to the LaTeX renderer.
+            if trimmed.hasPrefix("$$") {
+                let firstBody = String(trimmed.dropFirst(2))
+                if let closeIdx = firstBody.range(of: "$$") {
+                    // Single-line: $$ ... $$
+                    let tex = String(firstBody[firstBody.startIndex..<closeIdx.lowerBound])
+                        .trimmingCharacters(in: .whitespaces)
+                    blocks.append(.mathBlock(tex))
+                    i += 1
+                    continue
+                } else {
+                    // Multi-line: collect until a line containing "$$".
+                    var body: [String] = []
+                    if !firstBody.trimmingCharacters(in: .whitespaces).isEmpty {
+                        body.append(firstBody)
+                    }
+                    i += 1
+                    while i < lines.count {
+                        let l = lines[i]
+                        if let r = l.range(of: "$$") {
+                            let pre = String(l[l.startIndex..<r.lowerBound])
+                            if !pre.trimmingCharacters(in: .whitespaces).isEmpty {
+                                body.append(pre)
+                            }
+                            i += 1
+                            break
+                        }
+                        body.append(l)
+                        i += 1
+                    }
+                    let tex = body.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                    blocks.append(.mathBlock(tex))
+                    continue
+                }
             }
 
             // Fenced code block: ``` or ~~~
@@ -269,6 +322,7 @@ enum MarkdownParser {
             while i < lines.count {
                 let t = lines[i].trimmingCharacters(in: .whitespaces)
                 if t.isEmpty { break }
+                if t.hasPrefix("$$") { break }
                 if atxHeading(t) != nil { break }
                 if codeFence(t) != nil { break }
                 if isHorizontalRule(t) { break }

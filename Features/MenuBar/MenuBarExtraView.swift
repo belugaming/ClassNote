@@ -5,6 +5,18 @@ struct MenuBarExtraView: View {
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
+        InnerMenuBarView(appState: appState,
+                         orchestrator: appState.orchestrator,
+                         openSettings: openSettings)
+    }
+}
+
+private struct InnerMenuBarView: View {
+    @ObservedObject var appState: AppState
+    @ObservedObject var orchestrator: SessionOrchestrator
+    let openSettings: OpenSettingsAction
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 ZStack {
@@ -17,12 +29,12 @@ struct MenuBarExtraView: View {
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(appState.isRecording
-                         ? (appState.orchestrator.currentSession?.title ?? L10n.t("menubar.recording"))
+                         ? (orchestrator.currentSession?.title ?? L10n.t("menubar.recording"))
                          : L10n.t("menubar.idle"))
                         .font(.headline)
                         .lineLimit(1)
                     if appState.isRecording {
-                        Text("\(L10n.t("menubar.duration")): \(formatDuration(appState.orchestrator.currentTimestampMs))")
+                        Text("\(L10n.t("menubar.duration")): \(formatDuration(orchestrator.currentTimestampMs))")
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                     } else {
