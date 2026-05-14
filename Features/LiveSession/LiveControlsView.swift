@@ -13,6 +13,17 @@ struct LiveControlsView: View {
             .toggleStyle(.button)
             .tint(Theme.accent)
 
+            if orchestrator.isEphemeralTranslation {
+                Button {
+                    Task {
+                        _ = await appState.saveTemporaryTranslationAsSession()
+                    }
+                } label: {
+                    Label(L10n.t("live.ephemeral.save"), systemImage: "tray.and.arrow.down")
+                }
+                .disabled(orchestrator.transcript.segments.isEmpty)
+            }
+
             if !orchestrator.isImporting {
                 Button {
                     appState.markHighlight()

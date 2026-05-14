@@ -7,7 +7,7 @@ struct SessionListView: View {
     let courses: [Course]
     let sessions: [Session]
     let onStartSession: () -> Void
-    let onImport: (URL) -> Void
+    let onImport: ([URL]) -> Void
     let onDelete: (String) -> Void
     let onMove: (String, String?) -> Void
 
@@ -81,10 +81,10 @@ struct SessionListView: View {
         }
         .fileImporter(isPresented: $importing,
                       allowedContentTypes: [.movie, .audio, .mpeg4Movie, .audiovisualContent],
-                      allowsMultipleSelection: false) { result in
+                      allowsMultipleSelection: true) { result in
             switch result {
             case .success(let urls):
-                if let url = urls.first { onImport(url) }
+                onImport(urls)
             case .failure(let err):
                 AppState.shared.setError(err.localizedDescription)
             }

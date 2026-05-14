@@ -131,6 +131,22 @@ final class Database {
             }
         }
 
+        migrator.registerMigration("v3_note_history") { db in
+            try db.create(table: "note_version") { t in
+                t.column("id", .text).primaryKey()
+                t.column("note_id", .text).notNull().references("note", onDelete: .cascade)
+                t.column("session_id", .text).notNull().references("session", onDelete: .cascade)
+                t.column("markdown", .text).notNull().defaults(to: "")
+                t.column("version", .integer).notNull()
+                t.column("template", .text).notNull().defaults(to: "study")
+                t.column("model", .text)
+                t.column("generated_at", .integer).notNull()
+            }
+            try db.create(index: "idx_note_version_session",
+                          on: "note_version",
+                          columns: ["session_id", "generated_at"])
+        }
+
         return migrator
     }
 }

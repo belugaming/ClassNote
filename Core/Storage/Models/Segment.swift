@@ -83,3 +83,23 @@ struct Note: Codable, FetchableRecord, PersistableRecord, Identifiable, Hashable
 
     static let databaseTableName = "note"
 }
+
+struct NoteVersion: Codable, FetchableRecord, PersistableRecord, Identifiable, Hashable, Sendable {
+    var id: String
+    var noteId: String
+    var sessionId: String
+    var markdown: String
+    var version: Int64
+    var template: String
+    var model: String?
+    var generatedAt: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case id, markdown, version, template, model
+        case noteId = "note_id"
+        case sessionId = "session_id"
+        case generatedAt = "generated_at"
+    }
+
+    static let databaseTableName = "note_version"
+}

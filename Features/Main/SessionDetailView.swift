@@ -10,12 +10,14 @@ struct SessionDetailView: View {
     @State private var selectedTab: DetailTab = .transcript
 
     enum DetailTab: String, CaseIterable, Identifiable {
-        case transcript, notes, highlights
+        case transcript, notes, qa, flashcards, highlights
         var id: String { rawValue }
         var titleKey: String {
             switch self {
             case .transcript: return "session.tab.transcript"
             case .notes: return "session.tab.notes"
+            case .qa: return "session.tab.qa"
+            case .flashcards: return "session.tab.flashcards"
             case .highlights: return "session.tab.highlights"
             }
         }
@@ -23,6 +25,8 @@ struct SessionDetailView: View {
             switch self {
             case .transcript: return "captions.bubble"
             case .notes: return "sparkles"
+            case .qa: return "questionmark.bubble"
+            case .flashcards: return "rectangle.stack"
             case .highlights: return "star.fill"
             }
         }
@@ -36,6 +40,8 @@ struct SessionDetailView: View {
                 switch selectedTab {
                 case .transcript: TranscriptPane(vm: vm)
                 case .notes: NotesPane(vm: vm)
+                case .qa: QAPane(vm: vm)
+                case .flashcards: FlashcardsPane(vm: vm)
                 case .highlights: HighlightsPane(vm: vm)
                 }
             }
@@ -55,8 +61,14 @@ struct SessionDetailView: View {
                 }
                 Spacer(minLength: 16)
 
-                Button {
-                    Task { await vm.generateNotes() }
+                Menu {
+                    ForEach(NoteTemplates.all) { template in
+                        Button {
+                            Task { await vm.generateNotes(template: template) }
+                        } label: {
+                            Label(L10n.t(template.labelKey), systemImage: "sparkles")
+                        }
+                    }
                 } label: {
                     Label(vm.isGeneratingNotes ? L10n.t("session.action.generatingNotes") : L10n.t("session.action.generateNotes"),
                           systemImage: "sparkles")
@@ -287,20 +299,154 @@ struct SegmentRowView: View {
 struct NotesPane: View {
     @ObservedObject var vm: SessionDetailViewModel
     var body: some View {
-        ScrollView {
-            if let note = vm.note, !note.markdown.isEmpty {
-                MarkdownView(markdown: note.markdown)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(20)
-            } else {
-                ContentUnavailableView {
-                    Label(L10n.t("session.empty.notes.title"), systemImage: "sparkles")
-                } description: {
-                    Text(L10n.t("session.empty.notes.desc"))
+        HSplitView {
+            ScrollView {
+                if let note = vm.note, !note.markdown.isEmpty {
+                    MarkdownView(markdown: note.markdown)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(20)
+                } else {
+                    ContentUnavailableView {
+                        Label(L10n.t("session.empty.notes.title"), systemImage: "sparkles")
+                    } description: {
+                        Text(L10n.t("session.empty.notes.desc"))
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(40)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(40)
+            }
+            NoteHistoryPane(vm: vm)
+                .frame(minWidth: 260, idealWidth: 320)
+        }
+    }
+}
+
+struct NoteHistoryPane: View {
+    @ObservedObject var vm: SessionDetailViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(L10n.t("notes.history.title"))
+                .font(.headline)
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
+            List(vm.noteVersions) { version in
+                Button {
+                    vm.previewNoteVersion(version)
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(L10n.t(NoteTemplates.find(version.template).labelKey)) · v\(version.version)")
+                            .font(.callout.weight(.medium))
+                        Text(formatDate(version.generatedAt))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func formatDate(_ ms: Int64) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+}
+
+struct QAPane: View {
+    @ObservedObject var vm: SessionDetailViewModel
+    @State private var question = ""
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                if vm.qaAnswer.isEmpty {
+                    ContentUnavailableView {
+                        Label(L10n.t("qa.empty.title"), systemImage: "questionmark.bubble")
+                    } description: {
+                        Text(L10n.t("qa.empty.desc"))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(40)
+                } else {
+                    MarkdownView(markdown: vm.qaAnswer)
+                        .textSelection(.enabled)
+                        .padding(18)
+                }
+            }
+            Divider()
+            HStack(spacing: 8) {
+                TextField(L10n.t("qa.placeholder"), text: $question)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { submit() }
+                Button {
+                    submit()
+                } label: {
+                    Label(vm.isAnsweringQuestion ? L10n.t("qa.answering") : L10n.t("qa.ask"),
+                          systemImage: "paperplane")
+                }
+                .disabled(question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || vm.isAnsweringQuestion)
+            }
+            .padding(12)
+        }
+    }
+
+    private func submit() {
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return }
+        Task { await vm.askQuestion(q) }
+    }
+}
+
+struct FlashcardsPane: View {
+    @ObservedObject var vm: SessionDetailViewModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(L10n.t("flashcards.title"))
+                    .font(.headline)
+                Spacer()
+                Button {
+                    Task { await vm.generateFlashcards() }
+                } label: {
+                    Label(vm.isGeneratingFlashcards ? L10n.t("flashcards.generating") : L10n.t("flashcards.generate"),
+                          systemImage: "rectangle.stack.badge.plus")
+                }
+                .disabled(vm.isGeneratingFlashcards || (vm.session?.segments.isEmpty ?? true))
+            }
+            .padding(12)
+            Divider()
+            ScrollView {
+                if vm.flashcards.isEmpty {
+                    ContentUnavailableView {
+                        Label(L10n.t("flashcards.empty.title"), systemImage: "rectangle.stack")
+                    } description: {
+                        Text(L10n.t("flashcards.empty.desc"))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(40)
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 12)], spacing: 12) {
+                        ForEach(Array(vm.flashcards.enumerated()), id: \.offset) { _, card in
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text(card.front)
+                                    .font(.headline)
+                                Divider()
+                                Text(card.back)
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(14)
+                            .cardBackground()
+                        }
+                    }
+                    .padding(16)
+                }
             }
         }
     }
@@ -560,10 +706,15 @@ struct HighlightDetailPane: View {
 final class SessionDetailViewModel: ObservableObject {
     @Published var session: SessionWithSegments?
     @Published var note: Note?
+    @Published var noteVersions: [NoteVersion] = []
     @Published var highlights: [Highlight] = []
     @Published var isGeneratingNotes: Bool = false
     @Published var isRetranslating: Bool = false
     @Published var isPlaying: Bool = false
+    @Published var isAnsweringQuestion: Bool = false
+    @Published var qaAnswer: String = ""
+    @Published var isGeneratingFlashcards: Bool = false
+    @Published var flashcards: [Flashcard] = []
 
     @Published var selectedHighlightId: Int64?
     @Published var streamingHighlightId: Int64?
@@ -602,13 +753,23 @@ final class SessionDetailViewModel: ObservableObject {
             let segs = try await SegmentRepository.shared.all(sessionId: sessionId)
             self.session = SessionWithSegments(session: s, segments: segs)
             self.note = try await NoteRepository.shared.get(sessionId: sessionId)
+            self.noteVersions = try await NoteRepository.shared.versions(sessionId: sessionId)
             self.highlights = try await HighlightRepository.shared.all(sessionId: sessionId)
         } catch {
             NSLog("SessionDetail load error: \(error)")
         }
     }
 
-    func generateNotes() async {
+    func previewNoteVersion(_ version: NoteVersion) {
+        self.note = Note(id: version.noteId,
+                         sessionId: version.sessionId,
+                         markdown: version.markdown,
+                         version: version.version,
+                         generatedAt: version.generatedAt,
+                         model: version.model)
+    }
+
+    func generateNotes(template: NoteTemplate = NoteTemplates.find("study")) async {
         guard let s = session, !s.segments.isEmpty else { return }
         isGeneratingNotes = true
         defer { isGeneratingNotes = false }
@@ -620,17 +781,8 @@ final class SessionDetailViewModel: ObservableObject {
 
         let system = """
         You are an academic note-taking assistant for a Chinese student studying in the US.
-        Produce a structured Markdown study note from the lecture transcript below.
-        Requirements:
-        - Title (H1): try to infer a concrete topic.
-        - Overview (3-5 bullets): what the lecture covered.
-        - Sections (H2): break into logical sections of the lecture.
-        - Key terms (bilingual): English term — 中文解释
-        - Formulas / examples: include verbatim if present.
-        - Questions & Answers (if any from the classroom).
-        - Takeaways (bullets).
+        \(template.systemPrompt)
         Do NOT paraphrase the transcript word-for-word. Do synthesize and organize.
-        Write in Chinese for the explanatory text; keep English terms in parentheses.
         """
         let user = "Transcript:\n\(transcriptText)"
         do {
@@ -642,14 +794,64 @@ final class SessionDetailViewModel: ObservableObject {
             let noteEntity = Note(id: note?.id ?? UUID().uuidString,
                                    sessionId: s.session.id,
                                    markdown: md,
-                                   version: (note?.version ?? 0) + 1,
+                                   version: ((noteVersions.map(\.version).max() ?? note?.version) ?? 0) + 1,
                                    generatedAt: Int64(Date().timeIntervalSince1970 * 1000),
                                    model: config.llmModel)
-            try await NoteRepository.shared.upsert(noteEntity)
+            try await NoteRepository.shared.upsert(noteEntity, template: template.id)
             try await SessionRepository.shared.setState(s.session.id, state: "summarized")
             self.note = noteEntity
+            self.noteVersions = try await NoteRepository.shared.versions(sessionId: s.session.id)
         } catch {
             AppState.shared.setError("Note generation failed: \(error.localizedDescription)")
+        }
+    }
+
+    func askQuestion(_ question: String) async {
+        guard let s = session, !s.segments.isEmpty else { return }
+        isAnsweringQuestion = true
+        defer { isAnsweringQuestion = false }
+        let config = AppState.shared.apiConfig
+        let llm = EngineFactory.makeLLM(config: config)
+        let transcriptText = transcriptForLLM(s.segments)
+        do {
+            qaAnswer = try await llm.chatComplete(messages: [
+                .init(role: .system, content: """
+                You answer questions about one lecture transcript for a Chinese student studying in the US.
+                Answer in Chinese, cite useful timecodes, and keep technical terms bilingual.
+                If the transcript does not contain enough evidence, say so.
+                """),
+                .init(role: .user, content: "Question:\n\(question)\n\nTranscript:\n\(transcriptText)")
+            ], model: config.llmModel, temperature: 0.2)
+        } catch {
+            AppState.shared.setError("QA failed: \(error.localizedDescription)")
+        }
+    }
+
+    func generateFlashcards() async {
+        guard let s = session, !s.segments.isEmpty else { return }
+        isGeneratingFlashcards = true
+        defer { isGeneratingFlashcards = false }
+        let config = AppState.shared.apiConfig
+        let llm = EngineFactory.makeLLM(config: config)
+        do {
+            let raw = try await llm.chatComplete(messages: [
+                .init(role: .system, content: """
+                Generate 8-12 high-value review flashcards from this lecture.
+                Return one card per line exactly as: front || back
+                Front should be a question or term. Back should be concise Chinese with key English terms preserved.
+                """),
+                .init(role: .user, content: transcriptForLLM(s.segments))
+            ], model: config.llmModel, temperature: 0.25)
+            flashcards = raw
+                .split(separator: "\n")
+                .compactMap { line in
+                    let parts = line.components(separatedBy: "||")
+                    guard parts.count >= 2 else { return nil }
+                    return Flashcard(front: parts[0].trimmingCharacters(in: .whitespacesAndNewlines),
+                                     back: parts.dropFirst().joined(separator: "||").trimmingCharacters(in: .whitespacesAndNewlines))
+                }
+        } catch {
+            AppState.shared.setError("Flashcards failed: \(error.localizedDescription)")
         }
     }
 
@@ -924,9 +1126,21 @@ final class SessionDetailViewModel: ObservableObject {
         if h > 0 { return String(format: "%d:%02d:%02d", h, m, sec) }
         return String(format: "%02d:%02d", m, sec)
     }
+
+    private func transcriptForLLM(_ segments: [Segment]) -> String {
+        segments.map { seg in
+            "[\(formatTimecode(seg.startMs))] \(seg.textOriginal)" +
+            (seg.textTranslated.isEmpty ? "" : "\n译文: \(seg.textTranslated)")
+        }.joined(separator: "\n")
+    }
 }
 
 struct SessionWithSegments {
     let session: Session
     let segments: [Segment]
+}
+
+struct Flashcard: Hashable {
+    let front: String
+    let back: String
 }

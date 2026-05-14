@@ -12,6 +12,7 @@ final class SessionOrchestrator: ObservableObject {
     @Published private(set) var importCompleted: Int = 0
     @Published private(set) var importTotal: Int = 0
     @Published private(set) var isEphemeralTranslation: Bool = false
+    @Published private(set) var importErrorMessage: String?
     @Published var source: AudioSourceKind = .microphone
     @Published var transcript = TranscriptBuffer()
 
@@ -134,6 +135,7 @@ final class SessionOrchestrator: ObservableObject {
         self.isImporting = true
         self.importCompleted = 0
         self.importTotal = 0
+        self.importErrorMessage = nil
 
         let stt = EngineFactory.makeSTT(config: config, backend: .openAICompatible)
         let translator = EngineFactory.makeTranslator(config: config)
@@ -179,13 +181,16 @@ final class SessionOrchestrator: ObservableObject {
                                                              durationMs: lastEndMs,
                                                              audioPath: url.path)
                 self.statusText = "Import finished"
+                self.importErrorMessage = nil
                 self.finishImportWaiters()
             } catch is CancellationError {
                 self.statusText = "Import cancelled"
+                self.importErrorMessage = CancellationError().localizedDescription
                 self.finishImportWaiters(with: CancellationError())
             } catch {
                 NSLog("[ClassNote] ingestFile failed: \(error)")
                 self.statusText = "Import failed: \(error.localizedDescription)"
+                self.importErrorMessage = error.localizedDescription
                 AppState.shared.setError(error.localizedDescription)
                 self.finishImportWaiters(with: error)
             }
@@ -195,7 +200,12 @@ final class SessionOrchestrator: ObservableObject {
     }
 
     func waitForImportToFinish() async throws {
-        if !isImporting { return }
+        if !isImporting {
+            if let importErrorMessage {
+                throw EngineError.unsupported(importErrorMessage)
+            }
+            return
+        }
         try await withCheckedThrowingContinuation { continuation in
             importWaiters.append(continuation)
         }

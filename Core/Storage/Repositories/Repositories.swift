@@ -167,6 +167,15 @@ actor SegmentRepository {
         }
     }
 
+    func insertMany(_ segments: [Segment]) async throws {
+        try await Database.shared.dbPool.write { db in
+            for segment in segments {
+                var s = segment
+                try s.insert(db)
+            }
+        }
+    }
+
     func updateText(id: Int64, textOriginal: String, textTranslated: String, isFinal: Bool) async throws {
         try await Database.shared.dbPool.write { db in
             try db.execute(sql: """
@@ -288,7 +297,16 @@ actor NoteRepository {
         }
     }
 
-    func upsert(_ note: Note) async throws {
+    func versions(sessionId: String) async throws -> [NoteVersion] {
+        try await Database.shared.dbPool.read { db in
+            try NoteVersion
+                .filter(Column("session_id") == sessionId)
+                .order(Column("generated_at").desc)
+                .fetchAll(db)
+        }
+    }
+
+    func upsert(_ note: Note, template: String = "study") async throws {
         try await Database.shared.dbPool.write { db in
             guard try Session.fetchOne(db, key: note.sessionId) != nil else {
                 throw NoteRepositoryError.missingSession(note.sessionId)
@@ -310,6 +328,16 @@ actor NoteRepository {
             } else {
                 try note.insert(db)
             }
+
+            let version = NoteVersion(id: UUID().uuidString,
+                                      noteId: note.id,
+                                      sessionId: note.sessionId,
+                                      markdown: note.markdown,
+                                      version: note.version,
+                                      template: template,
+                                      model: note.model,
+                                      generatedAt: note.generatedAt)
+            try version.insert(db)
         }
     }
 }

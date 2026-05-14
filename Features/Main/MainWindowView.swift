@@ -7,6 +7,8 @@ struct MainWindowView: View {
     @State private var selectedSessionId: String? = nil
     @State private var searchText: String = ""
     @State private var showingSearchResults = false
+    @State private var showingTaskCenter = false
+    @State private var showingDiagnostics = false
 
     private var selectedCourseId: String? {
         selectedCourse?.courseId
@@ -34,8 +36,8 @@ struct MainWindowView: View {
                             onStartSession: {
                                 Task { await vm.startSession(courseId: selectedCourseId, source: .microphone) }
                             },
-                            onImport: { url in
-                                Task { await vm.importFile(url: url, courseId: selectedCourseId) }
+                            onImport: { urls in
+                                Task { await vm.importFiles(urls: urls, courseId: selectedCourseId) }
                             },
                             onDelete: { vm.deleteSession(id: $0) },
                             onMove: { sessionId, courseId in
@@ -157,6 +159,16 @@ struct MainWindowView: View {
                     Label(L10n.t("toolbar.overlay"), systemImage: "rectangle.on.rectangle")
                 }
                 .help(L10n.t("toolbar.overlay.help"))
+
+                TaskCenterButton(taskCenter: appState.taskCenter) {
+                    showingTaskCenter = true
+                }
+
+                Button {
+                    showingDiagnostics = true
+                } label: {
+                    Label(L10n.t("diagnostics.title"), systemImage: "stethoscope")
+                }
             }
         }
         .task { await vm.refresh() }
@@ -176,6 +188,13 @@ struct MainWindowView: View {
             Button("OK") { appState.lastError = nil }
         } message: {
             Text(appState.lastError ?? "")
+        }
+        .sheet(isPresented: $showingTaskCenter) {
+            TaskCenterSheet(taskCenter: appState.taskCenter)
+        }
+        .sheet(isPresented: $showingDiagnostics) {
+            DiagnosticsSheet()
+                .environmentObject(appState)
         }
     }
 
@@ -378,9 +397,8 @@ final class MainWindowViewModel: ObservableObject {
         _ = await app.startEphemeralTranslation(source: source)
     }
 
-    func importFile(url: URL, courseId: String?) async {
-        if await AppState.shared.importFile(url: url, courseId: courseId) != nil {
-            await refresh()
-        }
+    func importFiles(urls: [URL], courseId: String?) async {
+        await AppState.shared.importFiles(urls: urls, courseId: courseId)
+        await refresh()
     }
 }
