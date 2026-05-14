@@ -216,6 +216,9 @@ struct SessionCard: View {
         case "recording": return L10n.t("session.state.recording")
         case "summarized": return L10n.t("session.state.summarized")
         case "transcribed": return L10n.t("session.state.transcribed")
+        case "interrupted": return L10n.t("session.state.interrupted")
+        case "failed": return L10n.t("session.state.failed")
+        case "ready": return L10n.t("session.state.transcribed")
         default: return session.state
         }
     }
@@ -224,6 +227,8 @@ struct SessionCard: View {
         switch session.state {
         case "recording": return Theme.recording
         case "summarized": return Theme.success
+        case "interrupted": return Theme.warning
+        case "failed": return .red
         default: return .secondary
         }
     }

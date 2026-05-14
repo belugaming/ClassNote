@@ -46,20 +46,40 @@ struct MainWindowView: View {
                             })
                 .navigationSplitViewColumnWidth(min: 300, ideal: 360)
         } detail: {
-            Group {
-                if showingSearchResults {
-                    SearchResultsView(query: searchText)
-                } else if let sid = selectedSessionId {
-                    SessionDetailView(sessionId: sid)
-                } else {
-                    MainEmptyStateView(isApiKeyMissing: appState.apiConfig.apiKey.isEmpty && appState.sttBackend == .openAICompatible,
-                                       onStart: {
-                                           Task { await vm.startSession(courseId: selectedCourseId, source: .microphone) }
-                                       },
-                                       onImport: {
-                                           NotificationCenter.default.post(name: .requestImportFile, object: nil)
-                                       })
+            VStack(spacing: 0) {
+                if let interrupted = appState.interruptedSessions.first {
+                    RecoveryBanner(session: interrupted,
+                                   recover: {
+                                       Task {
+                                           await appState.recoverInterruptedSession(interrupted)
+                                           await vm.refresh()
+                                           selectedSessionId = interrupted.id
+                                       }
+                                   },
+                                   dismiss: {
+                                       Task {
+                                           await appState.dismissInterruptedSession(interrupted)
+                                           await vm.refresh()
+                                       }
+                                   })
                 }
+
+                Group {
+                    if showingSearchResults {
+                        SearchResultsView(query: searchText)
+                    } else if let sid = selectedSessionId {
+                        SessionDetailView(sessionId: sid)
+                    } else {
+                        MainEmptyStateView(isApiKeyMissing: appState.apiConfig.apiKey.isEmpty && appState.sttBackend == .openAICompatible,
+                                           onStart: {
+                                               Task { await vm.startSession(courseId: selectedCourseId, source: .microphone) }
+                                           },
+                                           onImport: {
+                                               NotificationCenter.default.post(name: .requestImportFile, object: nil)
+                                           })
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -105,6 +125,30 @@ struct MainWindowView: View {
                     .help(appState.apiConfig.apiKey.isEmpty
                           ? L10n.t("toolbar.help.configureKey")
                           : L10n.t("toolbar.help.recordHint"))
+
+                    Menu {
+                        Button {
+                            Task { await vm.startEphemeralTranslation(source: .microphone) }
+                        } label: {
+                            Label(L10n.t("toolbar.translateOnly.menu.mic"), systemImage: "mic")
+                        }
+                        Button {
+                            Task { await vm.startEphemeralTranslation(source: .system) }
+                        } label: {
+                            Label(L10n.t("toolbar.translateOnly.menu.system"), systemImage: "speaker.wave.2")
+                        }
+                        Button {
+                            Task { await vm.startEphemeralTranslation(source: .mixed) }
+                        } label: {
+                            Label(L10n.t("toolbar.translateOnly.menu.mixed"), systemImage: "person.wave.2")
+                        }
+                    } label: {
+                        Label(L10n.t("toolbar.translateOnly"), systemImage: "character.bubble")
+                    } primaryAction: {
+                        Task { await vm.startEphemeralTranslation(source: .microphone) }
+                    }
+                    .disabled(appState.apiConfig.apiKey.isEmpty && appState.sttBackend == .openAICompatible)
+                    .help(L10n.t("toolbar.translateOnly.help"))
                 }
 
                 Button {
@@ -116,6 +160,7 @@ struct MainWindowView: View {
             }
         }
         .task { await vm.refresh() }
+        .task { await appState.refreshInterruptedSessions() }
         .onChange(of: selectedCourse) { _, _ in
             syncSelectedSessionWithVisibleList()
         }
@@ -208,6 +253,49 @@ struct MainEmptyStateView: View {
     }
 }
 
+private struct RecoveryBanner: View {
+    let session: Session
+    let recover: () -> Void
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Theme.warning)
+                .font(.title3)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(L10n.t("recovery.banner.title"))
+                    .font(.headline)
+                Text("\(session.title) · \(L10n.t("recovery.banner.subtitle"))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer()
+            Button {
+                dismiss()
+            } label: {
+                Label(L10n.t("recovery.action.dismiss"), systemImage: "xmark")
+            }
+            Button {
+                recover()
+            } label: {
+                Label(L10n.t("recovery.action.recover"), systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Theme.warning)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Theme.warning.opacity(0.10))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Theme.warning.opacity(0.20))
+                .frame(height: 1)
+        }
+    }
+}
+
 @MainActor
 final class MainWindowViewModel: ObservableObject {
     @Published var courses: [Course] = []
@@ -279,6 +367,15 @@ final class MainWindowViewModel: ObservableObject {
         }
         _ = await app.startNewSession(courseId: courseId, source: source)
         await refresh()
+    }
+
+    func startEphemeralTranslation(source: AudioSourceKind = .microphone) async {
+        let app = AppState.shared
+        if app.isRecording {
+            app.stopRecording()
+            return
+        }
+        _ = await app.startEphemeralTranslation(source: source)
     }
 
     func importFile(url: URL, courseId: String?) async {

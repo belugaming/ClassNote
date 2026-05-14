@@ -18,7 +18,7 @@ struct LiveControlsView: View {
                 } label: {
                     Label(L10n.t("live.highlight"), systemImage: "star.circle")
                 }
-                .disabled(!appState.isRecording)
+                .disabled(!appState.isRecording || orchestrator.isEphemeralTranslation)
             }
 
             if orchestrator.isImporting {

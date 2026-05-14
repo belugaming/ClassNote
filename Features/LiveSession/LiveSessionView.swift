@@ -35,8 +35,14 @@ private struct InnerView: View {
     private var header: some View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 6) {
-                Text(appState.orchestrator.currentSession?.title ?? L10n.t("live.title"))
-                    .font(.title2.weight(.semibold))
+                HStack(spacing: 8) {
+                    Text(title)
+                        .font(.title2.weight(.semibold))
+                    if orchestrator.isEphemeralTranslation {
+                        Text(L10n.t("live.ephemeral.badge"))
+                            .pill(Theme.translation)
+                    }
+                }
                 HStack(spacing: 8) {
                     Circle()
                         .fill(statusDotColor)
@@ -53,6 +59,11 @@ private struct InnerView: View {
                         .font(.caption.monospacedDigit())
                     Text("·")
                     Text(sourceLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if orchestrator.isEphemeralTranslation {
+                    Label(L10n.t("live.ephemeral.description"), systemImage: "eye.slash")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -75,8 +86,16 @@ private struct InnerView: View {
 
     private var statusLabel: String {
         if orchestrator.isImporting { return L10n.t("live.statusImporting") }
+        if orchestrator.isEphemeralTranslation { return L10n.t("live.statusEphemeral") }
         if appState.isRecording { return L10n.t("live.statusLive") }
         return L10n.t("live.statusIdle")
+    }
+
+    private var title: String {
+        if orchestrator.isEphemeralTranslation {
+            return L10n.t("live.ephemeral.title")
+        }
+        return appState.orchestrator.currentSession?.title ?? L10n.t("live.title")
     }
 
     private var sourceLabel: String {

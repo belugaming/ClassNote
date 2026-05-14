@@ -29,7 +29,7 @@ private struct InnerMenuBarView: View {
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(appState.isRecording
-                         ? (orchestrator.currentSession?.title ?? L10n.t("menubar.recording"))
+                         ? activeTitle
                          : L10n.t("menubar.idle"))
                         .font(.headline)
                         .lineLimit(1)
@@ -72,6 +72,24 @@ private struct InnerMenuBarView: View {
                               tint: .purple) {
                     appState.startNewSession(source: .mixed)
                 }
+
+                Divider()
+
+                MenubarButton(label: L10n.t("menubar.translateOnlyMic"),
+                              icon: "mic",
+                              tint: Theme.translation) {
+                    appState.startEphemeralTranslation(source: .microphone)
+                }
+                MenubarButton(label: L10n.t("menubar.translateOnlySystem"),
+                              icon: "speaker.wave.2",
+                              tint: Theme.translation) {
+                    appState.startEphemeralTranslation(source: .system)
+                }
+                MenubarButton(label: L10n.t("menubar.translateOnlyMixed"),
+                              icon: "character.bubble",
+                              tint: Theme.translation) {
+                    appState.startEphemeralTranslation(source: .mixed)
+                }
             }
 
             Divider()
@@ -84,7 +102,7 @@ private struct InnerMenuBarView: View {
             MenubarButton(label: L10n.t("menubar.markHighlight"),
                           icon: "star.circle",
                           tint: .yellow,
-                          disabled: !appState.isRecording) {
+                          disabled: !appState.isRecording || orchestrator.isEphemeralTranslation) {
                 appState.markHighlight()
             }
             Toggle(isOn: $appState.translationEnabled) {
@@ -124,6 +142,13 @@ private struct InnerMenuBarView: View {
         }
         .padding(12)
         .frame(width: 280)
+    }
+
+    private var activeTitle: String {
+        if orchestrator.isEphemeralTranslation {
+            return L10n.t("live.ephemeral.title")
+        }
+        return orchestrator.currentSession?.title ?? L10n.t("menubar.recording")
     }
 
     private func formatDuration(_ ms: Int64) -> String {

@@ -56,14 +56,14 @@ final class AudioSourceManager: NSObject {
         super.init()
     }
 
-    func start(source: AudioSourceKind, outputURL: URL) async throws {
+    func start(source: AudioSourceKind, outputURL: URL?) async throws {
         guard !running else { return }
         running = true
         state.source = source
         state.startedAt = Date()
         state.audioFileURL = outputURL
 
-        if FileManager.default.fileExists(atPath: outputURL.path) {
+        if let outputURL, FileManager.default.fileExists(atPath: outputURL.path) {
             try? FileManager.default.removeItem(at: outputURL)
         }
 
@@ -72,7 +72,7 @@ final class AudioSourceManager: NSObject {
                                       channels: 1,
                                       interleaved: true)
 
-        writer = FileWriter(url: outputURL)
+        writer = outputURL.map { FileWriter(url: $0) }
 
         switch source {
         case .microphone:

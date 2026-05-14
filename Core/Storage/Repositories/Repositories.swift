@@ -84,10 +84,46 @@ actor SessionRepository {
         }
     }
 
+    func setAudioPath(_ id: String, audioPath: String) async throws {
+        try await Database.shared.dbPool.write { db in
+            try db.execute(sql: "UPDATE session SET audio_path=? WHERE id=?",
+                           arguments: [audioPath, id])
+        }
+    }
+
     func setEnded(_ id: String, endedAt: Int64, durationMs: Int64, audioPath: String?) async throws {
         try await Database.shared.dbPool.write { db in
             try db.execute(sql: "UPDATE session SET ended_at=?, duration_ms=?, audio_path=?, state='transcribed' WHERE id=?",
                            arguments: [endedAt, durationMs, audioPath, id])
+        }
+    }
+
+    func recoverInterrupted(_ id: String, endedAt: Int64, durationMs: Int64) async throws {
+        try await Database.shared.dbPool.write { db in
+            try db.execute(sql: """
+                UPDATE session
+                SET ended_at=?, duration_ms=?, state='transcribed'
+                WHERE id=?
+                """, arguments: [endedAt, durationMs, id])
+        }
+    }
+
+    func markInterrupted(_ id: String) async throws {
+        try await setState(id, state: SessionState.interrupted.rawValue)
+    }
+
+    func setFailed(_ id: String) async throws {
+        try await setState(id, state: SessionState.failed.rawValue)
+    }
+
+    func interruptedCandidates() async throws -> [Session] {
+        try await Database.shared.dbPool.read { db in
+            try Session
+                .filter(["recording", "transcribing", "summarizing", "interrupted"].contains(Column("state")))
+                .filter(Column("ended_at") == nil)
+                .filter(Column("source_kind") != "file")
+                .order(Column("started_at").desc)
+                .fetchAll(db)
         }
     }
 

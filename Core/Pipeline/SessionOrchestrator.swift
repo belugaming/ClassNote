@@ -11,6 +11,7 @@ final class SessionOrchestrator: ObservableObject {
     @Published private(set) var isImporting: Bool = false
     @Published private(set) var importCompleted: Int = 0
     @Published private(set) var importTotal: Int = 0
+    @Published private(set) var isEphemeralTranslation: Bool = false
     @Published var source: AudioSourceKind = .microphone
     @Published var transcript = TranscriptBuffer()
 
@@ -24,6 +25,7 @@ final class SessionOrchestrator: ObservableObject {
     private var importTask: Task<Void, Never>?
     private var translateTasks: [Int64: Task<Void, Never>] = [:]
     private var tickerTask: Task<Void, Never>?
+    private var ephemeralRowId: Int64 = 0
 
     /// Starts a new session, opens audio capture, begins STT/translation pipeline.
     /// Returns the new session id.
@@ -40,6 +42,7 @@ final class SessionOrchestrator: ObservableObject {
         try await SessionRepository.shared.insert(sess)
         self.currentSession = sess
         self.currentSessionId = sess.id
+        self.isEphemeralTranslation = false
         self.statusText = "Starting capture…"
         self.transcript.reset()
         self.currentTimestampMs = 0
@@ -64,11 +67,52 @@ final class SessionOrchestrator: ObservableObject {
             throw error
         }
         statusText = "Recording"
+        try await SessionRepository.shared.setAudioPath(sess.id, audioPath: outputURL.path)
+        self.currentSession?.audioPath = outputURL.path
 
         startTicker()
-        startPipeline(config: config)
+        startPipeline(config: config, persistSegments: true)
 
         return sess.id
+    }
+
+    /// Starts a live translation session without creating a Session row,
+    /// recording audio, or persisting transcript segments. The live window can
+    /// display subtitles exactly like a normal recording, but stopping discards
+    /// everything in memory.
+    @discardableResult
+    func startEphemeralTranslation(source: AudioSourceKind? = nil) async throws -> String {
+        let src = source ?? self.source
+        guard src != .file else {
+            throw EngineError.unsupported("Temporary translation does not support file import")
+        }
+
+        self.source = src
+        let config = AppState.shared.apiConfig
+        self.currentSession = nil
+        self.currentSessionId = nil
+        self.isEphemeralTranslation = true
+        self.statusText = "Live translation only"
+        self.transcript.reset()
+        self.currentTimestampMs = 0
+        self.ephemeralRowId = 0
+
+        let manager = AudioSourceManager()
+        self.audioManager = manager
+
+        do {
+            try await manager.start(source: src, outputURL: nil)
+        } catch {
+            self.audioManager = nil
+            self.isEphemeralTranslation = false
+            self.statusText = "Failed to start translation"
+            throw error
+        }
+
+        startTicker()
+        startPipeline(config: config, persistSegments: false)
+
+        return "ephemeral-translation"
     }
 
     func ingestFile(url: URL, courseId: String?) async throws -> String {
@@ -80,6 +124,7 @@ final class SessionOrchestrator: ObservableObject {
         self.currentSession = sess
         self.currentSessionId = sess.id
         self.source = .file
+        self.isEphemeralTranslation = false
         self.statusText = "Importing \(url.lastPathComponent)"
         self.transcript.reset()
         self.currentTimestampMs = 0
@@ -165,6 +210,7 @@ final class SessionOrchestrator: ObservableObject {
                                                           audioPath: audioPath)
         }
         isImporting = false
+        isEphemeralTranslation = false
         statusText = "Stopped"
     }
 
@@ -183,7 +229,7 @@ final class SessionOrchestrator: ObservableObject {
         }
     }
 
-    private func startPipeline(config: ApiConfig) {
+    private func startPipeline(config: ApiConfig, persistSegments: Bool) {
         guard let manager = audioManager else { return }
         let backend = AppState.shared.sttBackend
         let stt = EngineFactory.makeSTT(config: config, backend: backend)
@@ -196,26 +242,38 @@ final class SessionOrchestrator: ObservableObject {
 
         sttTask = Task { [weak self, transcript, config] in
             guard let self = self else { return }
-            let sid = self.currentSessionId ?? ""
             let ttStream = stt.transcribe(audio: stream, language: config.sourceLanguage.isEmpty ? nil : config.sourceLanguage)
             do {
                 for try await event in ttStream {
-                    let seg = Segment(id: nil,
-                                       sessionId: sid,
-                                       startMs: event.startMs,
-                                       endMs: event.endMs,
-                                       speakerId: event.speakerId,
-                                       textOriginal: event.text,
-                                       textTranslated: "",
-                                       isFinal: event.isFinal,
-                                       confidence: 0,
-                                       version: 1)
-                    let rowId = try await SegmentRepository.shared.insert(seg)
+                    let rowId: Int64
+                    if persistSegments {
+                        guard let sid = await MainActor.run(body: { self.currentSessionId }) else { continue }
+                        let seg = Segment(id: nil,
+                                           sessionId: sid,
+                                           startMs: event.startMs,
+                                           endMs: event.endMs,
+                                           speakerId: event.speakerId,
+                                           textOriginal: event.text,
+                                           textTranslated: "",
+                                           isFinal: event.isFinal,
+                                           confidence: 0,
+                                           version: 1)
+                        rowId = try await SegmentRepository.shared.insert(seg)
+                    } else {
+                        rowId = await MainActor.run {
+                            self.ephemeralRowId -= 1
+                            return self.ephemeralRowId
+                        }
+                    }
                     await MainActor.run {
                         transcript.appendFinal(rowId: rowId, startMs: event.startMs, endMs: event.endMs, original: event.text)
                     }
                     if AppState.shared.translationEnabled {
-                        self.translate(rowId: rowId, text: event.text, translator: translator, config: config)
+                        self.translate(rowId: rowId,
+                                       text: event.text,
+                                       translator: translator,
+                                       config: config,
+                                       persistTranslation: persistSegments)
                     }
                 }
             } catch {
@@ -230,7 +288,8 @@ final class SessionOrchestrator: ObservableObject {
     private func translate(rowId: Int64,
                            text: String,
                            translator: TranslationProvider,
-                           config: ApiConfig) {
+                           config: ApiConfig,
+                           persistTranslation: Bool = true) {
         let task = Task { @MainActor [transcript, weak self] in
             guard let _ = self else { return }
             let ctx = transcript.recent(4)
@@ -244,7 +303,9 @@ final class SessionOrchestrator: ObservableObject {
                     accumulated += delta
                     transcript.appendTranslationDelta(rowId: rowId, delta: delta)
                 }
-                try? await SegmentRepository.shared.updateTranslation(id: rowId, textTranslated: accumulated)
+                if persistTranslation {
+                    try? await SegmentRepository.shared.updateTranslation(id: rowId, textTranslated: accumulated)
+                }
             } catch {
                 AppState.shared.setError("Translation error: \(error.localizedDescription)")
             }

@@ -1,6 +1,24 @@
 import Foundation
 import GRDB
 
+enum SessionState: String, Codable, Sendable {
+    case recording
+    case transcribing
+    case transcribed
+    case summarizing
+    case summarized
+    case interrupted
+    case failed
+
+    init(storedValue: String) {
+        if storedValue == "ready" {
+            self = .transcribed
+        } else {
+            self = SessionState(rawValue: storedValue) ?? .transcribed
+        }
+    }
+}
+
 struct Session: Codable, FetchableRecord, PersistableRecord, Identifiable, Hashable, Sendable {
     var id: String
     var courseId: String?
@@ -9,7 +27,7 @@ struct Session: Codable, FetchableRecord, PersistableRecord, Identifiable, Hasha
     var endedAt: Int64?
     var audioPath: String?
     var sourceKind: String   // "mic" | "system" | "mixed" | "file"
-    var state: String        // "recording" | "transcribing" | "summarizing" | "ready"
+    var state: String        // See SessionState.
     var sttModel: String?
     var llmModel: String?
     var durationMs: Int64

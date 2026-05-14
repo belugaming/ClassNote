@@ -14,6 +14,7 @@ final class AppState: ObservableObject {
     @Published var lastError: String? = nil
     @Published var translationEnabled: Bool = true
     @Published var sttBackend: SttBackend = .openAICompatible
+    @Published var interruptedSessions: [Session] = []
 
     /// Bumped whenever the user changes the language. Views observe this to
     /// re-render all L10n strings without needing an app restart.
@@ -23,7 +24,10 @@ final class AppState: ObservableObject {
 
     private init() {
         self.orchestrator = SessionOrchestrator()
-        Task { await loadConfig() }
+        Task {
+            await loadConfig()
+            await refreshInterruptedSessions()
+        }
     }
 
     func loadConfig() async {
@@ -36,6 +40,28 @@ final class AppState: ObservableObject {
     func saveConfig(_ cfg: ApiConfig) async {
         try? await ApiConfigRepository.shared.save(cfg)
         self.apiConfig = cfg
+    }
+
+    func refreshInterruptedSessions() async {
+        interruptedSessions = await RecoveryCoordinator.scanInterruptedSessions()
+    }
+
+    func recoverInterruptedSession(_ session: Session) async {
+        do {
+            try await RecoveryCoordinator.recover(session)
+            await refreshInterruptedSessions()
+        } catch {
+            setError(error.localizedDescription)
+        }
+    }
+
+    func dismissInterruptedSession(_ session: Session) async {
+        do {
+            try await RecoveryCoordinator.dismiss(session)
+            await refreshInterruptedSessions()
+        } catch {
+            setError(error.localizedDescription)
+        }
     }
 
     func startNewSession(source: AudioSourceKind = .microphone) {
@@ -66,14 +92,44 @@ final class AppState: ObservableObject {
         }
     }
 
+    func startEphemeralTranslation(source: AudioSourceKind = .microphone) {
+        Task { @MainActor in
+            do {
+                let windowId = try await orchestrator.startEphemeralTranslation(source: source)
+                self.currentSessionId = nil
+                self.isRecording = true
+                NotificationCenter.default.post(name: .openLiveSession, object: windowId)
+            } catch {
+                self.setError(error.localizedDescription)
+                self.isRecording = false
+            }
+        }
+    }
+
+    func startEphemeralTranslation(source: AudioSourceKind) async -> Bool {
+        do {
+            let windowId = try await orchestrator.startEphemeralTranslation(source: source)
+            self.currentSessionId = nil
+            self.isRecording = true
+            NotificationCenter.default.post(name: .openLiveSession, object: windowId)
+            return true
+        } catch {
+            self.setError(error.localizedDescription)
+            self.isRecording = false
+            return false
+        }
+    }
+
     func stopRecording() {
         Task { @MainActor in
             await orchestrator.stop()
             self.isRecording = false
+            self.currentSessionId = nil
         }
     }
 
     func markHighlight(note: String = "") {
+        guard !orchestrator.isEphemeralTranslation else { return }
         guard let sid = currentSessionId else { return }
         Task {
             try? await HighlightRepository.shared.mark(sessionId: sid,
