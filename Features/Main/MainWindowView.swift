@@ -9,6 +9,8 @@ struct MainWindowView: View {
     @State private var showingSearchResults = false
     @State private var showingTaskCenter = false
     @State private var showingDiagnostics = false
+    @State private var showingFirstLaunchGuide = false
+    @AppStorage("hasCompletedFirstLaunchTutorial.v1") private var hasCompletedFirstLaunchTutorial = false
 
     private var selectedCourseId: String? {
         selectedCourse?.courseId
@@ -169,10 +171,22 @@ struct MainWindowView: View {
                 } label: {
                     Label(L10n.t("diagnostics.title"), systemImage: "stethoscope")
                 }
+
+                Button {
+                    showingFirstLaunchGuide = true
+                } label: {
+                    Label(L10n.t("onboarding.replay"), systemImage: "questionmark.circle")
+                }
+                .help(L10n.t("onboarding.replay.help"))
             }
         }
         .task { await vm.refresh() }
         .task { await appState.refreshInterruptedSessions() }
+        .onAppear {
+            if !hasCompletedFirstLaunchTutorial {
+                showingFirstLaunchGuide = true
+            }
+        }
         .onChange(of: selectedCourse) { _, _ in
             syncSelectedSessionWithVisibleList()
         }
@@ -196,6 +210,12 @@ struct MainWindowView: View {
             DiagnosticsSheet()
                 .environmentObject(appState)
         }
+        .sheet(isPresented: $showingFirstLaunchGuide) {
+            FirstLaunchGuideSheet {
+                hasCompletedFirstLaunchTutorial = true
+                showingFirstLaunchGuide = false
+            }
+        }
     }
 
     private func syncSelectedSessionWithVisibleList() {
@@ -205,6 +225,169 @@ struct MainWindowView: View {
             self.selectedSessionId = nil
         }
     }
+}
+
+private struct FirstLaunchGuideSheet: View {
+    let onFinish: () -> Void
+    @State private var selectedIndex = 0
+
+    private var steps: [FirstLaunchGuideStep] {
+        [
+            .init(icon: "key.fill",
+                  tint: Theme.warning,
+                  titleKey: "onboarding.step.setup.title",
+                  bodyKey: "onboarding.step.setup.body",
+                  points: [
+                      "onboarding.step.setup.point.api",
+                      "onboarding.step.setup.point.permissions",
+                      "onboarding.step.setup.point.diagnostics"
+                  ]),
+            .init(icon: "waveform.badge.mic",
+                  tint: Theme.accent,
+                  titleKey: "onboarding.step.capture.title",
+                  bodyKey: "onboarding.step.capture.body",
+                  points: [
+                      "onboarding.step.capture.point.record",
+                      "onboarding.step.capture.point.import",
+                      "onboarding.step.capture.point.translateOnly"
+                  ]),
+            .init(icon: "sparkles",
+                  tint: Theme.success,
+                  titleKey: "onboarding.step.study.title",
+                  bodyKey: "onboarding.step.study.body",
+                  points: [
+                      "onboarding.step.study.point.notes",
+                      "onboarding.step.study.point.qa",
+                      "onboarding.step.study.point.flashcards"
+                  ]),
+            .init(icon: "checklist",
+                  tint: Theme.translation,
+                  titleKey: "onboarding.step.control.title",
+                  bodyKey: "onboarding.step.control.body",
+                  points: [
+                      "onboarding.step.control.point.tasks",
+                      "onboarding.step.control.point.saveTemporary",
+                      "onboarding.step.control.point.export"
+                  ])
+        ]
+    }
+
+    private var step: FirstLaunchGuideStep {
+        steps[min(max(selectedIndex, 0), steps.count - 1)]
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(L10n.t("onboarding.title"))
+                    .font(.title2.weight(.semibold))
+                Spacer()
+                Text("\(selectedIndex + 1)/\(steps.count)")
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 22)
+            .padding(.bottom, 12)
+
+            Divider()
+
+            VStack(spacing: 22) {
+                Image(systemName: step.icon)
+                    .font(.system(size: 50, weight: .semibold))
+                    .foregroundStyle(step.tint)
+                    .frame(width: 96, height: 96)
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
+                            .fill(step.tint.opacity(0.12))
+                    )
+
+                VStack(spacing: 8) {
+                    Text(L10n.t(step.titleKey))
+                        .font(.system(size: 28, weight: .semibold, design: .rounded))
+                        .multilineTextAlignment(.center)
+                    Text(L10n.t(step.bodyKey))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(3)
+                        .frame(maxWidth: 520)
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(step.points, id: \.self) { point in
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(step.tint)
+                                .font(.callout)
+                            Text(L10n.t(point))
+                                .font(.callout)
+                                .foregroundStyle(.primary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: 520, alignment: .leading)
+                .cardBackground()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 22)
+
+            Divider()
+
+            HStack(spacing: 10) {
+                Button(L10n.t("onboarding.skip")) {
+                    onFinish()
+                }
+                .buttonStyle(.borderless)
+
+                Spacer()
+
+                HStack(spacing: 6) {
+                    ForEach(steps.indices, id: \.self) { index in
+                        Circle()
+                            .fill(index == selectedIndex ? Theme.accent : Theme.hairline)
+                            .frame(width: 7, height: 7)
+                    }
+                }
+
+                Spacer()
+
+                Button {
+                    selectedIndex = max(selectedIndex - 1, 0)
+                } label: {
+                    Label(L10n.t("onboarding.back"), systemImage: "chevron.left")
+                }
+                .disabled(selectedIndex == 0)
+
+                Button {
+                    if selectedIndex == steps.count - 1 {
+                        onFinish()
+                    } else {
+                        selectedIndex += 1
+                    }
+                } label: {
+                    Label(selectedIndex == steps.count - 1 ? L10n.t("onboarding.finish") : L10n.t("onboarding.next"),
+                          systemImage: selectedIndex == steps.count - 1 ? "checkmark.circle" : "chevron.right")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
+            }
+            .padding(18)
+        }
+        .frame(width: 680, height: 560)
+        .interactiveDismissDisabled()
+    }
+}
+
+private struct FirstLaunchGuideStep {
+    let icon: String
+    let tint: Color
+    let titleKey: String
+    let bodyKey: String
+    let points: [String]
 }
 
 struct MainEmptyStateView: View {
