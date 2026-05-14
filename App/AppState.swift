@@ -29,10 +29,11 @@ final class AppState: ObservableObject {
 
     private init() {
         self.orchestrator = SessionOrchestrator()
-        Task {
-            await loadConfig()
-            await refreshInterruptedSessions()
-        }
+    }
+
+    func bootstrap() async {
+        await loadConfig()
+        await refreshInterruptedSessions()
     }
 
     func loadConfig() async {
@@ -43,8 +44,12 @@ final class AppState: ObservableObject {
     }
 
     func saveConfig(_ cfg: ApiConfig) async {
-        try? await ApiConfigRepository.shared.save(cfg)
-        self.apiConfig = cfg
+        do {
+            try await ApiConfigRepository.shared.save(cfg)
+            self.apiConfig = cfg
+        } catch {
+            setError("Save settings failed: \(error.localizedDescription)")
+        }
     }
 
     func refreshInterruptedSessions() async {

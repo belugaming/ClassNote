@@ -82,16 +82,8 @@ struct AppearanceSettingsView: View {
 
 struct ApiSettingsView: View {
     @EnvironmentObject var appState: AppState
-    @State private var baseUrl: String = ""
-    @State private var apiKey: String = ""
-    @State private var sttModel: String = ""
-    @State private var translationModel: String = ""
-    @State private var llmModel: String = ""
-    @State private var sourceLanguage: String = ""
-    @State private var targetLanguage: String = ""
     @State private var testStatus: String = ""
     @State private var testIsError: Bool = false
-    @State private var loaded = false
 
     private let providerPresets: [(label: String, base: String, stt: String, llm: String, color: Color)] = [
         ("OpenAI", "https://api.openai.com/v1", "whisper-1", "gpt-4o-mini", .green),
@@ -109,10 +101,12 @@ struct ApiSettingsView: View {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8)], spacing: 8) {
                         ForEach(providerPresets, id: \.label) { preset in
                             Button {
-                                baseUrl = preset.base
-                                sttModel = preset.stt
-                                translationModel = preset.llm
-                                llmModel = preset.llm
+                                var c = appState.apiConfig
+                                c.baseUrl = preset.base
+                                c.sttModel = preset.stt
+                                c.translationModel = preset.llm
+                                c.llmModel = preset.llm
+                                appState.apiConfig = c
                             } label: {
                                 HStack(spacing: 6) {
                                     Circle().fill(preset.color).frame(width: 7, height: 7)
@@ -140,24 +134,24 @@ struct ApiSettingsView: View {
                 SettingsSection(title: L10n.t("settings.api.endpoint"),
                                 footer: L10n.t("settings.api.privacy")) {
                     LabeledRow(label: L10n.t("settings.api.baseUrl")) {
-                        TextField("https://api.openai.com/v1", text: $baseUrl)
+                        TextField("https://api.openai.com/v1", text: baseUrlBinding)
                             .textFieldStyle(.roundedBorder)
                     }
                     LabeledRow(label: L10n.t("settings.api.key")) {
-                        SecureField("sk-…", text: $apiKey)
+                        SecureField("sk-…", text: apiKeyBinding)
                             .textFieldStyle(.roundedBorder)
                     }
                 }
 
                 SettingsSection(title: L10n.t("settings.api.models")) {
                     LabeledRow(label: L10n.t("settings.api.stt")) {
-                        TextField("whisper-1", text: $sttModel).textFieldStyle(.roundedBorder)
+                        TextField("whisper-1", text: sttModelBinding).textFieldStyle(.roundedBorder)
                     }
                     LabeledRow(label: L10n.t("settings.api.translation")) {
-                        TextField("gpt-4o-mini", text: $translationModel).textFieldStyle(.roundedBorder)
+                        TextField("gpt-4o-mini", text: translationModelBinding).textFieldStyle(.roundedBorder)
                     }
                     LabeledRow(label: L10n.t("settings.api.llm")) {
-                        TextField("gpt-4o-mini", text: $llmModel).textFieldStyle(.roundedBorder)
+                        TextField("gpt-4o-mini", text: llmModelBinding).textFieldStyle(.roundedBorder)
                     }
                 }
 
@@ -165,10 +159,10 @@ struct ApiSettingsView: View {
                                 footer: L10n.t("settings.api.langHelp")) {
                     HStack(spacing: 8) {
                         LabeledRow(label: L10n.t("settings.api.source")) {
-                            TextField("en", text: $sourceLanguage).textFieldStyle(.roundedBorder)
+                            TextField("en", text: sourceLanguageBinding).textFieldStyle(.roundedBorder)
                         }
                         LabeledRow(label: L10n.t("settings.api.target")) {
-                            TextField("zh-Hans", text: $targetLanguage).textFieldStyle(.roundedBorder)
+                            TextField("zh-Hans", text: targetLanguageBinding).textFieldStyle(.roundedBorder)
                         }
                     }
                 }
@@ -191,7 +185,7 @@ struct ApiSettingsView: View {
                             .frame(minWidth: 100)
                     }
                     .controlSize(.large)
-                    .disabled(baseUrl.isEmpty || apiKey.isEmpty)
+                    .disabled(appState.apiConfig.baseUrl.isEmpty || appState.apiConfig.apiKey.isEmpty)
 
                     if !testStatus.isEmpty {
                         HStack(spacing: 4) {
@@ -206,31 +200,11 @@ struct ApiSettingsView: View {
             .padding(20)
         }
         .background(Theme.surface.opacity(0.22))
-        .onAppear {
-            guard !loaded else { return }
-            let c = appState.apiConfig
-            baseUrl = c.baseUrl
-            apiKey = c.apiKey
-            sttModel = c.sttModel
-            translationModel = c.translationModel
-            llmModel = c.llmModel
-            sourceLanguage = c.sourceLanguage
-            targetLanguage = c.targetLanguage
-            loaded = true
-        }
     }
 
     private func save() {
-        var c = appState.apiConfig
-        c.baseUrl = baseUrl
-        c.apiKey = apiKey
-        c.sttModel = sttModel
-        c.translationModel = translationModel
-        c.llmModel = llmModel
-        c.sourceLanguage = sourceLanguage
-        c.targetLanguage = targetLanguage
         Task {
-            await appState.saveConfig(c)
+            await appState.saveConfig(appState.apiConfig)
             testStatus = L10n.t("settings.api.saved")
             testIsError = false
         }
@@ -239,22 +213,81 @@ struct ApiSettingsView: View {
     private func testConnection() async {
         testStatus = L10n.t("settings.api.testing")
         testIsError = false
-        var c = appState.apiConfig
-        c.baseUrl = baseUrl
-        c.apiKey = apiKey
-        c.llmModel = llmModel
-        let client = OpenAICompatibleLLM(config: c)
+        let client = OpenAICompatibleLLM(config: appState.apiConfig)
         do {
             let out = try await client.chatComplete(messages: [
                 .init(role: .system, content: "Reply with exactly: OK"),
                 .init(role: .user, content: "ping")
-            ], model: llmModel, temperature: 0)
+            ], model: appState.apiConfig.llmModel, temperature: 0)
             testStatus = "\(L10n.t("settings.api.testOk")) — \(out.prefix(40))"
             testIsError = false
         } catch {
             testStatus = "\(L10n.t("settings.api.testFail")): \(error.localizedDescription)"
             testIsError = true
         }
+    }
+
+    private var baseUrlBinding: Binding<String> {
+        Binding(get: { appState.apiConfig.baseUrl },
+                set: { newValue in
+                    var c = appState.apiConfig
+                    c.baseUrl = newValue
+                    appState.apiConfig = c
+                })
+    }
+
+    private var apiKeyBinding: Binding<String> {
+        Binding(get: { appState.apiConfig.apiKey },
+                set: { newValue in
+                    var c = appState.apiConfig
+                    c.apiKey = newValue
+                    appState.apiConfig = c
+                })
+    }
+
+    private var sttModelBinding: Binding<String> {
+        Binding(get: { appState.apiConfig.sttModel },
+                set: { newValue in
+                    var c = appState.apiConfig
+                    c.sttModel = newValue
+                    appState.apiConfig = c
+                })
+    }
+
+    private var translationModelBinding: Binding<String> {
+        Binding(get: { appState.apiConfig.translationModel },
+                set: { newValue in
+                    var c = appState.apiConfig
+                    c.translationModel = newValue
+                    appState.apiConfig = c
+                })
+    }
+
+    private var llmModelBinding: Binding<String> {
+        Binding(get: { appState.apiConfig.llmModel },
+                set: { newValue in
+                    var c = appState.apiConfig
+                    c.llmModel = newValue
+                    appState.apiConfig = c
+                })
+    }
+
+    private var sourceLanguageBinding: Binding<String> {
+        Binding(get: { appState.apiConfig.sourceLanguage },
+                set: { newValue in
+                    var c = appState.apiConfig
+                    c.sourceLanguage = newValue
+                    appState.apiConfig = c
+                })
+    }
+
+    private var targetLanguageBinding: Binding<String> {
+        Binding(get: { appState.apiConfig.targetLanguage },
+                set: { newValue in
+                    var c = appState.apiConfig
+                    c.targetLanguage = newValue
+                    appState.apiConfig = c
+                })
     }
 }
 

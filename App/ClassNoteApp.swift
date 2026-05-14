@@ -6,6 +6,11 @@ struct ClassNoteApp: App {
 
     init() {
         AppBootstrap.run()
+        DispatchQueue.main.async {
+            Task {
+                await AppState.shared.bootstrap()
+            }
+        }
     }
 
     var body: some Scene {
