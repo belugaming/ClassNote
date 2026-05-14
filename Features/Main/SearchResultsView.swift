@@ -23,7 +23,7 @@ struct SearchResultsView: View {
                 }
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
+                    LazyVStack(alignment: .leading, spacing: 8) {
                         Text(L10n.isChinese ? "\(results.count) 条命中" : "\(results.count) matches")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
@@ -48,13 +48,22 @@ struct SearchResultsView: View {
                                 }
                             }
                             .padding(12)
-                            .cardBackground()
+                            .background(
+                                RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
+                                    .fill(Theme.surfaceElevated.opacity(0.68))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
+                                    .stroke(Theme.hairline, lineWidth: 1)
+                            )
                         }
                     }
-                    .padding(14)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 14)
                 }
             }
         }
+        .background(Theme.surfaceElevated.opacity(0.25))
         .task(id: query) { await runSearch() }
     }
 

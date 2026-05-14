@@ -47,6 +47,7 @@ struct SettingsView: View {
                 .tag(Tab.about)
         }
         .frame(minWidth: 640, minHeight: 540)
+        .background(Theme.surface.opacity(0.26))
         .id(appState.languageRefreshToken)   // force full re-render on language switch
     }
 }
@@ -73,6 +74,7 @@ struct AppearanceSettingsView: View {
             }
             .padding(20)
         }
+        .background(Theme.surface.opacity(0.22))
     }
 }
 
@@ -113,8 +115,10 @@ struct ApiSettingsView: View {
                                 llmModel = preset.llm
                             } label: {
                                 HStack(spacing: 6) {
-                                    Circle().fill(preset.color).frame(width: 8, height: 8)
-                                    Text(preset.label).font(.callout)
+                                    Circle().fill(preset.color).frame(width: 7, height: 7)
+                                    Text(preset.label)
+                                        .font(.callout.weight(.medium))
+                                        .lineLimit(1)
                                 }
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 8)
@@ -201,6 +205,7 @@ struct ApiSettingsView: View {
             }
             .padding(20)
         }
+        .background(Theme.surface.opacity(0.22))
         .onAppear {
             guard !loaded else { return }
             let c = appState.apiConfig
@@ -308,6 +313,7 @@ struct EngineSettingsView: View {
             }
             .padding(20)
         }
+        .background(Theme.surface.opacity(0.22))
     }
 }
 
@@ -344,6 +350,7 @@ struct ShortcutsSettingsView: View {
             }
             .padding(20)
         }
+        .background(Theme.surface.opacity(0.22))
     }
 }
 
@@ -365,18 +372,18 @@ private struct ShortcutRow: View {
 
 struct AboutView: View {
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 18) {
             Spacer()
             ZStack {
-                Circle()
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
                     .fill(Theme.accentSoft)
-                    .frame(width: 110, height: 110)
+                    .frame(width: 104, height: 104)
                 Image(systemName: "waveform.badge.mic")
-                    .font(.system(size: 48, weight: .medium))
+                    .font(.system(size: 46, weight: .medium))
                     .foregroundStyle(Theme.accent)
             }
             Text(L10n.t("app.name"))
-                .font(.system(size: 28, weight: .semibold, design: .rounded))
+                .font(.system(size: 30, weight: .semibold, design: .rounded))
             Text(L10n.t("settings.about.version"))
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -384,10 +391,12 @@ struct AboutView: View {
                 .multilineTextAlignment(.center)
                 .font(.body)
                 .foregroundStyle(.secondary)
-                .padding(.horizontal, 60)
-                .padding(.top, 8)
+                .lineSpacing(3)
+                .frame(maxWidth: 420)
+                .padding(.top, 2)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.surfaceElevated.opacity(0.35))
     }
 }

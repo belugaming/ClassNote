@@ -97,6 +97,7 @@ final class AppState: ObservableObject {
 extension Notification.Name {
     static let openLiveSession = Notification.Name("openLiveSession")
     static let toggleOverlay = Notification.Name("toggleOverlay")
+    static let requestImportFile = Notification.Name("requestImportFile")
 }
 
 enum SttBackend: String, CaseIterable, Identifiable {

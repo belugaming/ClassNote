@@ -14,51 +14,56 @@ struct SessionListView: View {
     @State private var importing = false
 
     var body: some View {
-        Group {
-            if sessions.isEmpty {
-                EmptySessionList(onStart: onStartSession, onImport: { importing = true })
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 8) {
-                        ForEach(sessions) { session in
-                            SessionCard(session: session, isSelected: selection == session.id)
-                                .onTapGesture { selection = session.id }
-                                .contextMenu {
-                                    Menu {
-                                        Button {
-                                            onMove(session.id, nil)
-                                        } label: {
-                                            Label(L10n.t("main.unfiled"), systemImage: session.courseId == nil ? "checkmark" : "tray")
-                                        }
-                                        .disabled(session.courseId == nil)
-
-                                        if !courses.isEmpty {
-                                            Divider()
-                                            ForEach(courses) { course in
-                                                Button {
-                                                    onMove(session.id, course.id)
-                                                } label: {
-                                                    Label(course.name, systemImage: session.courseId == course.id ? "checkmark" : "folder")
-                                                }
-                                                .disabled(session.courseId == course.id)
+        VStack(spacing: 0) {
+            listHeader
+            Divider().opacity(0.45)
+            Group {
+                if sessions.isEmpty {
+                    EmptySessionList(onStart: onStartSession, onImport: { importing = true })
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 6) {
+                            ForEach(sessions) { session in
+                                SessionCard(session: session, isSelected: selection == session.id)
+                                    .onTapGesture { selection = session.id }
+                                    .contextMenu {
+                                        Menu {
+                                            Button {
+                                                onMove(session.id, nil)
+                                            } label: {
+                                                Label(L10n.t("main.unfiled"), systemImage: session.courseId == nil ? "checkmark" : "tray")
                                             }
-                                        }
-                                    } label: {
-                                        Label(L10n.t("main.moveSession"), systemImage: "folder")
-                                    }
+                                            .disabled(session.courseId == nil)
 
-                                    Button(role: .destructive) {
-                                        onDelete(session.id)
-                                    } label: {
-                                        Label(L10n.t("main.deleteSession"), systemImage: "trash")
+                                            if !courses.isEmpty {
+                                                Divider()
+                                                ForEach(courses) { course in
+                                                    Button {
+                                                        onMove(session.id, course.id)
+                                                    } label: {
+                                                        Label(course.name, systemImage: session.courseId == course.id ? "checkmark" : "folder")
+                                                    }
+                                                    .disabled(session.courseId == course.id)
+                                                }
+                                            }
+                                        } label: {
+                                            Label(L10n.t("main.moveSession"), systemImage: "folder")
+                                        }
+
+                                        Button(role: .destructive) {
+                                            onDelete(session.id)
+                                        } label: {
+                                            Label(L10n.t("main.deleteSession"), systemImage: "trash")
+                                        }
                                     }
-                                }
+                            }
                         }
+                        .padding(10)
                     }
-                    .padding(12)
                 }
             }
         }
+        .background(Theme.surface.opacity(0.28))
         .toolbar {
             ToolbarItemGroup {
                 Button {
@@ -84,6 +89,37 @@ struct SessionListView: View {
                 AppState.shared.setError(err.localizedDescription)
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .requestImportFile)) { _ in
+            importing = true
+        }
+    }
+
+    private var listHeader: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.title3.weight(.semibold))
+                .lineLimit(1)
+            Text(countLabel)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.top, 14)
+        .padding(.bottom, 12)
+        .background(Theme.surfaceElevated.opacity(0.55))
+    }
+
+    private var title: String {
+        guard let courseId else { return L10n.t("main.allSessions") }
+        return courses.first { $0.id == courseId }?.name ?? L10n.t("main.courses")
+    }
+
+    private var countLabel: String {
+        if L10n.isChinese {
+            return "\(sessions.count) 个会话"
+        }
+        return "\(sessions.count) sessions"
     }
 }
 
@@ -92,43 +128,58 @@ struct SessionCard: View {
     let isSelected: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(iconColor.opacity(0.16))
-                    .frame(width: 40, height: 40)
-                Image(systemName: iconName)
-                    .font(.title3)
-                    .foregroundStyle(iconColor)
-            }
+        HStack(alignment: .center, spacing: 10) {
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(isSelected ? Theme.accent : Color.clear)
+                .frame(width: 3, height: 48)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(session.title)
-                    .font(.body.weight(.medium))
-                    .lineLimit(1)
+            Image(systemName: iconName)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(iconColor)
+                .frame(width: 34, height: 34)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(iconColor.opacity(0.11))
+                )
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Text(session.title)
+                        .font(.callout.weight(.semibold))
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    Text(formatDuration(session.durationMs))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
                 HStack(spacing: 6) {
                     Text(formatDate(session.startedAt))
                     Text("·")
-                    Text(formatDuration(session.durationMs))
+                    Text(sourceLabel)
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
                 HStack(spacing: 6) {
                     Text(stateLabel).pill(stateColor)
-                    Text(sourceLabel).pill(Theme.accent)
+                    if session.state == "recording" {
+                        Circle()
+                            .fill(Theme.recording)
+                            .frame(width: 6, height: 6)
+                    }
                 }
             }
-            Spacer()
         }
-        .padding(10)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
         .background(
             RoundedRectangle(cornerRadius: Theme.cornerMedium)
-                .fill(isSelected ? Theme.accentSoft : Color.primary.opacity(0.035))
+                .fill(isSelected ? Theme.accentSoft : Theme.surfaceElevated.opacity(0.55))
         )
         .overlay(
             RoundedRectangle(cornerRadius: Theme.cornerMedium)
-                .stroke(isSelected ? Theme.accent.opacity(0.6) : Color.primary.opacity(0.06), lineWidth: 1)
+                .stroke(isSelected ? Theme.accent.opacity(0.45) : Theme.hairline, lineWidth: 1)
         )
         .contentShape(Rectangle())
     }
@@ -200,33 +251,45 @@ struct EmptySessionList: View {
     let onImport: () -> Void
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 18) {
             Spacer()
-            Image(systemName: "mic.circle")
-                .font(.system(size: 60))
-                .foregroundStyle(.tertiary)
-            Text(L10n.t("session.empty.transcript.title"))
-                .font(.title3.weight(.medium))
-                .foregroundStyle(.secondary)
-            Text(L10n.t("session.empty.transcript.desc"))
-                .font(.callout)
-                .foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 30)
-            HStack {
+            Image(systemName: "waveform")
+                .font(.system(size: 38, weight: .medium))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 72, height: 72)
+                .background(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Theme.accentSoft)
+                )
+            VStack(spacing: 6) {
+                Text(L10n.t("session.empty.transcript.title"))
+                    .font(.headline)
+                Text(L10n.t("session.empty.transcript.desc"))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(2)
+                    .frame(maxWidth: 270)
+            }
+            VStack(spacing: 8) {
                 Button {
                     onStart()
                 } label: {
                     Label(L10n.t("toolbar.newSession"), systemImage: "mic.circle.fill")
+                        .frame(maxWidth: .infinity)
                 }
+                .controlSize(.large)
                 .buttonStyle(.borderedProminent)
                 .tint(Theme.accent)
                 Button {
                     onImport()
                 } label: {
                     Label(L10n.t("toolbar.import"), systemImage: "square.and.arrow.down")
+                        .frame(maxWidth: .infinity)
                 }
+                .controlSize(.large)
             }
+            .frame(width: 190)
             .padding(.top, 4)
             Spacer()
         }

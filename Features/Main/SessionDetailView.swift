@@ -32,7 +32,6 @@ struct SessionDetailView: View {
         VStack(spacing: 0) {
             header
             tabPicker
-            Divider().opacity(0.5)
             Group {
                 switch selectedTab {
                 case .transcript: TranscriptPane(vm: vm)
@@ -40,28 +39,35 @@ struct SessionDetailView: View {
                 case .highlights: HighlightsPane(vm: vm)
                 }
             }
+            .background(Theme.surfaceElevated.opacity(0.25))
         }
         .task(id: sessionId) { await vm.load(sessionId: sessionId) }
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 14) {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 8) {
                     Text(vm.session?.session.title ?? "…")
-                        .font(.title.weight(.semibold))
-                    HStack(spacing: 6) {
-                        if let s = vm.session?.session {
-                            Text(stateLabel(s.state)).pill(stateColor(s.state))
-                            Text(sourceLabel(s.sourceKind)).pill(Theme.accent)
-                            Text(vm.durationLabel)
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+                        .font(.system(size: 25, weight: .semibold, design: .rounded))
+                        .lineLimit(2)
+                    metadataRow
                 }
-                Spacer()
+                Spacer(minLength: 16)
 
+                Button {
+                    Task { await vm.generateNotes() }
+                } label: {
+                    Label(vm.isGeneratingNotes ? L10n.t("session.action.generatingNotes") : L10n.t("session.action.generateNotes"),
+                          systemImage: "sparkles")
+                }
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
+                .disabled(vm.isGeneratingNotes || (vm.session?.segments.isEmpty ?? true))
+            }
+
+            HStack(spacing: 8) {
                 if vm.isPlaying {
                     Button {
                         vm.stopPlayback()
@@ -84,6 +90,8 @@ struct SessionDetailView: View {
                 }
                 .disabled(vm.isRetranslating || (vm.session?.segments.isEmpty ?? true))
 
+                Spacer()
+
                 Menu {
                     Button(L10n.t("session.export.transcriptMd"))   { vm.runExport(.transcriptMarkdown) }
                     Button(L10n.t("session.export.transcriptTxt"))  { vm.runExport(.transcriptPlain) }
@@ -99,45 +107,62 @@ struct SessionDetailView: View {
                     Label(L10n.t("session.action.export"), systemImage: "square.and.arrow.up")
                 }
                 .disabled(vm.session?.segments.isEmpty ?? true)
-
-                Button {
-                    Task { await vm.generateNotes() }
-                } label: {
-                    Label(vm.isGeneratingNotes ? L10n.t("session.action.generatingNotes") : L10n.t("session.action.generateNotes"),
-                          systemImage: "sparkles")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.accent)
-                .disabled(vm.isGeneratingNotes || (vm.session?.segments.isEmpty ?? true))
             }
         }
-        .padding(16)
+        .padding(.horizontal, 20)
+        .padding(.top, 18)
+        .padding(.bottom, 14)
+        .background(Theme.surfaceElevated.opacity(0.72))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Theme.hairline)
+                .frame(height: 1)
+        }
+    }
+
+    private var metadataRow: some View {
+        HStack(spacing: 7) {
+            if let s = vm.session?.session {
+                Text(stateLabel(s.state)).pill(stateColor(s.state))
+                Text(sourceLabel(s.sourceKind)).pill(Theme.accentMuted)
+                Label(vm.durationLabel, systemImage: "clock")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     private var tabPicker: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 6) {
             ForEach(DetailTab.allCases) { tab in
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) { selectedTab = tab }
                 } label: {
-                    VStack(spacing: 6) {
-                        HStack(spacing: 6) {
-                            Image(systemName: tab.icon)
-                            Text(L10n.t(tab.titleKey))
-                        }
-                        .font(.callout.weight(selectedTab == tab ? .semibold : .regular))
+                    Label(L10n.t(tab.titleKey), systemImage: tab.icon)
+                        .font(.callout.weight(selectedTab == tab ? .semibold : .medium))
                         .foregroundStyle(selectedTab == tab ? Theme.accent : .secondary)
-                        Rectangle()
-                            .fill(selectedTab == tab ? Theme.accent : .clear)
-                            .frame(height: 2)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background {
+                            RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
+                                .fill(selectedTab == tab ? Theme.accentSoft : Color.clear)
+                        }
+                        .overlay {
+                            RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
+                                .stroke(selectedTab == tab ? Theme.accent.opacity(0.28) : Color.clear, lineWidth: 1)
+                        }
                     }
-                }
                 .buttonStyle(.plain)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
             }
         }
-        .background(Color.primary.opacity(0.02))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Theme.surface.opacity(0.58))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Theme.hairline)
+                .frame(height: 1)
+        }
     }
 
     private func stateLabel(_ s: String) -> String {
@@ -189,7 +214,8 @@ struct TranscriptPane: View {
                     .padding(40)
                 }
             }
-            .padding(14)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 16)
         }
     }
 }
@@ -199,16 +225,19 @@ struct SegmentRowView: View {
     let onTap: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 12) {
             Button {
                 onTap()
             } label: {
                 Text(formatTs(segment.startMs))
                     .monospacedDigit()
                     .font(.caption.weight(.medium))
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(Theme.accentSoft))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous)
+                            .fill(Theme.accentSoft)
+                    )
                     .foregroundStyle(Theme.accent)
             }
             .buttonStyle(.plain)
@@ -217,18 +246,27 @@ struct SegmentRowView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(segment.textOriginal)
                     .font(.body)
+                    .lineSpacing(2)
                     .textSelection(.enabled)
                 if !segment.textTranslated.isEmpty {
                     Text(segment.textTranslated)
                         .font(.callout)
                         .foregroundStyle(Theme.translation)
+                        .lineSpacing(2)
                         .textSelection(.enabled)
                 }
             }
             Spacer()
         }
-        .padding(10)
-        .cardBackground()
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
+                .fill(Theme.surfaceElevated.opacity(0.68))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
+                .stroke(Theme.hairline, lineWidth: 1)
+        )
     }
 
     private func formatTs(_ ms: Int64) -> String {

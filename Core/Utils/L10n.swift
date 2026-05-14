@@ -213,7 +213,7 @@ enum L10n {
         "settings.appearance.lang.system": "Follow system",
         "settings.appearance.lang.zh": "中文",
         "settings.appearance.lang.en": "English",
-        "settings.about.version": "v0.1.0 — personal build",
+        "settings.about.version": "v0.3.0 — personal build",
         "settings.about.tagline": "Record, transcribe, translate, and organize your US lectures. Your data stays local.",
 
         // Menubar
@@ -392,7 +392,7 @@ enum L10n {
         "settings.appearance.lang.system": "跟随系统",
         "settings.appearance.lang.zh": "中文",
         "settings.appearance.lang.en": "English",
-        "settings.about.version": "v0.1.0 · 个人构建",
+        "settings.about.version": "v0.3.0 · 个人构建",
         "settings.about.tagline": "录课、转写、翻译、整理 — 留学一站式。所有数据留在你电脑上。",
 
         // 菜单栏

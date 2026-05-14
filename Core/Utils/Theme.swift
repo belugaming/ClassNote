@@ -5,23 +5,29 @@ import SwiftUI
 enum Theme {
     // MARK: - Colors
 
-    /// Warm amber-gold accent — less clinical than blue, reads as "study".
-    static let accent = Color(red: 0.96, green: 0.62, blue: 0.15)
-    static let accentSoft = Color(red: 0.96, green: 0.62, blue: 0.15).opacity(0.15)
+    /// Clear academic blue: modern, readable, and calmer than the old amber UI.
+    static let accent = Color(red: 0.16, green: 0.38, blue: 0.78)
+    static let accentSoft = Color(red: 0.16, green: 0.38, blue: 0.78).opacity(0.12)
+    static let accentMuted = Color(red: 0.31, green: 0.48, blue: 0.76)
+    static let surface = Color(nsColor: .controlBackgroundColor)
+    static let surfaceElevated = Color(nsColor: .textBackgroundColor)
+    static let chrome = Color.primary.opacity(0.055)
+    static let hairline = Color.primary.opacity(0.08)
 
     /// Translation color in overlay + transcript.
-    static let translation = Color(red: 0.98, green: 0.80, blue: 0.32)
+    static let translation = Color(red: 0.12, green: 0.52, blue: 0.48)
 
     static let recording = Color(red: 0.95, green: 0.30, blue: 0.30)
-    static let success = Color(red: 0.32, green: 0.78, blue: 0.48)
+    static let success = Color(red: 0.20, green: 0.62, blue: 0.38)
+    static let warning = Color(red: 0.82, green: 0.48, blue: 0.12)
 
     // MARK: - Metrics
 
-    static let cornerSmall: CGFloat = 8
-    static let cornerMedium: CGFloat = 12
-    static let cornerLarge: CGFloat = 18
+    static let cornerSmall: CGFloat = 6
+    static let cornerMedium: CGFloat = 8
+    static let cornerLarge: CGFloat = 10
 
-    static let cardPadding: CGFloat = 14
+    static let cardPadding: CGFloat = 12
     static let gridSpacing: CGFloat = 12
 }
 
@@ -34,11 +40,11 @@ struct CardBackground: ViewModifier {
         content
             .background(
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(filled ? Color.primary.opacity(0.04) : Color.clear)
+                    .fill(filled ? Theme.surface.opacity(0.72) : Color.clear)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                    .stroke(Theme.hairline, lineWidth: 1)
             )
     }
 }
@@ -51,7 +57,7 @@ struct PillStyle: ViewModifier {
             .font(.caption.weight(.medium))
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(Capsule().fill(color.opacity(0.18)))
+            .background(Capsule().fill(color.opacity(0.14)))
             .foregroundStyle(color)
     }
 }

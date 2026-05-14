@@ -15,6 +15,7 @@ struct MainWindowView: View {
     var body: some View {
         NavigationSplitView {
             CourseListView(selection: $selectedCourse,
+                           totalSessionCount: vm.totalSessionCount,
                            courses: vm.courses,
                            onCreate: { vm.createCourse(name: $0) },
                            onDelete: { id in
@@ -51,7 +52,13 @@ struct MainWindowView: View {
                 } else if let sid = selectedSessionId {
                     SessionDetailView(sessionId: sid)
                 } else {
-                    MainEmptyStateView()
+                    MainEmptyStateView(isApiKeyMissing: appState.apiConfig.apiKey.isEmpty && appState.sttBackend == .openAICompatible,
+                                       onStart: {
+                                           Task { await vm.startSession(courseId: selectedCourseId, source: .microphone) }
+                                       },
+                                       onImport: {
+                                           NotificationCenter.default.post(name: .requestImportFile, object: nil)
+                                       })
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -137,24 +144,67 @@ struct MainWindowView: View {
 }
 
 struct MainEmptyStateView: View {
+    let isApiKeyMissing: Bool
+    let onStart: () -> Void
+    let onImport: () -> Void
+
     var body: some View {
-        VStack(spacing: 18) {
-            ZStack {
-                Circle().fill(Theme.accentSoft).frame(width: 120, height: 120)
-                Image(systemName: "waveform.badge.mic")
-                    .font(.system(size: 52, weight: .medium))
-                    .foregroundStyle(Theme.accent)
+        VStack(spacing: 22) {
+            Spacer()
+            VStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .fill(Theme.accentSoft)
+                        .frame(width: 96, height: 96)
+                    Image(systemName: "waveform.badge.mic")
+                        .font(.system(size: 42, weight: .medium))
+                        .foregroundStyle(Theme.accent)
+                }
+                VStack(spacing: 8) {
+                    Text(L10n.t("main.empty.title"))
+                        .font(.system(size: 26, weight: .semibold, design: .rounded))
+                    Text(L10n.t("main.empty.description"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(2)
+                        .frame(maxWidth: 460)
+                }
             }
-            Text(L10n.t("main.empty.title"))
-                .font(.system(size: 22, weight: .semibold, design: .rounded))
-            Text(L10n.t("main.empty.description"))
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 80)
+
+            HStack(spacing: 10) {
+                Button {
+                    onStart()
+                } label: {
+                    Label(L10n.t("toolbar.newSession"), systemImage: "mic.circle.fill")
+                        .frame(minWidth: 116)
+                }
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
+                .disabled(isApiKeyMissing)
+
+                Button {
+                    onImport()
+                } label: {
+                    Label(L10n.t("toolbar.import"), systemImage: "square.and.arrow.down")
+                        .frame(minWidth: 96)
+                }
+                .controlSize(.large)
+            }
+
+            if isApiKeyMissing {
+                Label(L10n.t("toolbar.help.configureKey"), systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(Theme.warning)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(Capsule().fill(Theme.warning.opacity(0.12)))
+            }
+            Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
+        .background(Theme.surfaceElevated.opacity(0.35))
     }
 }
 
@@ -163,6 +213,8 @@ final class MainWindowViewModel: ObservableObject {
     @Published var courses: [Course] = []
     @Published private var allSessions: [Session] = []
     @Published private var sessionsByCourse: [String: [Session]] = [:]
+
+    var totalSessionCount: Int { allSessions.count }
 
     func sessions(for courseId: String?) -> [Session] {
         guard let courseId else {
