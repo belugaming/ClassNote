@@ -126,12 +126,13 @@ struct MarkdownView: View {
     }
 
     private func inlineText(_ raw: String) -> some View {
-        // LaTeX handles `$...$`, `\(...\)`, `$$...$$`, `\[...\]` and passes
-        // the rest through its own Markdown-aware text rendering (bold, italic,
-        // inline code, links). That covers both math and inline Markdown.
+        // .onlyEquations splits the string into text + equation chunks; text
+        // chunks go through AttributedString(markdown:) so `*bold*`, `_italic_`,
+        // `` `code` ``, links still render. .all wraps the whole line as one
+        // equation, MathJax fails, and the raw `*`s leak through.
         LaTeX(raw)
-            .parsingMode(.all)
-            .blockMode(.blockViews)
+            .parsingMode(.onlyEquations)
+            .blockMode(.alwaysInline)
             .fixedSize(horizontal: false, vertical: true)
     }
 

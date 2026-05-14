@@ -3,21 +3,32 @@ import SwiftUI
 struct MainWindowView: View {
     @EnvironmentObject var appState: AppState
     @StateObject private var vm = MainWindowViewModel()
-    @State private var selectedCourseId: String? = nil
+    @State private var selectedCourse: CourseSidebarSelection? = .all
     @State private var selectedSessionId: String? = nil
     @State private var searchText: String = ""
     @State private var showingSearchResults = false
 
+    private var selectedCourseId: String? {
+        selectedCourse?.courseId
+    }
+
     var body: some View {
         NavigationSplitView {
-            CourseListView(selection: $selectedCourseId,
+            CourseListView(selection: $selectedCourse,
                            courses: vm.courses,
                            onCreate: { vm.createCourse(name: $0) },
-                           onDelete: { vm.deleteCourse(id: $0) })
+                           onDelete: { id in
+                               vm.deleteCourse(id: id)
+                               if selectedCourse == .course(id: id) {
+                                   selectedCourse = .all
+                                   selectedSessionId = nil
+                               }
+                           })
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240)
         } content: {
             SessionListView(courseId: selectedCourseId,
                             selection: $selectedSessionId,
+                            courses: vm.courses,
                             sessions: vm.sessions(for: selectedCourseId),
                             onStartSession: {
                                 Task { await vm.startSession(courseId: selectedCourseId, source: .microphone) }
@@ -25,7 +36,13 @@ struct MainWindowView: View {
                             onImport: { url in
                                 Task { await vm.importFile(url: url, courseId: selectedCourseId) }
                             },
-                            onDelete: { vm.deleteSession(id: $0) })
+                            onDelete: { vm.deleteSession(id: $0) },
+                            onMove: { sessionId, courseId in
+                                Task {
+                                    await vm.moveSession(id: sessionId, courseId: courseId)
+                                    syncSelectedSessionWithVisibleList()
+                                }
+                            })
                 .navigationSplitViewColumnWidth(min: 300, ideal: 360)
         } detail: {
             Group {
@@ -92,8 +109,14 @@ struct MainWindowView: View {
             }
         }
         .task { await vm.refresh() }
+        .onChange(of: selectedCourse) { _, _ in
+            syncSelectedSessionWithVisibleList()
+        }
         .onChange(of: appState.isRecording) { _, _ in
-            Task { await vm.refresh() }
+            Task {
+                await vm.refresh()
+                syncSelectedSessionWithVisibleList()
+            }
         }
         .alert(L10n.t("common.error"),
                isPresented: Binding(get: { appState.lastError != nil },
@@ -101,6 +124,14 @@ struct MainWindowView: View {
             Button("OK") { appState.lastError = nil }
         } message: {
             Text(appState.lastError ?? "")
+        }
+    }
+
+    private func syncSelectedSessionWithVisibleList() {
+        guard let selectedSessionId else { return }
+        let visibleSessionIds = Set(vm.sessions(for: selectedCourseId).map(\.id))
+        if !visibleSessionIds.contains(selectedSessionId) {
+            self.selectedSessionId = nil
         }
     }
 }
@@ -130,12 +161,12 @@ struct MainEmptyStateView: View {
 @MainActor
 final class MainWindowViewModel: ObservableObject {
     @Published var courses: [Course] = []
-    @Published private var sessionsByCourse: [String?: [Session]] = [:]
+    @Published private var allSessions: [Session] = []
+    @Published private var sessionsByCourse: [String: [Session]] = [:]
 
     func sessions(for courseId: String?) -> [Session] {
-        if courseId == nil {
-            // "All sessions" entry: flatten everything.
-            return sessionsByCourse.values.flatMap { $0 }.sorted { $0.startedAt > $1.startedAt }
+        guard let courseId else {
+            return allSessions
         }
         return sessionsByCourse[courseId] ?? []
     }
@@ -143,13 +174,14 @@ final class MainWindowViewModel: ObservableObject {
     func refresh() async {
         do {
             courses = try await CourseRepository.shared.all()
-            let allSessions = try await SessionRepository.shared.all()
-            var grouped: [String?: [Session]] = [:]
-            grouped[nil] = []
+            let sessions = try await SessionRepository.shared.all()
+            var grouped: [String: [Session]] = [:]
             for c in courses { grouped[c.id] = [] }
-            for s in allSessions {
-                grouped[s.courseId, default: []].append(s)
+            for s in sessions {
+                guard let courseId = s.courseId else { continue }
+                grouped[courseId, default: []].append(s)
             }
+            self.allSessions = sessions
             self.sessionsByCourse = grouped
         } catch {
             NSLog("[ClassNote] refresh failed: \(error)")
@@ -175,6 +207,15 @@ final class MainWindowViewModel: ObservableObject {
         Task {
             try? await SessionRepository.shared.delete(id: id)
             await refresh()
+        }
+    }
+
+    func moveSession(id: String, courseId: String?) async {
+        do {
+            try await SessionRepository.shared.move(id: id, toCourseId: courseId)
+            await refresh()
+        } catch {
+            AppState.shared.setError(error.localizedDescription)
         }
     }
 

@@ -77,6 +77,8 @@ enum L10n {
         "main.empty.description": "Use the Record button to begin, or import a video. ⌘N starts a new mic session, ⌘⇧O toggles the floating overlay.",
         "main.deleteCourse": "Delete course",
         "main.deleteSession": "Delete session",
+        "main.moveSession": "Move to course",
+        "main.unfiled": "No course",
 
         // Toolbar
         "toolbar.record": "Record",
@@ -254,6 +256,8 @@ enum L10n {
         "main.empty.description": "点右上角 Record 开始录制,或导入一个视频。⌘N 麦克风一键录制,⌘⇧O 切换浮窗。",
         "main.deleteCourse": "删除课程",
         "main.deleteSession": "删除会话",
+        "main.moveSession": "移动到课程",
+        "main.unfiled": "未归档",
 
         // 工具栏
         "toolbar.record": "录制",

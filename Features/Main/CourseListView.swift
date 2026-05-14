@@ -1,7 +1,21 @@
 import SwiftUI
 
+enum CourseSidebarSelection: Hashable {
+    case all
+    case course(id: String)
+
+    var courseId: String? {
+        switch self {
+        case .all:
+            return nil
+        case .course(let id):
+            return id
+        }
+    }
+}
+
 struct CourseListView: View {
-    @Binding var selection: String?
+    @Binding var selection: CourseSidebarSelection?
     let courses: [Course]
     let onCreate: (String) -> Void
     let onDelete: (String) -> Void
@@ -18,7 +32,7 @@ struct CourseListView: View {
                     Image(systemName: "tray.full")
                         .foregroundStyle(Theme.accent)
                 }
-                .tag(String?.none as String?)
+                .tag(CourseSidebarSelection.all)
             }
             Section(L10n.t("main.courses")) {
                 ForEach(courses) { course in
@@ -28,7 +42,7 @@ struct CourseListView: View {
                         Image(systemName: "book.closed.fill")
                             .foregroundStyle(Theme.accent)
                     }
-                    .tag(String?.some(course.id))
+                    .tag(CourseSidebarSelection.course(id: course.id))
                     .contextMenu {
                         Button(role: .destructive) {
                             onDelete(course.id)

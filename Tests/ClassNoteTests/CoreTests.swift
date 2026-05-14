@@ -107,6 +107,29 @@ final class DatabaseTests: XCTestCase {
         try await CourseRepository.shared.delete(id: course.id)
     }
 
+    func testSessionCanMoveBetweenCoursesAndUnfiled() async throws {
+        try Database.shared.setup()
+        let sourceCourse = Course.new(name: "Source Course")
+        let targetCourse = Course.new(name: "Target Course")
+        try await CourseRepository.shared.insert(sourceCourse)
+        try await CourseRepository.shared.insert(targetCourse)
+
+        let session = Session.new(courseId: sourceCourse.id, title: "Movable session")
+        try await SessionRepository.shared.insert(session)
+
+        try await SessionRepository.shared.move(id: session.id, toCourseId: targetCourse.id)
+        var reloaded = try await SessionRepository.shared.get(id: session.id)
+        XCTAssertEqual(reloaded?.courseId, targetCourse.id)
+
+        try await SessionRepository.shared.move(id: session.id, toCourseId: nil)
+        reloaded = try await SessionRepository.shared.get(id: session.id)
+        XCTAssertNil(reloaded?.courseId)
+
+        try await SessionRepository.shared.delete(id: session.id)
+        try await CourseRepository.shared.delete(id: sourceCourse.id)
+        try await CourseRepository.shared.delete(id: targetCourse.id)
+    }
+
     func testApiConfigPersistence() async throws {
         try Database.shared.setup()
         var c = try await ApiConfigRepository.shared.load()

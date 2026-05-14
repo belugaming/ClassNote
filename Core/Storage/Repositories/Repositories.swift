@@ -97,6 +97,13 @@ actor SessionRepository {
         }
     }
 
+    func move(id: String, toCourseId courseId: String?) async throws {
+        try await Database.shared.dbPool.write { db in
+            try db.execute(sql: "UPDATE session SET course_id=? WHERE id=?",
+                           arguments: [courseId, id])
+        }
+    }
+
     func delete(id: String) async throws {
         _ = try await Database.shared.dbPool.write { db in
             try Session.deleteOne(db, key: id)

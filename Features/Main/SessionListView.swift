@@ -4,10 +4,12 @@ import UniformTypeIdentifiers
 struct SessionListView: View {
     let courseId: String?
     @Binding var selection: String?
+    let courses: [Course]
     let sessions: [Session]
     let onStartSession: () -> Void
     let onImport: (URL) -> Void
     let onDelete: (String) -> Void
+    let onMove: (String, String?) -> Void
 
     @State private var importing = false
 
@@ -22,6 +24,29 @@ struct SessionListView: View {
                             SessionCard(session: session, isSelected: selection == session.id)
                                 .onTapGesture { selection = session.id }
                                 .contextMenu {
+                                    Menu {
+                                        Button {
+                                            onMove(session.id, nil)
+                                        } label: {
+                                            Label(L10n.t("main.unfiled"), systemImage: session.courseId == nil ? "checkmark" : "tray")
+                                        }
+                                        .disabled(session.courseId == nil)
+
+                                        if !courses.isEmpty {
+                                            Divider()
+                                            ForEach(courses) { course in
+                                                Button {
+                                                    onMove(session.id, course.id)
+                                                } label: {
+                                                    Label(course.name, systemImage: session.courseId == course.id ? "checkmark" : "folder")
+                                                }
+                                                .disabled(session.courseId == course.id)
+                                            }
+                                        }
+                                    } label: {
+                                        Label(L10n.t("main.moveSession"), systemImage: "folder")
+                                    }
+
                                     Button(role: .destructive) {
                                         onDelete(session.id)
                                     } label: {
