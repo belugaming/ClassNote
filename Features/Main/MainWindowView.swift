@@ -379,12 +379,8 @@ final class MainWindowViewModel: ObservableObject {
     }
 
     func importFile(url: URL, courseId: String?) async {
-        do {
-            let sid = try await AppState.shared.orchestrator.ingestFile(url: url, courseId: courseId)
-            NotificationCenter.default.post(name: .openLiveSession, object: sid)
+        if await AppState.shared.importFile(url: url, courseId: courseId) != nil {
             await refresh()
-        } catch {
-            AppState.shared.setError(error.localizedDescription)
         }
     }
 }

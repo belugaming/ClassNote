@@ -5,11 +5,14 @@ struct LiveSessionView: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
-        InnerView(appState: appState, orchestrator: appState.orchestrator)
+        InnerView(windowId: sessionId,
+                  appState: appState,
+                  orchestrator: appState.orchestrator(for: sessionId))
     }
 }
 
 private struct InnerView: View {
+    let windowId: String
     @ObservedObject var appState: AppState
     @ObservedObject var orchestrator: SessionOrchestrator
 
@@ -54,7 +57,7 @@ private struct InnerView: View {
                         .font(.caption.weight(.medium))
                         .foregroundStyle(statusDotColor)
                     Text("·")
-                    Text(formatDuration(appState.orchestrator.currentTimestampMs))
+                    Text(formatDuration(orchestrator.currentTimestampMs))
                         .monospacedDigit()
                         .font(.caption.monospacedDigit())
                     Text("·")
@@ -69,7 +72,7 @@ private struct InnerView: View {
                 }
             }
             Spacer()
-            LiveControlsView()
+            LiveControlsView(windowId: windowId, orchestrator: orchestrator)
         }
         .padding(16)
     }
@@ -95,11 +98,11 @@ private struct InnerView: View {
         if orchestrator.isEphemeralTranslation {
             return L10n.t("live.ephemeral.title")
         }
-        return appState.orchestrator.currentSession?.title ?? L10n.t("live.title")
+        return orchestrator.currentSession?.title ?? L10n.t("live.title")
     }
 
     private var sourceLabel: String {
-        switch appState.orchestrator.source {
+        switch orchestrator.source {
         case .microphone: return L10n.t("session.source.mic")
         case .system: return L10n.t("session.source.system")
         case .mixed: return L10n.t("session.source.mixed")

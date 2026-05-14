@@ -77,6 +77,7 @@ final class EndToEndFlowTests: XCTestCase {
         // Run import via orchestrator
         let orch = await AppState.shared.orchestrator
         let sessionId = try await orch.ingestFile(url: wavURL, courseId: course.id)
+        try await orch.waitForImportToFinish()
 
         // Poll for completion - we need both segments inserted and translations done
         var segments: [Segment] = []

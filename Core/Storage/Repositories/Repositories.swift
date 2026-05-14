@@ -271,6 +271,17 @@ actor HighlightRepository {
 actor NoteRepository {
     static let shared = NoteRepository()
 
+    enum NoteRepositoryError: LocalizedError {
+        case missingSession(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .missingSession:
+                return "The session for this note no longer exists. Refresh the session list and open the session again."
+            }
+        }
+    }
+
     func get(sessionId: String) async throws -> Note? {
         try await Database.shared.dbPool.read { db in
             try Note.filter(Column("session_id") == sessionId).fetchOne(db)
@@ -279,7 +290,26 @@ actor NoteRepository {
 
     func upsert(_ note: Note) async throws {
         try await Database.shared.dbPool.write { db in
-            try note.insert(db, onConflict: .replace)
+            guard try Session.fetchOne(db, key: note.sessionId) != nil else {
+                throw NoteRepositoryError.missingSession(note.sessionId)
+            }
+
+            if try Note.fetchOne(db, key: note.id) != nil {
+                try db.execute(sql: """
+                    UPDATE note
+                    SET session_id=?, markdown=?, version=?, generated_at=?, model=?
+                    WHERE id=?
+                    """, arguments: [
+                        note.sessionId,
+                        note.markdown,
+                        note.version,
+                        note.generatedAt,
+                        note.model,
+                        note.id
+                    ])
+            } else {
+                try note.insert(db)
+            }
         }
     }
 }

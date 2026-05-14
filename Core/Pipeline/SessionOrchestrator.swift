@@ -23,6 +23,7 @@ final class SessionOrchestrator: ObservableObject {
     private var audioManager: AudioSourceManager?
     private var sttTask: Task<Void, Never>?
     private var importTask: Task<Void, Never>?
+    private var importWaiters: [CheckedContinuation<Void, Error>] = []
     private var translateTasks: [Int64: Task<Void, Never>] = [:]
     private var tickerTask: Task<Void, Never>?
     private var ephemeralRowId: Int64 = 0
@@ -33,6 +34,7 @@ final class SessionOrchestrator: ObservableObject {
     func startNewSession(courseId: String?,
                          title: String? = nil,
                          source: AudioSourceKind? = nil) async throws -> String {
+        await stop()
         let src = source ?? self.source
         self.source = src
         let config = AppState.shared.apiConfig
@@ -82,6 +84,7 @@ final class SessionOrchestrator: ObservableObject {
     /// everything in memory.
     @discardableResult
     func startEphemeralTranslation(source: AudioSourceKind? = nil) async throws -> String {
+        await stop()
         let src = source ?? self.source
         guard src != .file else {
             throw EngineError.unsupported("Temporary translation does not support file import")
@@ -176,16 +179,26 @@ final class SessionOrchestrator: ObservableObject {
                                                              durationMs: lastEndMs,
                                                              audioPath: url.path)
                 self.statusText = "Import finished"
+                self.finishImportWaiters()
             } catch is CancellationError {
                 self.statusText = "Import cancelled"
+                self.finishImportWaiters(with: CancellationError())
             } catch {
                 NSLog("[ClassNote] ingestFile failed: \(error)")
                 self.statusText = "Import failed: \(error.localizedDescription)"
                 AppState.shared.setError(error.localizedDescription)
+                self.finishImportWaiters(with: error)
             }
             self.isImporting = false
         }
         return sess.id
+    }
+
+    func waitForImportToFinish() async throws {
+        if !isImporting { return }
+        try await withCheckedThrowingContinuation { continuation in
+            importWaiters.append(continuation)
+        }
     }
 
     func stop() async {
@@ -212,6 +225,19 @@ final class SessionOrchestrator: ObservableObject {
         isImporting = false
         isEphemeralTranslation = false
         statusText = "Stopped"
+        finishImportWaiters(with: CancellationError())
+    }
+
+    private func finishImportWaiters(with error: Error? = nil) {
+        let waiters = importWaiters
+        importWaiters.removeAll()
+        for waiter in waiters {
+            if let error {
+                waiter.resume(throwing: error)
+            } else {
+                waiter.resume()
+            }
+        }
     }
 
     // MARK: - Pipeline

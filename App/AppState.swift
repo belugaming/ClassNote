@@ -15,6 +15,7 @@ final class AppState: ObservableObject {
     @Published var translationEnabled: Bool = true
     @Published var sttBackend: SttBackend = .openAICompatible
     @Published var interruptedSessions: [Session] = []
+    @Published private var importOrchestrators: [String: SessionOrchestrator] = [:]
 
     /// Bumped whenever the user changes the language. Views observe this to
     /// re-render all L10n strings without needing an app restart.
@@ -78,6 +79,10 @@ final class AppState: ObservableObject {
         }
     }
 
+    func orchestrator(for windowId: String) -> SessionOrchestrator {
+        importOrchestrators[windowId] ?? orchestrator
+    }
+
     func startNewSession(courseId: String?, source: AudioSourceKind) async -> String? {
         do {
             let sessionId = try await orchestrator.startNewSession(courseId: courseId, source: source)
@@ -126,6 +131,24 @@ final class AppState: ObservableObject {
             self.isRecording = false
             self.currentSessionId = nil
         }
+    }
+
+    func importFile(url: URL, courseId: String?) async -> String? {
+        do {
+            let importOrchestrator = SessionOrchestrator()
+            let sessionId = try await importOrchestrator.ingestFile(url: url, courseId: courseId)
+            importOrchestrators[sessionId] = importOrchestrator
+            NotificationCenter.default.post(name: .openLiveSession, object: sessionId)
+            return sessionId
+        } catch {
+            setError(error.localizedDescription)
+            return nil
+        }
+    }
+
+    func stopImport(windowId: String) async {
+        guard let importOrchestrator = importOrchestrators[windowId] else { return }
+        await importOrchestrator.stop()
     }
 
     func markHighlight(note: String = "") {

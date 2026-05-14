@@ -2,7 +2,8 @@ import SwiftUI
 
 struct LiveControlsView: View {
     @EnvironmentObject var appState: AppState
-    @ObservedObject private var orchestrator = AppState.shared.orchestrator
+    let windowId: String
+    @ObservedObject var orchestrator: SessionOrchestrator
 
     var body: some View {
         HStack(spacing: 10) {
@@ -23,7 +24,7 @@ struct LiveControlsView: View {
 
             if orchestrator.isImporting {
                 Button(role: .destructive) {
-                    Task { await appState.orchestrator.stop() }
+                    Task { await appState.stopImport(windowId: windowId) }
                 } label: {
                     Label(L10n.t("live.import.cancel"), systemImage: "xmark.circle.fill")
                 }
