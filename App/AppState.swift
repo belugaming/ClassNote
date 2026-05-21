@@ -59,6 +59,7 @@ final class AppState: ObservableObject {
         do {
             try await ApiConfigRepository.shared.save(cfg)
             self.apiConfig = try await ApiConfigRepository.shared.load()
+            self.sttBackend = SttBackend(rawValue: self.apiConfig.sttBackend) ?? .openAICompatible
         } catch {
             setError("Save settings failed: \(error.localizedDescription)")
         }

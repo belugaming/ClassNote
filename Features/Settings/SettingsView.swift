@@ -155,6 +155,7 @@ struct ApiSettingsView: View {
     @EnvironmentObject var appState: AppState
     @State private var testStatus: String = ""
     @State private var testIsError: Bool = false
+    @State private var autosaveTask: Task<Void, Never>?
 
     private let providerPresets: [(label: String, base: String, stt: String, llm: String, color: Color)] = [
         ("OpenAI", "https://api.openai.com/v1", "whisper-1", "gpt-4o-mini", .green),
@@ -172,12 +173,12 @@ struct ApiSettingsView: View {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8)], spacing: 8) {
                         ForEach(providerPresets, id: \.label) { preset in
                             Button {
-                                var c = appState.apiConfig
-                                c.baseUrl = preset.base
-                                c.sttModel = preset.stt
-                                c.translationModel = preset.llm
-                                c.llmModel = preset.llm
-                                appState.apiConfig = c
+                                updateConfig(immediate: true) { config in
+                                    config.baseUrl = preset.base
+                                    config.sttModel = preset.stt
+                                    config.translationModel = preset.llm
+                                    config.llmModel = preset.llm
+                                }
                             } label: {
                                 HStack(spacing: 6) {
                                     Circle().fill(preset.color).frame(width: 7, height: 7)
@@ -271,13 +272,46 @@ struct ApiSettingsView: View {
             .padding(20)
         }
         .background(Theme.surface.opacity(0.22))
+        .onDisappear {
+            autosaveTask?.cancel()
+            Task { await appState.saveConfig(appState.apiConfig) }
+        }
     }
 
     private func save() {
+        autosaveTask?.cancel()
+        let config = appState.apiConfig
         Task {
-            await appState.saveConfig(appState.apiConfig)
+            await appState.saveConfig(config)
             testStatus = L10n.t("settings.api.saved")
             testIsError = false
+        }
+    }
+
+    private func updateConfig(immediate: Bool = false, _ update: (inout ApiConfig) -> Void) {
+        var config = appState.apiConfig
+        update(&config)
+        appState.apiConfig = config
+        testStatus = ""
+        if immediate {
+            autosaveTask?.cancel()
+            Task { await appState.saveConfig(config) }
+        } else {
+            scheduleAutosave(config)
+        }
+    }
+
+    private func scheduleAutosave(_ config: ApiConfig) {
+        autosaveTask?.cancel()
+        let state = appState
+        autosaveTask = Task { [config, state] in
+            do {
+                try await Task.sleep(nanoseconds: 500_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await state.saveConfig(config)
         }
     }
 
@@ -301,63 +335,49 @@ struct ApiSettingsView: View {
     private var baseUrlBinding: Binding<String> {
         Binding(get: { appState.apiConfig.baseUrl },
                 set: { newValue in
-                    var c = appState.apiConfig
-                    c.baseUrl = newValue
-                    appState.apiConfig = c
+                    updateConfig { $0.baseUrl = newValue }
                 })
     }
 
     private var apiKeyBinding: Binding<String> {
         Binding(get: { appState.apiConfig.apiKey },
                 set: { newValue in
-                    var c = appState.apiConfig
-                    c.apiKey = newValue
-                    appState.apiConfig = c
+                    updateConfig { $0.apiKey = newValue }
                 })
     }
 
     private var sttModelBinding: Binding<String> {
         Binding(get: { appState.apiConfig.sttModel },
                 set: { newValue in
-                    var c = appState.apiConfig
-                    c.sttModel = newValue
-                    appState.apiConfig = c
+                    updateConfig { $0.sttModel = newValue }
                 })
     }
 
     private var translationModelBinding: Binding<String> {
         Binding(get: { appState.apiConfig.translationModel },
                 set: { newValue in
-                    var c = appState.apiConfig
-                    c.translationModel = newValue
-                    appState.apiConfig = c
+                    updateConfig { $0.translationModel = newValue }
                 })
     }
 
     private var llmModelBinding: Binding<String> {
         Binding(get: { appState.apiConfig.llmModel },
                 set: { newValue in
-                    var c = appState.apiConfig
-                    c.llmModel = newValue
-                    appState.apiConfig = c
+                    updateConfig { $0.llmModel = newValue }
                 })
     }
 
     private var sourceLanguageBinding: Binding<String> {
         Binding(get: { appState.apiConfig.sourceLanguage },
                 set: { newValue in
-                    var c = appState.apiConfig
-                    c.sourceLanguage = newValue
-                    appState.apiConfig = c
+                    updateConfig { $0.sourceLanguage = newValue }
                 })
     }
 
     private var targetLanguageBinding: Binding<String> {
         Binding(get: { appState.apiConfig.targetLanguage },
                 set: { newValue in
-                    var c = appState.apiConfig
-                    c.targetLanguage = newValue
-                    appState.apiConfig = c
+                    updateConfig { $0.targetLanguage = newValue }
                 })
     }
 }
@@ -439,6 +459,11 @@ struct EngineSettingsView: View {
         .background(Theme.surface.opacity(0.22))
         .onAppear {
             appState.refreshMicrophoneDevices()
+        }
+        .onChange(of: appState.sttBackend) { _, backend in
+            var config = appState.apiConfig
+            config.sttBackend = backend.rawValue
+            Task { await appState.saveConfig(config) }
         }
     }
 }

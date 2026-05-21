@@ -126,3 +126,23 @@ enum APIKeyStoreError: LocalizedError {
         }
     }
 }
+
+enum ApiConfigBackupStore {
+    private static let key = "classnote.apiConfig.backup.v1"
+
+    static func read() -> ApiConfig? {
+        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(ApiConfig.self, from: data)
+    }
+
+    static func save(_ config: ApiConfig) {
+        var backup = config
+        backup.apiKey = ""
+        guard let data = try? JSONEncoder().encode(backup) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+}

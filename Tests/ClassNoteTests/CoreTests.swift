@@ -166,13 +166,23 @@ final class DatabaseTests: XCTestCase {
         var c = try await ApiConfigRepository.shared.load()
         c.baseUrl = "https://example.test/v1"
         c.apiKey = "test-secret-key-do-not-keep"
+        c.sttModel = "test-stt-model"
         c.translationModel = "test-translation-model"
+        c.llmModel = "test-llm-model"
+        c.sttBackend = "whisperkit"
+        c.targetLanguage = "ja"
+        c.sourceLanguage = ""
         try await ApiConfigRepository.shared.save(c)
 
         let reloaded = try await ApiConfigRepository.shared.load()
         XCTAssertEqual(reloaded.baseUrl, "https://example.test/v1")
         XCTAssertEqual(reloaded.apiKey, "test-secret-key-do-not-keep")
+        XCTAssertEqual(reloaded.sttModel, "test-stt-model")
         XCTAssertEqual(reloaded.translationModel, "test-translation-model")
+        XCTAssertEqual(reloaded.llmModel, "test-llm-model")
+        XCTAssertEqual(reloaded.sttBackend, "whisperkit")
+        XCTAssertEqual(reloaded.targetLanguage, "ja")
+        XCTAssertEqual(reloaded.sourceLanguage, "")
         XCTAssertEqual(reloaded.redactedKey, "test…keep")
 
         let rawDatabaseKey: String = try await Database.shared.dbPool.read { db in
@@ -182,6 +192,41 @@ final class DatabaseTests: XCTestCase {
 
         // Restore default
         try await ApiConfigRepository.shared.save(.default)
+        ApiConfigBackupStore.clear()
+    }
+
+    func testApiConfigRestoresNonSecretFieldsFromBackup() async throws {
+        try Database.shared.setup()
+        var custom = ApiConfig.default
+        custom.baseUrl = "https://backup.example.test/v1"
+        custom.apiKey = "backup-key"
+        custom.sttModel = "backup-stt"
+        custom.translationModel = "backup-translation"
+        custom.llmModel = "backup-llm"
+        custom.sttBackend = "whisperkit"
+        custom.targetLanguage = "ko"
+        custom.sourceLanguage = "auto"
+        ApiConfigBackupStore.save(custom)
+        XCTAssertEqual(ApiConfigBackupStore.read()?.apiKey, "")
+
+        try await Database.shared.dbPool.write { db in
+            var defaultConfig = ApiConfig.default
+            defaultConfig.apiKey = "database-key"
+            try defaultConfig.insert(db, onConflict: .replace)
+        }
+
+        let restored = try await ApiConfigRepository.shared.load()
+        XCTAssertEqual(restored.baseUrl, "https://backup.example.test/v1")
+        XCTAssertEqual(restored.apiKey, "database-key")
+        XCTAssertEqual(restored.sttModel, "backup-stt")
+        XCTAssertEqual(restored.translationModel, "backup-translation")
+        XCTAssertEqual(restored.llmModel, "backup-llm")
+        XCTAssertEqual(restored.sttBackend, "whisperkit")
+        XCTAssertEqual(restored.targetLanguage, "ko")
+        XCTAssertEqual(restored.sourceLanguage, "auto")
+
+        try await ApiConfigRepository.shared.save(.default)
+        ApiConfigBackupStore.clear()
     }
 
     func testDeletingSessionRemovesManagedRecordingFile() async throws {
