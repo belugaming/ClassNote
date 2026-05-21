@@ -455,18 +455,16 @@ final class AudioSourceManager: NSObject {
 // MARK: - File writer
 
 /// Thread-safe AVAssetWriter wrapper. SCK delivers CMSampleBuffers we can
-/// append directly; mic produces AVAudioPCMBuffers we wrap into CMSampleBuffers.
-/// The writer's start time is anchored to the first sample we receive so the
-/// .m4a timeline starts at 0.
+/// append directly; mic produces AVAudioPCMBuffers that are written with
+/// AVAudioFile. Keeping those two paths separate avoids AVAssetWriterInput
+/// Objective-C exceptions for PCM-to-AAC setup on some macOS releases.
 final class FileWriter: @unchecked Sendable {
     private let url: URL
     private let lock = NSLock()
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
+    private var pcmFile: AVAudioFile?
     private var started = false
-    private var startPTS: CMTime = .invalid
-    private var sourceFormatHint: CMAudioFormatDescription?
-    private var micSampleCount: Int64 = 0
     private var failed = false
 
     init(url: URL) {
@@ -480,14 +478,12 @@ final class FileWriter: @unchecked Sendable {
 
         if writer == nil {
             guard let desc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
-            sourceFormatHint = desc
             if !openWriter(with: desc) { return }
         }
         guard let input = input, input.isReadyForMoreMediaData else { return }
         if !started {
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             writer?.startSession(atSourceTime: pts)
-            startPTS = pts
             started = true
         }
         if !input.append(sampleBuffer) {
@@ -501,43 +497,58 @@ final class FileWriter: @unchecked Sendable {
         defer { lock.unlock() }
         guard !failed else { return }
 
-        if writer == nil {
-            guard let desc = makeFormatDescription(from: buffer.format) else { return }
-            sourceFormatHint = desc
-            if !openWriter(with: desc) { return }
+        if pcmFile == nil {
+            if !openPCMFile(for: buffer.format) { return }
         }
-        guard let input = input, input.isReadyForMoreMediaData else { return }
-
-        let frames = Int64(buffer.frameLength)
-        let rate = buffer.format.sampleRate
-        let pts = CMTime(value: micSampleCount, timescale: CMTimeScale(rate))
-        micSampleCount += frames
-
-        guard let sb = makeSampleBuffer(from: buffer, pts: pts) else { return }
-        if !started {
-            writer?.startSession(atSourceTime: pts)
-            startPTS = pts
-            started = true
-        }
-        if !input.append(sb) {
-            NSLog("[ClassNote] FileWriter: append(mic sb) failed: %@", writer?.error?.localizedDescription ?? "?")
+        do {
+            try pcmFile?.write(from: buffer)
+        } catch {
+            NSLog("[ClassNote] FileWriter: append(mic pcm) failed: %@", error.localizedDescription)
             failed = true
         }
     }
 
     func finish() async {
-        let (w, i): (AVAssetWriter?, AVAssetWriterInput?) = {
+        let (w, i, file): (AVAssetWriter?, AVAssetWriterInput?, AVAudioFile?) = {
             lock.lock()
             defer { lock.unlock() }
-            let pair = (writer, input)
+            let result = (writer, input, pcmFile)
             writer = nil
             input = nil
-            return pair
+            pcmFile = nil
+            return result
         }()
+        _ = file
         guard let writer = w else { return }
         i?.markAsFinished()
         if writer.status == .writing {
             await writer.finishWriting()
+        }
+    }
+
+    private func openPCMFile(for format: AVAudioFormat) -> Bool {
+        if FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: url)
+        }
+        do {
+            let rawSampleRate = format.sampleRate
+            let sampleRate = rawSampleRate.isFinite && rawSampleRate > 0 ? rawSampleRate : 48000
+            let channels = max(Int(format.channelCount), 1)
+            let settings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: sampleRate,
+                AVNumberOfChannelsKey: channels,
+                AVEncoderBitRateKey: 128_000
+            ]
+            pcmFile = try AVAudioFile(forWriting: url,
+                                      settings: settings,
+                                      commonFormat: format.commonFormat,
+                                      interleaved: format.isInterleaved)
+            return true
+        } catch {
+            NSLog("[ClassNote] FileWriter: open mic file failed: %@", error.localizedDescription)
+            failed = true
+            return false
         }
     }
 
@@ -548,17 +559,23 @@ final class FileWriter: @unchecked Sendable {
         do {
             let w = try AVAssetWriter(outputURL: url, fileType: .m4a)
             let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(sourceFormat)?.pointee
-            let sampleRate = asbd?.mSampleRate ?? 48000
-            let channels = Int(asbd?.mChannelsPerFrame ?? 2)
+            let rawSampleRate = asbd?.mSampleRate ?? 48000
+            let sampleRate = rawSampleRate.isFinite && rawSampleRate > 0 ? rawSampleRate : 48000
+            let rawChannels = Int(asbd?.mChannelsPerFrame ?? 2)
+            let channels = min(max(rawChannels, 1), 2)
             let settings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
                 AVSampleRateKey: sampleRate,
                 AVNumberOfChannelsKey: channels,
                 AVEncoderBitRateKey: 128_000
             ]
+            // Do not pass the PCM source format as a hint while asking
+            // AVAssetWriter to encode AAC. On newer macOS releases this can
+            // raise an Objective-C exception inside AVAssetWriterInput's
+            // initializer, which bypasses Swift error handling and aborts the
+            // app from the realtime audio callback.
             let inp = AVAssetWriterInput(mediaType: .audio,
-                                         outputSettings: settings,
-                                         sourceFormatHint: sourceFormat)
+                                         outputSettings: settings)
             inp.expectsMediaDataInRealTime = true
             guard w.canAdd(inp) else {
                 NSLog("[ClassNote] FileWriter: cannot add audio input")
@@ -581,51 +598,6 @@ final class FileWriter: @unchecked Sendable {
         }
     }
 
-    private func makeFormatDescription(from format: AVAudioFormat) -> CMAudioFormatDescription? {
-        var asbd = format.streamDescription.pointee
-        var desc: CMAudioFormatDescription?
-        let status = CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault,
-                                                    asbd: &asbd,
-                                                    layoutSize: 0,
-                                                    layout: nil,
-                                                    magicCookieSize: 0,
-                                                    magicCookie: nil,
-                                                    extensions: nil,
-                                                    formatDescriptionOut: &desc)
-        return status == noErr ? desc : nil
-    }
-
-    private func makeSampleBuffer(from buffer: AVAudioPCMBuffer, pts: CMTime) -> CMSampleBuffer? {
-        guard let formatDesc = makeFormatDescription(from: buffer.format) else { return nil }
-        var timing = CMSampleTimingInfo(
-            duration: CMTime(value: CMTimeValue(buffer.frameLength),
-                             timescale: CMTimeScale(buffer.format.sampleRate)),
-            presentationTimeStamp: pts,
-            decodeTimeStamp: .invalid
-        )
-        var sb: CMSampleBuffer?
-        let createStatus = CMSampleBufferCreate(allocator: kCFAllocatorDefault,
-                                                dataBuffer: nil,
-                                                dataReady: false,
-                                                makeDataReadyCallback: nil,
-                                                refcon: nil,
-                                                formatDescription: formatDesc,
-                                                sampleCount: CMItemCount(buffer.frameLength),
-                                                sampleTimingEntryCount: 1,
-                                                sampleTimingArray: &timing,
-                                                sampleSizeEntryCount: 0,
-                                                sampleSizeArray: nil,
-                                                sampleBufferOut: &sb)
-        guard createStatus == noErr, let sb = sb else { return nil }
-        let setStatus = CMSampleBufferSetDataBufferFromAudioBufferList(
-            sb,
-            blockBufferAllocator: kCFAllocatorDefault,
-            blockBufferMemoryAllocator: kCFAllocatorDefault,
-            flags: 0,
-            bufferList: buffer.audioBufferList
-        )
-        return setStatus == noErr ? sb : nil
-    }
 }
 
 // MARK: - Sample counter (thread-safe for watchdog)

@@ -1,4 +1,5 @@
 import XCTest
+@preconcurrency import AVFoundation
 @testable import ClassNote
 
 final class WavEncoderTests: XCTestCase {
@@ -66,6 +67,36 @@ final class VADTests: XCTestCase {
         XCTAssertTrue(pass1, "Loud chunk must pass VAD")
         // Within hangover window so should still pass
         XCTAssertTrue(pass2, "Silent chunk within hangover should still pass")
+    }
+}
+
+final class FileWriterTests: XCTestCase {
+    func testPCMBufferWriterCreatesM4AWithoutCrashing() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("classnote-filewriter-\(UUID().uuidString).m4a")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                         sampleRate: 48000,
+                                         channels: 1,
+                                         interleaved: false),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4800) else {
+            return XCTFail("Could not create audio test buffer")
+        }
+        buffer.frameLength = 4800
+        if let channel = buffer.floatChannelData?[0] {
+            for frame in 0..<Int(buffer.frameLength) {
+                channel[frame] = 0
+            }
+        }
+
+        let writer = FileWriter(url: url)
+        writer.appendPCMBuffer(buffer)
+        await writer.finish()
+
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        let size = attrs[.size] as? NSNumber
+        XCTAssertGreaterThan(size?.intValue ?? 0, 0)
     }
 }
 
