@@ -141,8 +141,37 @@ actor SessionRepository {
     }
 
     func delete(id: String) async throws {
-        _ = try await Database.shared.dbPool.write { db in
+        let audioPath = try await Database.shared.dbPool.write { db in
+            let audioPath = try String.fetchOne(db,
+                                                sql: "SELECT audio_path FROM session WHERE id=?",
+                                                arguments: [id])
             try Session.deleteOne(db, key: id)
+            return audioPath
+        }
+        AppBootstrap.deleteManagedRecording(path: audioPath)
+    }
+
+    func allReferencedAudioPaths() async throws -> Set<String> {
+        try await Database.shared.dbPool.read { db in
+            let paths = try String.fetchAll(db, sql: """
+                SELECT audio_path
+                FROM session
+                WHERE audio_path IS NOT NULL AND audio_path != ''
+                """)
+            return Set(paths)
+        }
+    }
+
+    func cleanupOrphanedRecordings() async throws -> Int {
+        let paths = try await allReferencedAudioPaths()
+        return AppBootstrap.cleanupOrphanedRecordings(referencedPaths: paths)
+    }
+
+    func audioPath(id: String) async throws -> String? {
+        try await Database.shared.dbPool.read { db in
+            try String.fetchOne(db,
+                                sql: "SELECT audio_path FROM session WHERE id=?",
+                                arguments: [id])
         }
     }
 }
@@ -413,28 +442,20 @@ actor ApiConfigRepository {
         var cfg = try await Database.shared.dbPool.read { db in
             try ApiConfig.fetchOne(db, key: 1) ?? .default
         }
-        if let keychainKey = try APIKeyStore.read(), !keychainKey.isEmpty {
+        if !cfg.apiKey.isEmpty {
+            try? APIKeyStore.save(cfg.apiKey)
+        } else if let keychainKey = try? APIKeyStore.read(), !keychainKey.isEmpty {
             cfg.apiKey = keychainKey
-        } else if !cfg.apiKey.isEmpty {
-            try APIKeyStore.save(cfg.apiKey)
-            try await clearDatabaseAPIKey()
+            try await save(cfg)
         }
         return cfg
     }
 
     func save(_ cfg: ApiConfig) async throws {
-        try APIKeyStore.save(cfg.apiKey)
-        var stored = cfg
-        stored.apiKey = ""
-        let databaseConfig = stored
+        try? APIKeyStore.save(cfg.apiKey)
+        let databaseConfig = cfg
         try await Database.shared.dbPool.write { db in
             try databaseConfig.insert(db, onConflict: .replace)
-        }
-    }
-
-    private func clearDatabaseAPIKey() async throws {
-        try await Database.shared.dbPool.write { db in
-            try db.execute(sql: "UPDATE api_config SET api_key='' WHERE id=1")
         }
     }
 }

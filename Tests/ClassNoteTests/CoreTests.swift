@@ -178,10 +178,42 @@ final class DatabaseTests: XCTestCase {
         let rawDatabaseKey: String = try await Database.shared.dbPool.read { db in
             try String.fetchOne(db, sql: "SELECT api_key FROM api_config WHERE id=1") ?? ""
         }
-        XCTAssertEqual(rawDatabaseKey, "", "API key should live in Keychain, not SQLite")
+        XCTAssertEqual(rawDatabaseKey, "test-secret-key-do-not-keep")
 
         // Restore default
         try await ApiConfigRepository.shared.save(.default)
+    }
+
+    func testDeletingSessionRemovesManagedRecordingFile() async throws {
+        try Database.shared.setup()
+        let session = Session.new(courseId: nil, title: "Delete recording")
+        let url = AppBootstrap.recordingURL(sessionId: session.id)
+        try Data("audio".utf8).write(to: url)
+        var saved = session
+        saved.audioPath = url.path
+        try await SessionRepository.shared.insert(saved)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        try await SessionRepository.shared.delete(id: session.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testCleanupOrphanedRecordingsPreservesReferencedFiles() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("classnote-recordings-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let keptURL = root.appendingPathComponent("kept.m4a")
+        let orphanURL = root.appendingPathComponent("orphan.m4a")
+        try Data("keep".utf8).write(to: keptURL)
+        try Data("orphan".utf8).write(to: orphanURL)
+
+        let removed = AppBootstrap.cleanupOrphanedRecordings(referencedPaths: [keptURL.path],
+                                                             recordingsRoot: root)
+        XCTAssertEqual(removed, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: keptURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphanURL.path))
     }
 
     func testFlashcardPersistenceAndOrdering() async throws {

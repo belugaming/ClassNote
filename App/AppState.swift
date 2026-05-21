@@ -35,6 +35,7 @@ final class AppState: ObservableObject {
 
     func bootstrap() async {
         await loadConfig()
+        await cleanupOrphanedRecordings()
         refreshMicrophoneDevices()
         await refreshInterruptedSessions()
     }
@@ -43,6 +44,14 @@ final class AppState: ObservableObject {
         if let cfg = try? await ApiConfigRepository.shared.load() {
             self.apiConfig = cfg
             self.sttBackend = SttBackend(rawValue: cfg.sttBackend) ?? .openAICompatible
+        }
+    }
+
+    func cleanupOrphanedRecordings() async {
+        do {
+            _ = try await SessionRepository.shared.cleanupOrphanedRecordings()
+        } catch {
+            NSLog("[ClassNote] Orphan recording cleanup failed: \(error)")
         }
     }
 
