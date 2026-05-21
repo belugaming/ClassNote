@@ -72,6 +72,11 @@ private struct InnerMenuBarView: View {
                               tint: .purple) {
                     appState.startNewSession(source: .mixed)
                 }
+                MenubarButton(label: L10n.t("menubar.transcribeOnlyMic"),
+                              icon: "text.badge.checkmark",
+                              tint: Theme.accentMuted) {
+                    appState.startNewSession(source: .microphone, translationEnabled: false)
+                }
 
                 Divider()
 
@@ -110,6 +115,12 @@ private struct InnerMenuBarView: View {
             }
             .tint(Theme.accent)
             .padding(.horizontal, 4)
+
+            Label(appState.selectedMicrophoneName, systemImage: "mic")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .padding(.horizontal, 6)
 
             Divider()
 

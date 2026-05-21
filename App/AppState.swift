@@ -17,6 +17,8 @@ final class AppState: ObservableObject {
     @Published var translationEnabled: Bool = true
     @Published var sttBackend: SttBackend = .openAICompatible
     @Published var interruptedSessions: [Session] = []
+    @Published var microphoneDevices: [MicrophoneInputDevice] = []
+    @AppStorage("preferredMicrophoneDeviceID") var preferredMicrophoneDeviceID: String = MicrophoneInputDevice.systemDefaultID
     @Published private var importOrchestrators: [String: SessionOrchestrator] = [:]
     @Published var diagnosticReport: [DiagnosticCheck] = []
 
@@ -33,6 +35,7 @@ final class AppState: ObservableObject {
 
     func bootstrap() async {
         await loadConfig()
+        refreshMicrophoneDevices()
         await refreshInterruptedSessions()
     }
 
@@ -46,10 +49,27 @@ final class AppState: ObservableObject {
     func saveConfig(_ cfg: ApiConfig) async {
         do {
             try await ApiConfigRepository.shared.save(cfg)
-            self.apiConfig = cfg
+            self.apiConfig = try await ApiConfigRepository.shared.load()
         } catch {
             setError("Save settings failed: \(error.localizedDescription)")
         }
+    }
+
+    func refreshMicrophoneDevices() {
+        microphoneDevices = MicrophoneDeviceCatalog.availableInputDevices()
+        if selectedMicrophoneUniqueID != nil,
+           !microphoneDevices.contains(where: { $0.id == preferredMicrophoneDeviceID }) {
+            preferredMicrophoneDeviceID = MicrophoneInputDevice.systemDefaultID
+        }
+    }
+
+    var selectedMicrophoneUniqueID: String? {
+        preferredMicrophoneDeviceID == MicrophoneInputDevice.systemDefaultID ? nil : preferredMicrophoneDeviceID
+    }
+
+    var selectedMicrophoneName: String {
+        microphoneDevices.first { $0.id == preferredMicrophoneDeviceID }?.name
+        ?? MicrophoneDeviceCatalog.name(for: selectedMicrophoneUniqueID)
     }
 
     func refreshInterruptedSessions() async {
@@ -74,9 +94,13 @@ final class AppState: ObservableObject {
         }
     }
 
-    func startNewSession(source: AudioSourceKind = .microphone) {
+    func startNewSession(source: AudioSourceKind = .microphone,
+                         translationEnabled: Bool? = nil) {
         Task { @MainActor in
             do {
+                if let translationEnabled {
+                    self.translationEnabled = translationEnabled
+                }
                 let sessionId = try await orchestrator.startNewSession(courseId: nil, source: source)
                 self.currentSessionId = sessionId
                 self.isRecording = true
@@ -92,8 +116,13 @@ final class AppState: ObservableObject {
         importOrchestrators[windowId] ?? orchestrator
     }
 
-    func startNewSession(courseId: String?, source: AudioSourceKind) async -> String? {
+    func startNewSession(courseId: String?,
+                         source: AudioSourceKind,
+                         translationEnabled: Bool? = nil) async -> String? {
         do {
+            if let translationEnabled {
+                self.translationEnabled = translationEnabled
+            }
             let sessionId = try await orchestrator.startNewSession(courseId: courseId, source: source)
             self.currentSessionId = sessionId
             self.isRecording = true
@@ -109,6 +138,7 @@ final class AppState: ObservableObject {
     func startEphemeralTranslation(source: AudioSourceKind = .microphone) {
         Task { @MainActor in
             do {
+                self.translationEnabled = true
                 let windowId = try await orchestrator.startEphemeralTranslation(source: source)
                 self.currentSessionId = nil
                 self.isRecording = true
@@ -122,6 +152,7 @@ final class AppState: ObservableObject {
 
     func startEphemeralTranslation(source: AudioSourceKind) async -> Bool {
         do {
+            self.translationEnabled = true
             let windowId = try await orchestrator.startEphemeralTranslation(source: source)
             self.currentSessionId = nil
             self.isRecording = true
@@ -324,7 +355,7 @@ final class AppState: ObservableObject {
                             detail: Database.shared.dbPool == nil ? L10n.t("diagnostics.database.failed") : L10n.t("diagnostics.ok")))
         checks.append(.init(name: L10n.t("diagnostics.microphone"),
                             status: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized ? .ok : .warning,
-                            detail: L10n.t("diagnostics.microphone.detail")))
+                            detail: "\(L10n.t("diagnostics.microphone.detail")) \(selectedMicrophoneName)"))
         checks.append(.init(name: L10n.t("diagnostics.screen"),
                             status: CGPreflightScreenCaptureAccess() ? .ok : .warning,
                             detail: L10n.t("diagnostics.screen.detail")))

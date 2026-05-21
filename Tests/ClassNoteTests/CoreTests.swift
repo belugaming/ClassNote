@@ -76,7 +76,7 @@ final class DatabaseTests: XCTestCase {
         let tables: [String] = try Database.shared.dbPool.read { db in
             try String.fetchAll(db, sql: "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         }
-        for required in ["course", "session", "segment", "highlight", "note", "api_config"] {
+        for required in ["course", "session", "segment", "highlight", "note", "api_config", "flashcard", "study_tool_result"] {
             XCTAssertTrue(tables.contains(required), "Missing table \(required)")
         }
         let virtualTables: [String] = try Database.shared.dbPool.read { db in
@@ -140,11 +140,73 @@ final class DatabaseTests: XCTestCase {
 
         let reloaded = try await ApiConfigRepository.shared.load()
         XCTAssertEqual(reloaded.baseUrl, "https://example.test/v1")
+        XCTAssertEqual(reloaded.apiKey, "test-secret-key-do-not-keep")
         XCTAssertEqual(reloaded.translationModel, "test-translation-model")
         XCTAssertEqual(reloaded.redactedKey, "test…keep")
 
+        let rawDatabaseKey: String = try await Database.shared.dbPool.read { db in
+            try String.fetchOne(db, sql: "SELECT api_key FROM api_config WHERE id=1") ?? ""
+        }
+        XCTAssertEqual(rawDatabaseKey, "", "API key should live in Keychain, not SQLite")
+
         // Restore default
         try await ApiConfigRepository.shared.save(.default)
+    }
+
+    func testFlashcardPersistenceAndOrdering() async throws {
+        try Database.shared.setup()
+        let session = Session.new(courseId: nil, title: "Flashcard source")
+        try await SessionRepository.shared.insert(session)
+
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let cards = [
+            Flashcard(id: nil, sessionId: session.id, front: "What is ATP?", back: "Energy carrier", sourceModel: "test-model", createdAt: now, sortOrder: 99),
+            Flashcard(id: nil, sessionId: session.id, front: "Define osmosis", back: "Water diffusion", sourceModel: "test-model", createdAt: now, sortOrder: 99)
+        ]
+        try await FlashcardRepository.shared.replace(sessionId: session.id, cards: cards)
+
+        let loaded = try await FlashcardRepository.shared.all(sessionId: session.id)
+        XCTAssertEqual(loaded.map(\.front), ["What is ATP?", "Define osmosis"])
+        XCTAssertEqual(loaded.map(\.sortOrder), [0, 1])
+
+        try await SessionRepository.shared.delete(id: session.id)
+    }
+
+    func testFlashcardsMarkdownExport() {
+        let session = Session.new(courseId: nil, title: "Biology 101")
+        let input = SessionExporter.Input(
+            session: session,
+            segments: [],
+            note: nil,
+            highlights: [],
+            flashcards: [
+                Flashcard(id: nil, sessionId: session.id, front: "What is ATP?", back: "Energy carrier", sourceModel: nil, createdAt: 1, sortOrder: 0)
+            ],
+            studyToolResults: [])
+
+        let md = SessionExporter.flashcardsMarkdown(input)
+        XCTAssertTrue(md.contains("# Biology 101 Flashcards"))
+        XCTAssertTrue(md.contains("**Front:** What is ATP?"))
+        XCTAssertTrue(md.contains("**Back:** Energy carrier"))
+    }
+
+    func testStudyToolResultPersistence() async throws {
+        try Database.shared.setup()
+        let session = Session.new(courseId: nil, title: "Study tool source")
+        try await SessionRepository.shared.insert(session)
+
+        let result = StudyToolResult(id: UUID().uuidString,
+                                     sessionId: session.id,
+                                     toolId: "catch_up",
+                                     markdown: "# Catch up",
+                                     model: "test-model",
+                                     generatedAt: 10)
+        try await StudyToolResultRepository.shared.upsert(result)
+
+        let loaded = try await StudyToolResultRepository.shared.get(sessionId: session.id, toolId: "catch_up")
+        XCTAssertEqual(loaded?.markdown, "# Catch up")
+
+        try await SessionRepository.shared.delete(id: session.id)
     }
 }
 
@@ -161,6 +223,41 @@ final class TranscriptBufferTests: XCTestCase {
         buf.updateTranslation(rowId: 2, translated: "你怎么样")
         XCTAssertEqual(buf.segments[1].translated, "你怎么样")
         XCTAssertEqual(buf.recent(1), ["How are you"])
+    }
+}
+
+final class OverlayCaptionFormatterTests: XCTestCase {
+    func testOverlayCaptionTailKeepsLatestLogicalLines() {
+        let text = """
+        First sentence.
+        Second sentence.
+        Third sentence.
+        Fourth sentence.
+        """
+
+        let tail = text.overlayCaptionTail(maxLines: 2)
+        XCTAssertFalse(tail.contains("First sentence"))
+        XCTAssertTrue(tail.contains("Third sentence"))
+        XCTAssertTrue(tail.contains("Fourth sentence"))
+    }
+
+    func testOverlayCaptionTailBoundsVeryLongText() {
+        let text = String(repeating: "linear algebra ", count: 80)
+        let tail = text.overlayCaptionTail(maxLines: 1)
+        XCTAssertLessThanOrEqual(tail.count, 86)
+        XCTAssertFalse(tail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+}
+
+final class TranscriptTextPolisherTests: XCTestCase {
+    func testPolishNormalizesSpacingAndCapitalization() {
+        let polished = TranscriptTextPolisher.polish("  today   we discuss teh matrix , eigenvalues . ")
+        XCTAssertEqual(polished, "Today we discuss the matrix, eigenvalues.")
+    }
+
+    func testPolishLeavesChineseTextReadable() {
+        let polished = TranscriptTextPolisher.polish("  今天   我们 学 线性代数 。  ")
+        XCTAssertEqual(polished, "今天 我们 学 线性代数。")
     }
 }
 

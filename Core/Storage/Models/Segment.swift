@@ -103,3 +103,27 @@ struct NoteVersion: Codable, FetchableRecord, PersistableRecord, Identifiable, H
 
     static let databaseTableName = "note_version"
 }
+
+struct Flashcard: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Hashable, Sendable {
+    var id: Int64?
+    var sessionId: String
+    var front: String
+    var back: String
+    var sourceModel: String?
+    var createdAt: Int64
+    var sortOrder: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id, front, back
+        case sessionId = "session_id"
+        case sourceModel = "source_model"
+        case createdAt = "created_at"
+        case sortOrder = "sort_order"
+    }
+
+    static let databaseTableName = "flashcard"
+
+    mutating func didInsert(_ inserted: InsertionSuccess) {
+        id = inserted.rowID
+    }
+}

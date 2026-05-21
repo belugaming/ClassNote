@@ -342,18 +342,99 @@ actor NoteRepository {
     }
 }
 
+actor FlashcardRepository {
+    static let shared = FlashcardRepository()
+
+    func all(sessionId: String) async throws -> [Flashcard] {
+        try await Database.shared.dbPool.read { db in
+            try Flashcard
+                .filter(Column("session_id") == sessionId)
+                .order(Column("sort_order"), Column("id"))
+                .fetchAll(db)
+        }
+    }
+
+    func replace(sessionId: String, cards: [Flashcard]) async throws {
+        try await Database.shared.dbPool.write { db in
+            try db.execute(sql: "DELETE FROM flashcard WHERE session_id=?", arguments: [sessionId])
+            for var card in cards.enumerated().map({ index, card in
+                var next = card
+                next.sessionId = sessionId
+                next.sortOrder = index
+                return next
+            }) {
+                try card.insert(db)
+            }
+        }
+    }
+}
+
+actor StudyToolResultRepository {
+    static let shared = StudyToolResultRepository()
+
+    func all(sessionId: String) async throws -> [StudyToolResult] {
+        try await Database.shared.dbPool.read { db in
+            try StudyToolResult
+                .filter(Column("session_id") == sessionId)
+                .order(Column("generated_at").desc)
+                .fetchAll(db)
+        }
+    }
+
+    func get(sessionId: String, toolId: String) async throws -> StudyToolResult? {
+        try await Database.shared.dbPool.read { db in
+            try StudyToolResult
+                .filter(Column("session_id") == sessionId && Column("tool_id") == toolId)
+                .fetchOne(db)
+        }
+    }
+
+    func upsert(_ result: StudyToolResult) async throws {
+        try await Database.shared.dbPool.write { db in
+            if try StudyToolResult.fetchOne(db, key: result.id) != nil {
+                try result.update(db)
+            } else if let existing = try StudyToolResult
+                .filter(Column("session_id") == result.sessionId && Column("tool_id") == result.toolId)
+                .fetchOne(db) {
+                var replacement = result
+                replacement.id = existing.id
+                try replacement.update(db)
+            } else {
+                try result.insert(db)
+            }
+        }
+    }
+}
+
 actor ApiConfigRepository {
     static let shared = ApiConfigRepository()
 
     func load() async throws -> ApiConfig {
-        try await Database.shared.dbPool.read { db in
+        var cfg = try await Database.shared.dbPool.read { db in
             try ApiConfig.fetchOne(db, key: 1) ?? .default
         }
+        if let keychainKey = try APIKeyStore.read(), !keychainKey.isEmpty {
+            cfg.apiKey = keychainKey
+        } else if !cfg.apiKey.isEmpty {
+            try APIKeyStore.save(cfg.apiKey)
+            try await clearDatabaseAPIKey()
+        }
+        return cfg
     }
 
     func save(_ cfg: ApiConfig) async throws {
+        try APIKeyStore.save(cfg.apiKey)
+        var stored = cfg
+        stored.apiKey = ""
+        let databaseConfig = stored
         try await Database.shared.dbPool.write { db in
-            try cfg.insert(db, onConflict: .replace)
+            try databaseConfig.insert(db, onConflict: .replace)
+        }
+    }
+
+    private func clearDatabaseAPIKey() async throws {
+        try await Database.shared.dbPool.write { db in
+            try db.execute(sql: "UPDATE api_config SET api_key='' WHERE id=1")
         }
     }
 }

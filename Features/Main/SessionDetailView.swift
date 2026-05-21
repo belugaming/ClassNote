@@ -10,12 +10,13 @@ struct SessionDetailView: View {
     @State private var selectedTab: DetailTab = .transcript
 
     enum DetailTab: String, CaseIterable, Identifiable {
-        case transcript, notes, qa, flashcards, highlights
+        case transcript, notes, tools, qa, flashcards, highlights
         var id: String { rawValue }
         var titleKey: String {
             switch self {
             case .transcript: return "session.tab.transcript"
             case .notes: return "session.tab.notes"
+            case .tools: return "session.tab.tools"
             case .qa: return "session.tab.qa"
             case .flashcards: return "session.tab.flashcards"
             case .highlights: return "session.tab.highlights"
@@ -25,6 +26,7 @@ struct SessionDetailView: View {
             switch self {
             case .transcript: return "captions.bubble"
             case .notes: return "sparkles"
+            case .tools: return "wand.and.stars"
             case .qa: return "questionmark.bubble"
             case .flashcards: return "rectangle.stack"
             case .highlights: return "star.fill"
@@ -40,6 +42,7 @@ struct SessionDetailView: View {
                 switch selectedTab {
                 case .transcript: TranscriptPane(vm: vm)
                 case .notes: NotesPane(vm: vm)
+                case .tools: StudyToolsPane(vm: vm)
                 case .qa: QAPane(vm: vm)
                 case .flashcards: FlashcardsPane(vm: vm)
                 case .highlights: HighlightsPane(vm: vm)
@@ -51,11 +54,11 @@ struct SessionDetailView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 14) {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 7) {
                     Text(vm.session?.session.title ?? "…")
-                        .font(.system(size: 25, weight: .semibold, design: .rounded))
+                        .font(.system(size: 22, weight: .semibold, design: .rounded))
                         .lineLimit(2)
                     metadataRow
                 }
@@ -111,6 +114,10 @@ struct SessionDetailView: View {
                     Divider()
                     Button(L10n.t("session.export.notes"))          { vm.runExport(.notesMarkdown) }
                         .disabled(vm.note == nil)
+                    Button(L10n.t("session.export.flashcards"))     { vm.runExport(.flashcardsMarkdown) }
+                        .disabled(vm.flashcards.isEmpty)
+                    Button(L10n.t("session.export.studyTools"))     { vm.runExport(.studyToolsMarkdown) }
+                        .disabled(vm.studyToolResults.isEmpty)
                     Button(L10n.t("session.export.audio"))          { vm.runExport(.audio) }
                         .disabled(!vm.hasAudio)
                     Divider()
@@ -121,10 +128,10 @@ struct SessionDetailView: View {
                 .disabled(vm.session?.segments.isEmpty ?? true)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 18)
-        .padding(.bottom, 14)
-        .background(Theme.surfaceElevated.opacity(0.72))
+        .padding(.horizontal, 18)
+        .padding(.top, 14)
+        .padding(.bottom, 12)
+        .background(Theme.surfaceElevated.opacity(0.92))
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(Theme.hairline)
@@ -145,31 +152,31 @@ struct SessionDetailView: View {
     }
 
     private var tabPicker: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
             ForEach(DetailTab.allCases) { tab in
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) { selectedTab = tab }
                 } label: {
                     Label(L10n.t(tab.titleKey), systemImage: tab.icon)
-                        .font(.callout.weight(selectedTab == tab ? .semibold : .medium))
+                        .font(.subheadline.weight(selectedTab == tab ? .semibold : .medium))
                         .foregroundStyle(selectedTab == tab ? Theme.accent : .secondary)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
+                        .padding(.vertical, 7)
                         .background {
-                            RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
+                            RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous)
                                 .fill(selectedTab == tab ? Theme.accentSoft : Color.clear)
                         }
                         .overlay {
-                            RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
-                                .stroke(selectedTab == tab ? Theme.accent.opacity(0.28) : Color.clear, lineWidth: 1)
+                            RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous)
+                                .stroke(selectedTab == tab ? Theme.accent.opacity(0.22) : Color.clear, lineWidth: 1)
                         }
                     }
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(Theme.surface.opacity(0.58))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(Theme.surface.opacity(0.34))
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(Theme.hairline)
@@ -211,34 +218,65 @@ struct SessionDetailView: View {
 
 struct TranscriptPane: View {
     @ObservedObject var vm: SessionDetailViewModel
+    @AppStorage("transcriptFontSize") private var transcriptFontSize: Double = 17
+    @AppStorage("transcriptCompactMode") private var compactMode: Bool = false
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 10) {
-                if let segments = vm.session?.segments, !segments.isEmpty {
-                    ForEach(segments) { seg in
-                        SegmentRowView(segment: seg) {
-                            vm.seek(to: seg.startMs)
-                        }
-                    }
-                } else {
-                    ContentUnavailableView {
-                        Label(L10n.t("session.empty.transcript.title"), systemImage: "captions.bubble")
-                    } description: {
-                        Text(L10n.t("session.empty.transcript.desc"))
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(40)
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Spacer()
+                Button {
+                    transcriptFontSize = max(13, transcriptFontSize - 1)
+                } label: {
+                    Image(systemName: "textformat.size.smaller")
                 }
+                Button {
+                    transcriptFontSize = min(26, transcriptFontSize + 1)
+                } label: {
+                    Image(systemName: "textformat.size.larger")
+                }
+                Toggle(isOn: $compactMode) {
+                    Image(systemName: compactMode ? "rectangle.expand.vertical" : "rectangle.compress.vertical")
+                }
+                .toggleStyle(.button)
+                .help(compactMode ? L10n.t("transcript.mode.comfortable") : L10n.t("transcript.mode.compact"))
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 16)
+            .buttonStyle(.borderless)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+            .background(Theme.surface.opacity(0.22))
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: compactMode ? 6 : 10) {
+                    if let segments = vm.session?.segments, !segments.isEmpty {
+                        ForEach(segments) { seg in
+                            SegmentRowView(segment: seg,
+                                           fontSize: transcriptFontSize,
+                                           compact: compactMode) {
+                                vm.seek(to: seg.startMs)
+                            }
+                        }
+                    } else {
+                        ContentUnavailableView {
+                            Label(L10n.t("session.empty.transcript.title"), systemImage: "captions.bubble")
+                        } description: {
+                            Text(L10n.t("session.empty.transcript.desc"))
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding(40)
+                    }
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 16)
+            }
         }
     }
 }
 
 struct SegmentRowView: View {
     let segment: Segment
+    var fontSize: Double = 17
+    var compact: Bool = false
     let onTap: () -> Void
 
     var body: some View {
@@ -262,12 +300,12 @@ struct SegmentRowView: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(segment.textOriginal)
-                    .font(.body)
+                    .font(.system(size: fontSize))
                     .lineSpacing(2)
                     .textSelection(.enabled)
                 if !segment.textTranslated.isEmpty {
                     Text(segment.textTranslated)
-                        .font(.callout)
+                        .font(.system(size: max(12, fontSize - 2)))
                         .foregroundStyle(Theme.translation)
                         .lineSpacing(2)
                         .textSelection(.enabled)
@@ -275,7 +313,7 @@ struct SegmentRowView: View {
             }
             Spacer()
         }
-        .padding(12)
+        .padding(compact ? 8 : 12)
         .background(
             RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
                 .fill(Theme.surfaceElevated.opacity(0.68))
@@ -404,6 +442,7 @@ struct QAPane: View {
 
 struct FlashcardsPane: View {
     @ObservedObject var vm: SessionDetailViewModel
+    @State private var revealedCardIds: Set<Int64> = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -411,6 +450,13 @@ struct FlashcardsPane: View {
                 Text(L10n.t("flashcards.title"))
                     .font(.headline)
                 Spacer()
+                Button {
+                    vm.copyFlashcardsForAnki()
+                } label: {
+                    Label(L10n.t("flashcards.copyAnki"), systemImage: "doc.on.clipboard")
+                }
+                .disabled(vm.flashcards.isEmpty)
+
                 Button {
                     Task { await vm.generateFlashcards() }
                 } label: {
@@ -432,23 +478,129 @@ struct FlashcardsPane: View {
                     .padding(40)
                 } else {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 12)], spacing: 12) {
-                        ForEach(Array(vm.flashcards.enumerated()), id: \.offset) { _, card in
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text(card.front)
-                                    .font(.headline)
-                                Divider()
-                                Text(card.back)
-                                    .font(.callout)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(14)
-                            .cardBackground()
+                        ForEach(Array(vm.flashcards.enumerated()), id: \.offset) { idx, card in
+                            FlashcardStudyCard(card: card,
+                                               fallbackId: Int64(idx),
+                                               isRevealed: revealedCardIds.contains(card.id ?? Int64(idx)),
+                                               toggle: {
+                                                   let key = card.id ?? Int64(idx)
+                                                   if revealedCardIds.contains(key) {
+                                                       revealedCardIds.remove(key)
+                                                   } else {
+                                                       revealedCardIds.insert(key)
+                                                   }
+                                               })
                         }
                     }
                     .padding(16)
                 }
             }
         }
+    }
+}
+
+struct StudyToolsPane: View {
+    @ObservedObject var vm: SessionDetailViewModel
+
+    var body: some View {
+        HSplitView {
+            List(StudyTools.all, selection: $vm.selectedStudyToolId) { tool in
+                VStack(alignment: .leading, spacing: 5) {
+                    Label(L10n.t(tool.labelKey), systemImage: tool.icon)
+                        .font(.callout.weight(.semibold))
+                    Text(L10n.t(tool.descriptionKey))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                .padding(.vertical, 5)
+                .tag(tool.id)
+            }
+            .frame(minWidth: 240, idealWidth: 280)
+
+            VStack(spacing: 0) {
+                studyToolHeader
+                Divider()
+                ScrollView {
+                    if let result = vm.selectedStudyToolResult {
+                        MarkdownView(markdown: result.markdown)
+                            .textSelection(.enabled)
+                            .padding(18)
+                    } else {
+                        ContentUnavailableView {
+                            Label(L10n.t("studyTools.title"), systemImage: "wand.and.stars")
+                        } description: {
+                            Text(L10n.t("studyTools.empty"))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(40)
+                    }
+                }
+            }
+            .frame(minWidth: 420)
+        }
+    }
+
+    private var studyToolHeader: some View {
+        HStack(spacing: 10) {
+            if let tool = vm.selectedStudyTool {
+                Label(L10n.t(tool.labelKey), systemImage: tool.icon)
+                    .font(.headline)
+            } else {
+                Text(L10n.t("studyTools.title"))
+                    .font(.headline)
+            }
+            Spacer()
+            Button {
+                Task { await vm.generateSelectedStudyTool() }
+            } label: {
+                Label(vm.isGeneratingStudyTool ? L10n.t("studyTools.generating") : L10n.t("studyTools.generate"),
+                      systemImage: "sparkles")
+            }
+            .disabled(vm.selectedStudyTool == nil || vm.isGeneratingStudyTool || (vm.session?.segments.isEmpty ?? true))
+        }
+        .padding(12)
+    }
+}
+
+private struct FlashcardStudyCard: View {
+    let card: Flashcard
+    let fallbackId: Int64
+    let isRevealed: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 8) {
+                Text(card.front)
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button(action: toggle) {
+                    Image(systemName: isRevealed ? "eye.slash" : "eye")
+                }
+                .buttonStyle(.borderless)
+                .help(isRevealed ? L10n.t("flashcards.hideAnswer") : L10n.t("flashcards.showAnswer"))
+            }
+            Divider()
+            if isRevealed {
+                Text(card.back)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            } else {
+                RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous)
+                    .fill(Theme.surface.opacity(0.55))
+                    .overlay {
+                        Label(L10n.t("flashcards.showAnswer"), systemImage: "eye")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(height: 52)
+                    .onTapGesture(perform: toggle)
+            }
+        }
+        .padding(14)
+        .cardBackground()
     }
 }
 
@@ -715,6 +867,9 @@ final class SessionDetailViewModel: ObservableObject {
     @Published var qaAnswer: String = ""
     @Published var isGeneratingFlashcards: Bool = false
     @Published var flashcards: [Flashcard] = []
+    @Published var studyToolResults: [StudyToolResult] = []
+    @Published var selectedStudyToolId: String? = StudyTools.all.first?.id
+    @Published var isGeneratingStudyTool: Bool = false
 
     @Published var selectedHighlightId: Int64?
     @Published var streamingHighlightId: Int64?
@@ -728,6 +883,16 @@ final class SessionDetailViewModel: ObservableObject {
     var selectedHighlight: Highlight? {
         guard let id = selectedHighlightId else { return nil }
         return highlights.first { $0.id == id }
+    }
+
+    var selectedStudyTool: StudyToolDefinition? {
+        guard let id = selectedStudyToolId else { return nil }
+        return StudyTools.find(id)
+    }
+
+    var selectedStudyToolResult: StudyToolResult? {
+        guard let id = selectedStudyToolId else { return nil }
+        return studyToolResults.first { $0.toolId == id }
     }
 
     var durationLabel: String {
@@ -755,6 +920,8 @@ final class SessionDetailViewModel: ObservableObject {
             self.note = try await NoteRepository.shared.get(sessionId: sessionId)
             self.noteVersions = try await NoteRepository.shared.versions(sessionId: sessionId)
             self.highlights = try await HighlightRepository.shared.all(sessionId: sessionId)
+            self.flashcards = try await FlashcardRepository.shared.all(sessionId: sessionId)
+            self.studyToolResults = try await StudyToolResultRepository.shared.all(sessionId: sessionId)
         } catch {
             NSLog("SessionDetail load error: \(error)")
         }
@@ -842,16 +1009,64 @@ final class SessionDetailViewModel: ObservableObject {
                 """),
                 .init(role: .user, content: transcriptForLLM(s.segments))
             ], model: config.llmModel, temperature: 0.25)
-            flashcards = raw
-                .split(separator: "\n")
-                .compactMap { line in
-                    let parts = line.components(separatedBy: "||")
-                    guard parts.count >= 2 else { return nil }
-                    return Flashcard(front: parts[0].trimmingCharacters(in: .whitespacesAndNewlines),
-                                     back: parts.dropFirst().joined(separator: "||").trimmingCharacters(in: .whitespacesAndNewlines))
-                }
+            var parsed: [Flashcard] = []
+            let createdAt = Int64(Date().timeIntervalSince1970 * 1000)
+            for line in raw.split(separator: "\n") {
+                let parts = String(line).components(separatedBy: "||")
+                guard parts.count >= 2 else { continue }
+                let front = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                let back = parts.dropFirst().joined(separator: "||").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !front.isEmpty, !back.isEmpty else { continue }
+                parsed.append(Flashcard(id: nil,
+                                        sessionId: s.session.id,
+                                        front: front,
+                                        back: back,
+                                        sourceModel: config.llmModel,
+                                        createdAt: createdAt,
+                                        sortOrder: parsed.count))
+            }
+            try await FlashcardRepository.shared.replace(sessionId: s.session.id, cards: parsed)
+            flashcards = try await FlashcardRepository.shared.all(sessionId: s.session.id)
         } catch {
             AppState.shared.setError("Flashcards failed: \(error.localizedDescription)")
+        }
+    }
+
+    func copyFlashcardsForAnki() {
+        guard let session = self.session?.session else { return }
+        let input = SessionExporter.Input(session: session,
+                                           segments: self.session?.segments ?? [],
+                                           note: self.note,
+                                           highlights: self.highlights,
+                                           flashcards: self.flashcards,
+                                           studyToolResults: self.studyToolResults)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(SessionExporter.flashcardsTSV(input), forType: .string)
+    }
+
+    func generateSelectedStudyTool() async {
+        guard let s = session,
+              !s.segments.isEmpty,
+              let tool = selectedStudyTool else { return }
+        isGeneratingStudyTool = true
+        defer { isGeneratingStudyTool = false }
+        let config = AppState.shared.apiConfig
+        let llm = EngineFactory.makeLLM(config: config)
+        do {
+            let markdown = try await llm.chatComplete(messages: [
+                .init(role: .system, content: tool.systemPrompt),
+                .init(role: .user, content: "Lecture transcript:\n\(StudyTools.transcriptForLLM(s.segments))")
+            ], model: config.llmModel, temperature: 0.25)
+            let result = StudyToolResult(id: UUID().uuidString,
+                                         sessionId: s.session.id,
+                                         toolId: tool.id,
+                                         markdown: markdown,
+                                         model: config.llmModel,
+                                         generatedAt: Int64(Date().timeIntervalSince1970 * 1000))
+            try await StudyToolResultRepository.shared.upsert(result)
+            studyToolResults = try await StudyToolResultRepository.shared.all(sessionId: s.session.id)
+        } catch {
+            AppState.shared.setError("Study tool failed: \(error.localizedDescription)")
         }
     }
 
@@ -1050,7 +1265,9 @@ final class SessionDetailViewModel: ObservableObject {
         let input = SessionExporter.Input(session: session,
                                            segments: segments,
                                            note: self.note,
-                                           highlights: self.highlights)
+                                           highlights: self.highlights,
+                                           flashcards: self.flashcards,
+                                           studyToolResults: self.studyToolResults)
         do {
             switch kind {
             case .transcriptMarkdown:
@@ -1071,6 +1288,14 @@ final class SessionDetailViewModel: ObservableObject {
                 }
                 try saveTextWithPanel(content: note.markdown,
                                        suggestedName: SessionExporter.suggestedFilename(input, ext: "md"),
+                                       utType: .init(filenameExtension: "md") ?? .plainText)
+            case .flashcardsMarkdown:
+                try saveTextWithPanel(content: SessionExporter.flashcardsMarkdown(input),
+                                       suggestedName: SessionExporter.suggestedFilename(input, ext: "flashcards.md"),
+                                       utType: .init(filenameExtension: "md") ?? .plainText)
+            case .studyToolsMarkdown:
+                try saveTextWithPanel(content: SessionExporter.studyToolsMarkdown(input),
+                                       suggestedName: SessionExporter.suggestedFilename(input, ext: "study-tools.md"),
                                        utType: .init(filenameExtension: "md") ?? .plainText)
             case .audio:
                 guard let path = session.audioPath,
@@ -1138,9 +1363,4 @@ final class SessionDetailViewModel: ObservableObject {
 struct SessionWithSegments {
     let session: Session
     let segments: [Segment]
-}
-
-struct Flashcard: Hashable {
-    let front: String
-    let back: String
 }

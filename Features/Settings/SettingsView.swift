@@ -55,6 +55,10 @@ struct SettingsView: View {
 struct AppearanceSettingsView: View {
     @EnvironmentObject var appState: AppState
     @State private var selection: L10n.LanguageOverride = L10n.override
+    @AppStorage("overlayCaptionDisplayMode") private var displayModeRaw = OverlayCaptionDisplayMode.bilingual.rawValue
+    @AppStorage("overlayCaptionTextSize") private var textSizeRaw = OverlayCaptionTextSize.medium.rawValue
+    @AppStorage("overlayCaptionRecentCount") private var recentCountRaw = OverlayCaptionRecentCount.two.rawValue
+    @AppStorage("overlayAlwaysOnTop") private var overlayAlwaysOnTop: Bool = true
 
     var body: some View {
         ScrollView {
@@ -71,10 +75,77 @@ struct AppearanceSettingsView: View {
                         appState.setLanguage(newValue)
                     }
                 }
+
+                SettingsSection(title: L10n.t("settings.appearance.overlay"),
+                                footer: L10n.t("settings.appearance.overlayNote")) {
+                    LabeledRow(label: L10n.t("overlay.displayMode")) {
+                        Picker("", selection: displayModeBinding) {
+                            ForEach(OverlayCaptionDisplayMode.allCases) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+
+                    LabeledRow(label: L10n.t("overlay.textSize")) {
+                        Picker("", selection: textSizeBinding) {
+                            ForEach(OverlayCaptionTextSize.allCases) { size in
+                                Text(size.title).tag(size)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+
+                    LabeledRow(label: L10n.t("overlay.recentCount")) {
+                        Picker("", selection: recentCountBinding) {
+                            ForEach(OverlayCaptionRecentCount.allCases) { count in
+                                Text(count.title).tag(count)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+
+                    Toggle(L10n.t("overlay.alwaysOnTop"), isOn: $overlayAlwaysOnTop)
+                        .toggleStyle(.switch)
+                        .tint(Theme.accent)
+                }
             }
             .padding(20)
         }
         .background(Theme.surface.opacity(0.22))
+    }
+
+    private var displayMode: OverlayCaptionDisplayMode {
+        OverlayCaptionDisplayMode(rawValue: displayModeRaw) ?? .bilingual
+    }
+
+    private var textSize: OverlayCaptionTextSize {
+        OverlayCaptionTextSize(rawValue: textSizeRaw) ?? .medium
+    }
+
+    private var recentCount: OverlayCaptionRecentCount {
+        OverlayCaptionRecentCount(rawValue: recentCountRaw) ?? .two
+    }
+
+    private var displayModeBinding: Binding<OverlayCaptionDisplayMode> {
+        Binding(
+            get: { displayMode },
+            set: { displayModeRaw = $0.rawValue }
+        )
+    }
+
+    private var textSizeBinding: Binding<OverlayCaptionTextSize> {
+        Binding(
+            get: { textSize },
+            set: { textSizeRaw = $0.rawValue }
+        )
+    }
+
+    private var recentCountBinding: Binding<OverlayCaptionRecentCount> {
+        Binding(
+            get: { recentCount },
+            set: { recentCountRaw = $0.rawValue }
+        )
     }
 }
 
@@ -332,11 +403,30 @@ struct EngineSettingsView: View {
                         .tint(Theme.accent)
                 }
 
+                SettingsSection(title: L10n.t("settings.audio.input"),
+                                footer: L10n.t("settings.audio.inputNote")) {
+                    Picker(L10n.t("settings.audio.microphone"), selection: $appState.preferredMicrophoneDeviceID) {
+                        ForEach(appState.microphoneDevices) { device in
+                            Text(device.name).tag(device.id)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Button {
+                        appState.refreshMicrophoneDevices()
+                    } label: {
+                        Label(L10n.t("settings.audio.refresh"), systemImage: "arrow.clockwise")
+                    }
+                }
+
                 SettingsSection(title: L10n.t("settings.engines.storage")) {
                     PathRow(label: L10n.t("settings.engines.appSupport"),
                             path: AppBootstrap.applicationSupportURL.path)
                     PathRow(label: L10n.t("settings.engines.recordings"),
                             path: AppBootstrap.recordingsURL.path)
+                    PathRow(label: L10n.t("settings.engines.database"),
+                            path: AppBootstrap.applicationSupportURL.appendingPathComponent("classnote.sqlite").path)
                     Button {
                         NSWorkspace.shared.open(AppBootstrap.applicationSupportURL)
                     } label: {
@@ -347,6 +437,9 @@ struct EngineSettingsView: View {
             .padding(20)
         }
         .background(Theme.surface.opacity(0.22))
+        .onAppear {
+            appState.refreshMicrophoneDevices()
+        }
     }
 }
 

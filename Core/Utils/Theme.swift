@@ -31,6 +31,124 @@ enum Theme {
     static let gridSpacing: CGFloat = 12
 }
 
+enum OverlayCaptionDisplayMode: String, CaseIterable, Identifiable {
+    case original
+    case bilingual
+    case translation
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .original: return L10n.t("overlay.display.original")
+        case .bilingual: return L10n.t("overlay.display.bilingual")
+        case .translation: return L10n.t("overlay.display.translation")
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .original: return "text.alignleft"
+        case .bilingual: return "rectangle.split.2x1"
+        case .translation: return "character.bubble"
+        }
+    }
+}
+
+enum OverlayCaptionTextSize: String, CaseIterable, Identifiable {
+    case small
+    case medium
+    case large
+    case extraLarge
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .small: return L10n.t("overlay.textSize.small")
+        case .medium: return L10n.t("overlay.textSize.medium")
+        case .large: return L10n.t("overlay.textSize.large")
+        case .extraLarge: return L10n.t("overlay.textSize.extraLarge")
+        }
+    }
+
+    var primaryPointSize: CGFloat {
+        switch self {
+        case .small: return 16
+        case .medium: return 20
+        case .large: return 26
+        case .extraLarge: return 32
+        }
+    }
+
+    var secondaryPointSize: CGFloat {
+        switch self {
+        case .small: return 13
+        case .medium: return 16
+        case .large: return 20
+        case .extraLarge: return 24
+        }
+    }
+}
+
+enum OverlayCaptionRecentCount: Int, CaseIterable, Identifiable {
+    case one = 1
+    case two = 2
+    case three = 3
+    case four = 4
+
+    var id: Int { rawValue }
+
+    var title: String {
+        String(format: L10n.t("overlay.recentCount.value"), rawValue)
+    }
+}
+
+extension String {
+    func overlayCaptionTail(maxLines: Int) -> String {
+        let maxLines = max(1, maxLines)
+        let trimmedText = trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else { return "" }
+
+        let maxCharacters = maxLines * 86
+        let captionText = trimmedText.overlayCaptionSentenceBreaks()
+        let scanText = String(captionText.overlayBoundedSuffix(maxCharacters: maxCharacters * 3))
+
+        let logicalLines = scanText
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        let tailText: String
+        if logicalLines.count > maxLines {
+            tailText = logicalLines.suffix(maxLines).joined(separator: "\n")
+        } else {
+            tailText = scanText
+        }
+
+        guard tailText.count > maxCharacters else { return tailText }
+        return String(tailText.suffix(maxCharacters))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func overlayBoundedSuffix(maxCharacters: Int) -> Substring {
+        guard maxCharacters > 0,
+              let start = index(endIndex, offsetBy: -maxCharacters, limitedBy: startIndex)
+        else {
+            return self[startIndex..<endIndex]
+        }
+        return self[start..<endIndex]
+    }
+
+    private func overlayCaptionSentenceBreaks() -> String {
+        replacingOccurrences(
+            of: #"(?<!\d)\.\s+(?=\S)"#,
+            with: ".\n",
+            options: .regularExpression
+        )
+    }
+}
+
 /// Card chrome used everywhere (settings sections, session rows, transcript bubbles).
 struct CardBackground: ViewModifier {
     var radius: CGFloat = Theme.cornerMedium

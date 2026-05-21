@@ -10,6 +10,7 @@ struct SessionListView: View {
     let onImport: ([URL]) -> Void
     let onDelete: (String) -> Void
     let onMove: (String, String?) -> Void
+    let onRevealStorage: () -> Void
 
     @State private var importing = false
 
@@ -76,6 +77,11 @@ struct SessionListView: View {
                     importing = true
                 } label: {
                     Label(L10n.t("toolbar.import"), systemImage: "square.and.arrow.down")
+                }
+                Button {
+                    onRevealStorage()
+                } label: {
+                    Label(L10n.t("toolbar.revealStorage"), systemImage: "folder")
                 }
             }
         }

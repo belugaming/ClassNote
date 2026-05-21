@@ -47,6 +47,9 @@ struct MainWindowView: View {
                                     await vm.moveSession(id: sessionId, courseId: courseId)
                                     syncSelectedSessionWithVisibleList()
                                 }
+                            },
+                            onRevealStorage: {
+                                NSWorkspace.shared.open(AppBootstrap.applicationSupportURL)
                             })
                 .navigationSplitViewColumnWidth(min: 300, ideal: 360)
         } detail: {
@@ -105,54 +108,24 @@ struct MainWindowView: View {
                     .tint(Theme.recording)
                 } else {
                     Menu {
-                        Button {
-                            Task { await vm.startSession(courseId: selectedCourseId, source: .microphone) }
-                        } label: {
-                            Label(L10n.t("toolbar.record.menu.mic"), systemImage: "mic.fill")
-                        }
-                        Button {
-                            Task { await vm.startSession(courseId: selectedCourseId, source: .system) }
-                        } label: {
-                            Label(L10n.t("toolbar.record.menu.system"), systemImage: "speaker.wave.3.fill")
-                        }
-                        Button {
-                            Task { await vm.startSession(courseId: selectedCourseId, source: .mixed) }
-                        } label: {
-                            Label(L10n.t("toolbar.record.menu.mixed"), systemImage: "person.wave.2.fill")
-                        }
+                        classroomModeButton(.recordMicrophone)
+                        classroomModeButton(.recordSystem)
+                        classroomModeButton(.recordMixed)
+                        Divider()
+                        classroomModeButton(.transcribeOnlyMicrophone)
+                        Divider()
+                        classroomModeButton(.temporaryMicrophone)
+                        classroomModeButton(.temporarySystem)
+                        classroomModeButton(.temporaryMixed)
                     } label: {
-                        Label(L10n.t("toolbar.record"), systemImage: "record.circle")
+                        Label(L10n.t("toolbar.classroomMode"), systemImage: "rectangle.grid.1x2")
                     } primaryAction: {
-                        Task { await vm.startSession(courseId: selectedCourseId, source: .microphone) }
+                        Task { await vm.startSession(courseId: selectedCourseId, source: .microphone, translationEnabled: true) }
                     }
                     .disabled(appState.apiConfig.apiKey.isEmpty && appState.sttBackend == .openAICompatible)
                     .help(appState.apiConfig.apiKey.isEmpty
                           ? L10n.t("toolbar.help.configureKey")
-                          : L10n.t("toolbar.help.recordHint"))
-
-                    Menu {
-                        Button {
-                            Task { await vm.startEphemeralTranslation(source: .microphone) }
-                        } label: {
-                            Label(L10n.t("toolbar.translateOnly.menu.mic"), systemImage: "mic")
-                        }
-                        Button {
-                            Task { await vm.startEphemeralTranslation(source: .system) }
-                        } label: {
-                            Label(L10n.t("toolbar.translateOnly.menu.system"), systemImage: "speaker.wave.2")
-                        }
-                        Button {
-                            Task { await vm.startEphemeralTranslation(source: .mixed) }
-                        } label: {
-                            Label(L10n.t("toolbar.translateOnly.menu.mixed"), systemImage: "person.wave.2")
-                        }
-                    } label: {
-                        Label(L10n.t("toolbar.translateOnly"), systemImage: "character.bubble")
-                    } primaryAction: {
-                        Task { await vm.startEphemeralTranslation(source: .microphone) }
-                    }
-                    .disabled(appState.apiConfig.apiKey.isEmpty && appState.sttBackend == .openAICompatible)
-                    .help(L10n.t("toolbar.translateOnly.help"))
+                          : L10n.t("toolbar.classroomMode.help"))
                 }
 
                 Button {
@@ -223,6 +196,78 @@ struct MainWindowView: View {
         let visibleSessionIds = Set(vm.sessions(for: selectedCourseId).map(\.id))
         if !visibleSessionIds.contains(selectedSessionId) {
             self.selectedSessionId = nil
+        }
+    }
+
+    @ViewBuilder
+    private func classroomModeButton(_ mode: ClassroomMode) -> some View {
+        Button {
+            Task {
+                switch mode {
+                case .recordMicrophone, .recordSystem, .recordMixed, .transcribeOnlyMicrophone:
+                    await vm.startSession(courseId: selectedCourseId,
+                                          source: mode.source,
+                                          translationEnabled: mode.translationEnabled)
+                case .temporaryMicrophone, .temporarySystem, .temporaryMixed:
+                    await vm.startEphemeralTranslation(source: mode.source)
+                }
+            }
+        } label: {
+            Label(mode.title, systemImage: mode.icon)
+        }
+    }
+}
+
+private enum ClassroomMode: CaseIterable {
+    case recordMicrophone
+    case recordSystem
+    case recordMixed
+    case transcribeOnlyMicrophone
+    case temporaryMicrophone
+    case temporarySystem
+    case temporaryMixed
+
+    var source: AudioSourceKind {
+        switch self {
+        case .recordMicrophone, .transcribeOnlyMicrophone, .temporaryMicrophone:
+            return .microphone
+        case .recordSystem, .temporarySystem:
+            return .system
+        case .recordMixed, .temporaryMixed:
+            return .mixed
+        }
+    }
+
+    var translationEnabled: Bool {
+        switch self {
+        case .transcribeOnlyMicrophone:
+            return false
+        default:
+            return true
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .recordMicrophone: return L10n.t("toolbar.mode.recordMic")
+        case .recordSystem: return L10n.t("toolbar.mode.recordSystem")
+        case .recordMixed: return L10n.t("toolbar.mode.recordMixed")
+        case .transcribeOnlyMicrophone: return L10n.t("toolbar.mode.transcribeOnly")
+        case .temporaryMicrophone: return L10n.t("toolbar.mode.temporaryMic")
+        case .temporarySystem: return L10n.t("toolbar.mode.temporarySystem")
+        case .temporaryMixed: return L10n.t("toolbar.mode.temporaryMixed")
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .recordMicrophone: return "mic.fill"
+        case .recordSystem: return "speaker.wave.3.fill"
+        case .recordMixed: return "person.wave.2.fill"
+        case .transcribeOnlyMicrophone: return "text.badge.checkmark"
+        case .temporaryMicrophone: return "character.bubble"
+        case .temporarySystem: return "speaker.wave.2"
+        case .temporaryMixed: return "bubble.left.and.text.bubble.right"
         }
     }
 }
@@ -561,13 +606,17 @@ final class MainWindowViewModel: ObservableObject {
         }
     }
 
-    func startSession(courseId: String?, source: AudioSourceKind = .microphone) async {
+    func startSession(courseId: String?,
+                      source: AudioSourceKind = .microphone,
+                      translationEnabled: Bool? = nil) async {
         let app = AppState.shared
         if app.isRecording {
             app.stopRecording()
             return
         }
-        _ = await app.startNewSession(courseId: courseId, source: source)
+        _ = await app.startNewSession(courseId: courseId,
+                                      source: source,
+                                      translationEnabled: translationEnabled)
         await refresh()
     }
 

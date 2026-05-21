@@ -1,5 +1,6 @@
 import Foundation
 @preconcurrency import AVFoundation
+import CoreAudio
 import CoreMedia
 @preconcurrency import ScreenCaptureKit
 
@@ -17,6 +18,42 @@ enum AudioSourceKind: String, CaseIterable, Sendable, Identifiable {
         case .mixed: return "Microphone + System audio"
         case .file: return "Imported file"
         }
+    }
+}
+
+struct MicrophoneInputDevice: Identifiable, Equatable, Hashable {
+    static let systemDefaultID = "system-default"
+
+    let id: String
+    let name: String
+    let uniqueID: String?
+
+    static var systemDefault: MicrophoneInputDevice {
+        MicrophoneInputDevice(id: systemDefaultID,
+                              name: L10n.t("settings.audio.mic.systemDefault"),
+                              uniqueID: nil)
+    }
+}
+
+enum MicrophoneDeviceCatalog {
+    static func availableInputDevices() -> [MicrophoneInputDevice] {
+        let devices = audioDevices().map {
+            MicrophoneInputDevice(id: $0.uniqueID,
+                                  name: $0.localizedName,
+                                  uniqueID: $0.uniqueID)
+        }
+        return [MicrophoneInputDevice.systemDefault] + devices.sorted { $0.name < $1.name }
+    }
+
+    static func name(for uniqueID: String?) -> String {
+        guard let uniqueID else { return MicrophoneInputDevice.systemDefault.name }
+        return availableInputDevices().first { $0.uniqueID == uniqueID }?.name ?? uniqueID
+    }
+
+    private static func audioDevices() -> [AVCaptureDevice] {
+        AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone, .external],
+                                         mediaType: .audio,
+                                         position: .unspecified).devices
     }
 }
 
@@ -48,8 +85,10 @@ final class AudioSourceManager: NSObject {
     // Writer is shared between the SCK audio queue and the mic callback queue.
     // Access only via `writer.queue.sync` / async.
     private var writer: FileWriter?
+    private let microphoneDeviceID: String?
 
-    override init() {
+    init(microphoneDeviceID: String? = nil) {
+        self.microphoneDeviceID = microphoneDeviceID
         var cont: AsyncStream<AudioChunk>.Continuation!
         self.chunks = AsyncStream(bufferingPolicy: .unbounded) { c in cont = c }
         self.chunkContinuation = cont
@@ -113,6 +152,7 @@ final class AudioSourceManager: NSObject {
         let engine = AVAudioEngine()
         self.engine = engine
         let input = engine.inputNode
+        try configurePreferredInputDevice(on: input)
         let inputFormat = input.inputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0 else {
             throw EngineError.unsupported("Microphone not available (sample rate 0). Check privacy permissions.")
@@ -160,6 +200,71 @@ final class AudioSourceManager: NSObject {
             cont.yield(AudioChunk(pcmData: data, sampleRate: targetSampleRate, timestamp: max(0, sessionMs)))
         }
         try engine.start()
+    }
+
+    private func configurePreferredInputDevice(on input: AVAudioInputNode) throws {
+        guard let microphoneDeviceID, !microphoneDeviceID.isEmpty else { return }
+        guard let deviceID = Self.audioDeviceID(for: microphoneDeviceID) else {
+            throw EngineError.unsupported("Selected microphone is not available: \(MicrophoneDeviceCatalog.name(for: microphoneDeviceID))")
+        }
+
+        var mutableID = deviceID
+        let status = AudioUnitSetProperty(input.audioUnit!,
+                                          kAudioOutputUnitProperty_CurrentDevice,
+                                          kAudioUnitScope_Global,
+                                          0,
+                                          &mutableID,
+                                          UInt32(MemoryLayout<AudioDeviceID>.size))
+        guard status == noErr else {
+            throw EngineError.unsupported("Could not switch to microphone \(MicrophoneDeviceCatalog.name(for: microphoneDeviceID)) (OSStatus \(status)).")
+        }
+    }
+
+    nonisolated private static func audioDeviceID(for uniqueID: String) -> AudioDeviceID? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject),
+                                             &address,
+                                             0,
+                                             nil,
+                                             &dataSize) == noErr else { return nil }
+        let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
+        var deviceIDs = Array(repeating: AudioDeviceID(), count: count)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
+                                         &address,
+                                         0,
+                                         nil,
+                                         &dataSize,
+                                         &deviceIDs) == noErr else { return nil }
+
+        for deviceID in deviceIDs {
+            var uidAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyDeviceUID,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+            var unmanagedUID: Unmanaged<CFString>?
+            let status = withUnsafeMutablePointer(to: &unmanagedUID) { pointer in
+                AudioObjectGetPropertyData(deviceID,
+                                           &uidAddress,
+                                           0,
+                                           nil,
+                                           &uidSize,
+                                           pointer)
+            }
+            if status == noErr, let unmanagedUID {
+                let uid = unmanagedUID.takeRetainedValue() as String
+                if uid == uniqueID {
+                    return deviceID
+                }
+            }
+        }
+        return nil
     }
 
     nonisolated private static func pcmData(from buffer: AVAudioPCMBuffer) -> Data? {

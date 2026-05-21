@@ -15,6 +15,10 @@ struct OverlayView: View {
 private struct InnerOverlayView: View {
     @ObservedObject var appState: AppState
     @ObservedObject var orchestrator: SessionOrchestrator
+    @AppStorage("overlayCaptionDisplayMode") private var displayModeRaw = OverlayCaptionDisplayMode.bilingual.rawValue
+    @AppStorage("overlayCaptionTextSize") private var textSizeRaw = OverlayCaptionTextSize.medium.rawValue
+    @AppStorage("overlayCaptionRecentCount") private var recentCountRaw = OverlayCaptionRecentCount.two.rawValue
+    @AppStorage("overlayAlwaysOnTop") private var alwaysOnTop: Bool = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -24,6 +28,7 @@ private struct InnerOverlayView: View {
                 .frame(maxHeight: .infinity)
         }
         .padding(12)
+        .frame(minWidth: 420, idealWidth: 560, minHeight: 180, idealHeight: preferredHeight)
         .background(
             ZStack {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -41,18 +46,21 @@ private struct InnerOverlayView: View {
         )
         .background(
             WindowAccessor { win in
-                win.level = .floating
+                win.level = alwaysOnTop ? .floating : .normal
                 win.isMovableByWindowBackground = true
                 win.hasShadow = true
                 win.isOpaque = false
                 win.backgroundColor = .clear
+                win.titleVisibility = .hidden
                 win.titlebarAppearsTransparent = true
+                win.styleMask.insert(.fullSizeContentView)
                 win.standardWindowButton(.miniaturizeButton)?.isHidden = true
                 win.standardWindowButton(.zoomButton)?.isHidden = true
                 win.standardWindowButton(.closeButton)?.isHidden = true
                 win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             }
         )
+        .ignoresSafeArea()
         .preferredColorScheme(.dark)
     }
 
@@ -67,6 +75,50 @@ private struct InnerOverlayView: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.9))
             Spacer()
+
+            Menu {
+                Picker(L10n.t("overlay.displayMode"), selection: displayModeBinding) {
+                    ForEach(OverlayCaptionDisplayMode.allCases) { mode in
+                        Label(mode.title, systemImage: mode.systemImage).tag(mode)
+                    }
+                }
+            } label: {
+                Image(systemName: displayMode.systemImage)
+                    .foregroundStyle(.white.opacity(0.74))
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .help(L10n.t("overlay.displayMode"))
+
+            Menu {
+                Picker(L10n.t("overlay.textSize"), selection: textSizeBinding) {
+                    ForEach(OverlayCaptionTextSize.allCases) { size in
+                        Text(size.title).tag(size)
+                    }
+                }
+                Divider()
+                Picker(L10n.t("overlay.recentCount"), selection: recentCountBinding) {
+                    ForEach(OverlayCaptionRecentCount.allCases) { count in
+                        Text(count.title).tag(count)
+                    }
+                }
+            } label: {
+                Image(systemName: "textformat.size")
+                    .foregroundStyle(.white.opacity(0.74))
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .help(L10n.t("overlay.textSize"))
+
+            Button {
+                alwaysOnTop.toggle()
+            } label: {
+                Image(systemName: alwaysOnTop ? "pin.fill" : "pin")
+                    .foregroundStyle(alwaysOnTop ? Theme.accent : .white.opacity(0.62))
+            }
+            .buttonStyle(.plain)
+            .help(alwaysOnTop ? L10n.t("overlay.unpin") : L10n.t("overlay.pin"))
+
             if !appState.isRecording {
                 Button {
                     appState.startNewSession(source: .system)
@@ -99,12 +151,12 @@ private struct InnerOverlayView: View {
 
     @ViewBuilder
     private var content: some View {
-        let segs = orchestrator.transcript.segments.suffix(3)
+        let segs = Array(orchestrator.transcript.segments.suffix(recentCount.rawValue))
         if segs.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 Text(L10n.t("overlay.empty.title"))
                     .foregroundStyle(.white.opacity(0.85))
-                    .font(.callout.weight(.medium))
+                    .font(.system(size: textSize.primaryPointSize, weight: .medium))
                 Text(L10n.t("overlay.empty.tip"))
                     .foregroundStyle(.white.opacity(0.5))
                     .font(.caption)
@@ -113,16 +165,12 @@ private struct InnerOverlayView: View {
         } else {
             ScrollViewReader { proxy in
                 ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        ForEach(Array(segs)) { seg in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(seg.original)
-                                    .font(.body)
-                                    .foregroundStyle(.white)
-                                Text(seg.translated.isEmpty ? "…" : seg.translated)
-                                    .font(.callout)
-                                    .foregroundStyle(Theme.translation)
-                            }
+                    VStack(alignment: .leading, spacing: displayMode == .bilingual ? 14 : 10) {
+                        ForEach(segs) { seg in
+                            OverlayCaptionSegmentView(segment: seg,
+                                                      displayMode: displayMode,
+                                                      textSize: textSize,
+                                                      lineLimit: lineLimit)
                             .id(seg.rowId)
                             .transition(.opacity)
                         }
@@ -136,6 +184,107 @@ private struct InnerOverlayView: View {
                 }
             }
         }
+    }
+
+    private var displayMode: OverlayCaptionDisplayMode {
+        OverlayCaptionDisplayMode(rawValue: displayModeRaw) ?? .bilingual
+    }
+
+    private var textSize: OverlayCaptionTextSize {
+        OverlayCaptionTextSize(rawValue: textSizeRaw) ?? .medium
+    }
+
+    private var recentCount: OverlayCaptionRecentCount {
+        OverlayCaptionRecentCount(rawValue: recentCountRaw) ?? .two
+    }
+
+    private var lineLimit: Int {
+        displayMode == .bilingual ? 2 : max(2, 5 - recentCount.rawValue)
+    }
+
+    private var preferredHeight: CGFloat {
+        let rowHeight = displayMode == .bilingual
+            ? textSize.primaryPointSize * 1.35 + textSize.secondaryPointSize * 1.3 + 14
+            : textSize.primaryPointSize * CGFloat(lineLimit) * 1.25
+        return min(max(180, rowHeight * CGFloat(recentCount.rawValue) + 72), 520)
+    }
+
+    private var displayModeBinding: Binding<OverlayCaptionDisplayMode> {
+        Binding(
+            get: { displayMode },
+            set: { displayModeRaw = $0.rawValue }
+        )
+    }
+
+    private var textSizeBinding: Binding<OverlayCaptionTextSize> {
+        Binding(
+            get: { textSize },
+            set: { textSizeRaw = $0.rawValue }
+        )
+    }
+
+    private var recentCountBinding: Binding<OverlayCaptionRecentCount> {
+        Binding(
+            get: { recentCount },
+            set: { recentCountRaw = $0.rawValue }
+        )
+    }
+}
+
+private struct OverlayCaptionSegmentView: View {
+    let segment: LiveSegment
+    let displayMode: OverlayCaptionDisplayMode
+    let textSize: OverlayCaptionTextSize
+    let lineLimit: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            switch displayMode {
+            case .original:
+                captionText(segment.original,
+                            pointSize: textSize.primaryPointSize,
+                            weight: .semibold,
+                            color: .white,
+                            lineLimit: lineLimit)
+            case .bilingual:
+                captionText(segment.original,
+                            pointSize: textSize.secondaryPointSize,
+                            weight: .medium,
+                            color: .white.opacity(0.72),
+                            lineLimit: lineLimit)
+                captionText(translationText,
+                            pointSize: textSize.primaryPointSize,
+                            weight: .semibold,
+                            color: Theme.translation,
+                            lineLimit: lineLimit)
+            case .translation:
+                captionText(translationText,
+                            pointSize: textSize.primaryPointSize,
+                            weight: .semibold,
+                            color: Theme.translation,
+                            lineLimit: lineLimit)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var translationText: String {
+        segment.translated.isEmpty ? L10n.t("overlay.translationPending") : segment.translated
+    }
+
+    private func captionText(_ text: String,
+                             pointSize: CGFloat,
+                             weight: Font.Weight,
+                             color: Color,
+                             lineLimit: Int) -> some View {
+        Text(text.overlayCaptionTail(maxLines: lineLimit))
+            .font(.system(size: pointSize, weight: weight))
+            .foregroundStyle(color)
+            .lineSpacing(3)
+            .lineLimit(lineLimit)
+            .truncationMode(.tail)
+            .shadow(color: .black.opacity(0.55), radius: 2, x: 0, y: 1)
+            .textSelection(.enabled)
     }
 }
 

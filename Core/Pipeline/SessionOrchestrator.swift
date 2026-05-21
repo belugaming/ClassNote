@@ -51,7 +51,7 @@ final class SessionOrchestrator: ObservableObject {
         self.currentTimestampMs = 0
 
         let outputURL = AppBootstrap.recordingURL(sessionId: sess.id)
-        let manager = AudioSourceManager()
+        let manager = AudioSourceManager(microphoneDeviceID: AppState.shared.selectedMicrophoneUniqueID)
         self.audioManager = manager
 
         if src == .file {
@@ -101,7 +101,7 @@ final class SessionOrchestrator: ObservableObject {
         self.currentTimestampMs = 0
         self.ephemeralRowId = 0
 
-        let manager = AudioSourceManager()
+        let manager = AudioSourceManager(microphoneDeviceID: AppState.shared.selectedMicrophoneUniqueID)
         self.audioManager = manager
 
         do {
@@ -153,12 +153,13 @@ final class SessionOrchestrator: ObservableObject {
                         self.importCompleted = completed
                         self.importTotal = total
                     case .segment(let event):
+                        let polishedText = TranscriptTextPolisher.polish(event.text)
                         let seg = Segment(id: nil,
                                            sessionId: sessionId,
                                            startMs: event.startMs,
                                            endMs: event.endMs,
                                            speakerId: nil,
-                                           textOriginal: event.text,
+                                           textOriginal: polishedText,
                                            textTranslated: "",
                                            isFinal: true,
                                            confidence: 0,
@@ -167,11 +168,11 @@ final class SessionOrchestrator: ObservableObject {
                         self.transcript.appendFinal(rowId: rowId,
                                                     startMs: event.startMs,
                                                     endMs: event.endMs,
-                                                    original: event.text)
+                                                    original: polishedText)
                         self.currentTimestampMs = event.endMs
                         lastEndMs = max(lastEndMs, event.endMs)
                         if AppState.shared.translationEnabled {
-                            self.translate(rowId: rowId, text: event.text,
+                            self.translate(rowId: rowId, text: polishedText,
                                            translator: translator, config: config)
                         }
                     }
@@ -282,6 +283,7 @@ final class SessionOrchestrator: ObservableObject {
             do {
                 for try await event in ttStream {
                     let rowId: Int64
+                    let polishedText = TranscriptTextPolisher.polish(event.text)
                     if persistSegments {
                         guard let sid = await MainActor.run(body: { self.currentSessionId }) else { continue }
                         let seg = Segment(id: nil,
@@ -289,7 +291,7 @@ final class SessionOrchestrator: ObservableObject {
                                            startMs: event.startMs,
                                            endMs: event.endMs,
                                            speakerId: event.speakerId,
-                                           textOriginal: event.text,
+                                           textOriginal: polishedText,
                                            textTranslated: "",
                                            isFinal: event.isFinal,
                                            confidence: 0,
@@ -302,11 +304,11 @@ final class SessionOrchestrator: ObservableObject {
                         }
                     }
                     await MainActor.run {
-                        transcript.appendFinal(rowId: rowId, startMs: event.startMs, endMs: event.endMs, original: event.text)
+                        transcript.appendFinal(rowId: rowId, startMs: event.startMs, endMs: event.endMs, original: polishedText)
                     }
                     if AppState.shared.translationEnabled {
                         self.translate(rowId: rowId,
-                                       text: event.text,
+                                       text: polishedText,
                                        translator: translator,
                                        config: config,
                                        persistTranslation: persistSegments)
@@ -373,5 +375,47 @@ final class SessionOrchestrator: ObservableObject {
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd HH:mm"
         return "Session \(df.string(from: Date()))"
+    }
+}
+
+enum TranscriptTextPolisher {
+    private static let replacements: [(pattern: String, replacement: String)] = [
+        (#"\bteh\b"#, "the"),
+        (#"\brecieve\b"#, "receive"),
+        (#"\bseperate\b"#, "separate"),
+        (#"\bdefinately\b"#, "definitely"),
+        (#"\boccured\b"#, "occurred")
+    ]
+
+    static func polish(_ text: String) -> String {
+        var output = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !output.isEmpty else { return "" }
+
+        output = output.replacingOccurrences(of: #"\s+"#,
+                                             with: " ",
+                                             options: .regularExpression)
+        output = output.replacingOccurrences(of: #"\s+([,.;:?!])"#,
+                                             with: "$1",
+                                             options: .regularExpression)
+        output = output.replacingOccurrences(of: #"\s+([，。；：？！])"#,
+                                             with: "$1",
+                                             options: .regularExpression)
+        output = output.replacingOccurrences(of: #"([。！？!?])\s*"#,
+                                             with: "$1 ",
+                                             options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        for replacement in replacements {
+            output = output.replacingOccurrences(of: replacement.pattern,
+                                                 with: replacement.replacement,
+                                                 options: [.regularExpression, .caseInsensitive])
+        }
+
+        if let first = output.unicodeScalars.first,
+           CharacterSet.lowercaseLetters.contains(first),
+           output.range(of: #"^[a-z][A-Za-z0-9 ,;:'"\-()]+[.!?]?$"#, options: .regularExpression) != nil {
+            output = output.prefix(1).uppercased() + output.dropFirst()
+        }
+        return output
     }
 }

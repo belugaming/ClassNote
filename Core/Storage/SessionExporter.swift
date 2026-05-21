@@ -10,6 +10,8 @@ enum SessionExporter {
         case transcriptPlain
         case transcriptSrt
         case notesMarkdown
+        case flashcardsMarkdown
+        case studyToolsMarkdown
         case audio
         case bundle
         var id: String { rawValue }
@@ -20,6 +22,8 @@ enum SessionExporter {
         let segments: [Segment]
         let note: Note?
         let highlights: [Highlight]
+        let flashcards: [Flashcard]
+        let studyToolResults: [StudyToolResult]
     }
 
     enum ExportError: LocalizedError {
@@ -67,6 +71,45 @@ enum SessionExporter {
                 let note = h.userNote.isEmpty ? "(no note)" : h.userNote
                 lines.append("- **[\(ts)]** \(note)")
             }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    static func flashcardsMarkdown(_ input: Input) -> String {
+        var lines: [String] = []
+        lines.append("# \(input.session.title) Flashcards")
+        lines.append("")
+        lines.append("- Generated cards: \(input.flashcards.count)")
+        lines.append("")
+        for (idx, card) in input.flashcards.enumerated() {
+            lines.append("## Card \(idx + 1)")
+            lines.append("")
+            lines.append("**Front:** \(card.front)")
+            lines.append("")
+            lines.append("**Back:** \(card.back)")
+            lines.append("")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    static func flashcardsTSV(_ input: Input) -> String {
+        input.flashcards.map { card in
+            "\(tsvEscaped(card.front))\t\(tsvEscaped(card.back))"
+        }.joined(separator: "\n")
+    }
+
+    static func studyToolsMarkdown(_ input: Input) -> String {
+        var lines: [String] = []
+        lines.append("# \(input.session.title) Study Tools")
+        lines.append("")
+        for result in input.studyToolResults {
+            let title = StudyTools.find(result.toolId).map { L10n.t($0.labelKey) } ?? result.toolId
+            lines.append("## \(title)")
+            lines.append("")
+            lines.append(result.markdown)
+            lines.append("")
+            lines.append("---")
+            lines.append("")
         }
         return lines.joined(separator: "\n")
     }
@@ -136,6 +179,14 @@ enum SessionExporter {
                 try note.markdown
                     .write(to: folderURL.appendingPathComponent("notes.md"), atomically: true, encoding: .utf8)
             }
+            if !input.flashcards.isEmpty {
+                try flashcardsMarkdown(input)
+                    .write(to: folderURL.appendingPathComponent("flashcards.md"), atomically: true, encoding: .utf8)
+            }
+            if !input.studyToolResults.isEmpty {
+                try studyToolsMarkdown(input)
+                    .write(to: folderURL.appendingPathComponent("study-tools.md"), atomically: true, encoding: .utf8)
+            }
             if let path = input.session.audioPath, fm.fileExists(atPath: path) {
                 let ext = (path as NSString).pathExtension.isEmpty ? "m4a" : (path as NSString).pathExtension
                 let dest = folderURL.appendingPathComponent("audio.\(ext)")
@@ -181,6 +232,13 @@ enum SessionExporter {
         df.dateStyle = .medium
         df.timeStyle = .short
         return df.string(from: Date(timeIntervalSince1970: Double(ms) / 1000))
+    }
+
+    private static func tsvEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\t", with: " ")
+            .replacingOccurrences(of: "\n", with: "<br>")
+            .replacingOccurrences(of: "\r", with: "")
     }
 
     private static func srtTime(_ ms: Int64) -> String {

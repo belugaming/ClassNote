@@ -48,12 +48,12 @@ struct ClassNoteApp: App {
         Window("Overlay", id: "overlay") {
             OverlayView()
                 .environmentObject(appState)
-                .frame(minWidth: 320, minHeight: 160)
+                .frame(minWidth: 420, minHeight: 180)
                 .id(appState.languageRefreshToken)
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
-        .defaultSize(width: 380, height: 220)
+        .defaultSize(width: 560, height: 260)
         .defaultPosition(.topTrailing)
 
         Settings {

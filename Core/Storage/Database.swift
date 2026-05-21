@@ -147,6 +147,39 @@ final class Database {
                           columns: ["session_id", "generated_at"])
         }
 
+        migrator.registerMigration("v4_flashcards") { db in
+            try db.create(table: "flashcard") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("session_id", .text).notNull().references("session", onDelete: .cascade)
+                t.column("front", .text).notNull()
+                t.column("back", .text).notNull()
+                t.column("source_model", .text)
+                t.column("created_at", .integer).notNull()
+                t.column("sort_order", .integer).notNull().defaults(to: 0)
+            }
+            try db.create(index: "idx_flashcard_session",
+                          on: "flashcard",
+                          columns: ["session_id", "sort_order"])
+        }
+
+        migrator.registerMigration("v5_study_tool_results") { db in
+            try db.create(table: "study_tool_result") { t in
+                t.column("id", .text).primaryKey()
+                t.column("session_id", .text).notNull().references("session", onDelete: .cascade)
+                t.column("tool_id", .text).notNull()
+                t.column("markdown", .text).notNull().defaults(to: "")
+                t.column("model", .text)
+                t.column("generated_at", .integer).notNull()
+            }
+            try db.create(index: "idx_study_tool_result_session",
+                          on: "study_tool_result",
+                          columns: ["session_id", "generated_at"])
+            try db.create(index: "idx_study_tool_result_unique_tool",
+                          on: "study_tool_result",
+                          columns: ["session_id", "tool_id"],
+                          unique: true)
+        }
+
         return migrator
     }
 }
