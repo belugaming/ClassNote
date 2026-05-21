@@ -336,27 +336,73 @@ struct SegmentRowView: View {
 
 struct NotesPane: View {
     @ObservedObject var vm: SessionDetailViewModel
+    @State private var confirmingDelete = false
+
     var body: some View {
         HSplitView {
-            ScrollView {
-                if let note = vm.note, !note.markdown.isEmpty {
-                    MarkdownView(markdown: note.markdown)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(20)
-                } else {
-                    ContentUnavailableView {
-                        Label(L10n.t("session.empty.notes.title"), systemImage: "sparkles")
-                    } description: {
-                        Text(L10n.t("session.empty.notes.desc"))
+            VStack(spacing: 0) {
+                noteToolbar
+                Divider()
+                ScrollView {
+                    if vm.isGeneratingNotes || !displayedMarkdown.isEmpty {
+                        MarkdownView(markdown: displayedMarkdown)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(20)
+                    } else {
+                        ContentUnavailableView {
+                            Label(L10n.t("session.empty.notes.title"), systemImage: "sparkles")
+                        } description: {
+                            Text(L10n.t("session.empty.notes.desc"))
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding(40)
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(40)
                 }
             }
             NoteHistoryPane(vm: vm)
                 .frame(minWidth: 260, idealWidth: 320)
         }
+        .confirmationDialog(L10n.t("notes.delete.title"), isPresented: $confirmingDelete) {
+            Button(L10n.t("common.delete"), role: .destructive) {
+                Task { await vm.deleteCurrentNote() }
+            }
+            Button(L10n.t("common.cancel"), role: .cancel) {}
+        } message: {
+            Text(L10n.t("notes.delete.message"))
+        }
+    }
+
+    private var displayedMarkdown: String {
+        if vm.isGeneratingNotes {
+            return vm.streamingNoteMarkdown
+        }
+        return vm.note?.markdown ?? ""
+    }
+
+    private var noteToolbar: some View {
+        HStack(spacing: 10) {
+            if vm.isGeneratingNotes {
+                Label(L10n.t("notes.status.streaming"), systemImage: "sparkles")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(Theme.accent)
+            } else if let note = vm.note {
+                Text("v\(note.version)")
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(L10n.t("session.tab.notes"))
+                    .font(.headline)
+            }
+            Spacer()
+            Button {
+                confirmingDelete = true
+            } label: {
+                Label(L10n.t("notes.action.delete"), systemImage: "trash")
+            }
+            .disabled(vm.note == nil || vm.isGeneratingNotes)
+        }
+        .padding(12)
     }
 }
 
@@ -398,23 +444,52 @@ struct NoteHistoryPane: View {
 struct QAPane: View {
     @ObservedObject var vm: SessionDetailViewModel
     @State private var question = ""
+    @State private var confirmingClear = false
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollView {
-                if vm.qaAnswer.isEmpty {
-                    ContentUnavailableView {
-                        Label(L10n.t("qa.empty.title"), systemImage: "questionmark.bubble")
-                    } description: {
-                        Text(L10n.t("qa.empty.desc"))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(40)
-                } else {
-                    MarkdownView(markdown: vm.qaAnswer)
-                        .textSelection(.enabled)
-                        .padding(18)
+            HStack {
+                Label(L10n.t("session.tab.qa"), systemImage: "questionmark.bubble")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    confirmingClear = true
+                } label: {
+                    Label(L10n.t("qa.clearHistory"), systemImage: "trash")
                 }
+                .disabled(vm.qaMessages.isEmpty || vm.isAnsweringQuestion)
+            }
+            .padding(12)
+            Divider()
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    if vm.qaMessages.isEmpty && !vm.isAnsweringQuestion {
+                        ContentUnavailableView {
+                            Label(L10n.t("qa.empty.title"), systemImage: "questionmark.bubble")
+                        } description: {
+                            Text(L10n.t("qa.empty.desc"))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(40)
+                    } else {
+                        LazyVStack(spacing: 12) {
+                            ForEach(vm.qaMessages) { message in
+                                QAChatBubble(message: message) {
+                                    Task { await vm.deleteQAMessage(message) }
+                                }
+                                .id(message.id)
+                            }
+                            if vm.isAnsweringQuestion {
+                                QAStreamingBubble(text: vm.streamingQAResponse)
+                                    .id("streaming-qa-response")
+                            }
+                        }
+                        .padding(16)
+                    }
+                }
+                .onChange(of: vm.qaMessages.count) { _, _ in scrollToBottom(proxy) }
+                .onChange(of: vm.streamingQAResponse) { _, _ in scrollToBottom(proxy) }
             }
             Divider()
             HStack(spacing: 8) {
@@ -431,12 +506,102 @@ struct QAPane: View {
             }
             .padding(12)
         }
+        .confirmationDialog(L10n.t("qa.clearHistory"), isPresented: $confirmingClear) {
+            Button(L10n.t("common.delete"), role: .destructive) {
+                Task { await vm.clearQAMessages() }
+            }
+            Button(L10n.t("common.cancel"), role: .cancel) {}
+        } message: {
+            Text(L10n.t("qa.clearHistory.message"))
+        }
     }
 
     private func submit() {
         let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return }
+        question = ""
         Task { await vm.askQuestion(q) }
+    }
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        DispatchQueue.main.async {
+            if vm.isAnsweringQuestion {
+                proxy.scrollTo("streaming-qa-response", anchor: .bottom)
+            } else if let last = vm.qaMessages.last {
+                proxy.scrollTo(last.id, anchor: .bottom)
+            }
+        }
+    }
+}
+
+private struct QAChatBubble: View {
+    let message: QAMessage
+    let delete: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top) {
+            if message.role == .user { Spacer(minLength: 52) }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Label(message.role == .user ? L10n.t("qa.role.user") : L10n.t("qa.role.assistant"),
+                          systemImage: message.role == .user ? "person.fill" : "sparkles")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Button(action: delete) {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(L10n.t("qa.deleteMessage"))
+                }
+                if message.role == .assistant {
+                    MarkdownView(markdown: message.content)
+                        .textSelection(.enabled)
+                } else {
+                    Text(message.content)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: 620, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
+                    .fill(message.role == .user ? Theme.accentSoft : Theme.surface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
+                    .stroke(Theme.hairline, lineWidth: 1)
+            )
+            if message.role == .assistant { Spacer(minLength: 52) }
+        }
+        .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
+    }
+}
+
+private struct QAStreamingBubble: View {
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 6) {
+                Label(L10n.t("qa.status.streaming"), systemImage: "sparkles")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.accent)
+                if text.isEmpty {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    MarkdownView(markdown: text)
+                        .textSelection(.enabled)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: 620, alignment: .leading)
+            .cardBackground()
+            Spacer(minLength: 52)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -468,7 +633,20 @@ struct FlashcardsPane: View {
             .padding(12)
             Divider()
             ScrollView {
-                if vm.flashcards.isEmpty {
+                if vm.isGeneratingFlashcards {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(L10n.t("flashcards.status.streaming"), systemImage: "sparkles")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.accent)
+                        Text(vm.streamingFlashcardsRaw.isEmpty ? L10n.t("common.loading") : vm.streamingFlashcardsRaw)
+                            .font(.system(.callout, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                            .cardBackground()
+                    }
+                    .padding(16)
+                } else if vm.flashcards.isEmpty {
                     ContentUnavailableView {
                         Label(L10n.t("flashcards.empty.title"), systemImage: "rectangle.stack")
                     } description: {
@@ -522,10 +700,17 @@ struct StudyToolsPane: View {
                 studyToolHeader
                 Divider()
                 ScrollView {
-                    if let result = vm.selectedStudyToolResult {
-                        MarkdownView(markdown: result.markdown)
-                            .textSelection(.enabled)
-                            .padding(18)
+                    if let markdown = vm.selectedStudyToolMarkdown, !markdown.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            if vm.streamingStudyToolId == vm.selectedStudyToolId {
+                                Label(L10n.t("studyTools.status.streaming"), systemImage: "sparkles")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Theme.accent)
+                            }
+                            MarkdownView(markdown: markdown)
+                                .textSelection(.enabled)
+                        }
+                        .padding(18)
                     } else {
                         ContentUnavailableView {
                             Label(L10n.t("studyTools.title"), systemImage: "wand.and.stars")
@@ -861,15 +1046,20 @@ final class SessionDetailViewModel: ObservableObject {
     @Published var noteVersions: [NoteVersion] = []
     @Published var highlights: [Highlight] = []
     @Published var isGeneratingNotes: Bool = false
+    @Published var streamingNoteMarkdown: String = ""
     @Published var isRetranslating: Bool = false
     @Published var isPlaying: Bool = false
     @Published var isAnsweringQuestion: Bool = false
-    @Published var qaAnswer: String = ""
+    @Published var qaMessages: [QAMessage] = []
+    @Published var streamingQAResponse: String = ""
     @Published var isGeneratingFlashcards: Bool = false
+    @Published var streamingFlashcardsRaw: String = ""
     @Published var flashcards: [Flashcard] = []
     @Published var studyToolResults: [StudyToolResult] = []
     @Published var selectedStudyToolId: String? = StudyTools.all.first?.id
     @Published var isGeneratingStudyTool: Bool = false
+    @Published var streamingStudyToolId: String?
+    @Published var streamingStudyToolMarkdown: String = ""
 
     @Published var selectedHighlightId: Int64?
     @Published var streamingHighlightId: Int64?
@@ -893,6 +1083,13 @@ final class SessionDetailViewModel: ObservableObject {
     var selectedStudyToolResult: StudyToolResult? {
         guard let id = selectedStudyToolId else { return nil }
         return studyToolResults.first { $0.toolId == id }
+    }
+
+    var selectedStudyToolMarkdown: String? {
+        if streamingStudyToolId == selectedStudyToolId {
+            return streamingStudyToolMarkdown
+        }
+        return selectedStudyToolResult?.markdown
     }
 
     var durationLabel: String {
@@ -922,6 +1119,7 @@ final class SessionDetailViewModel: ObservableObject {
             self.highlights = try await HighlightRepository.shared.all(sessionId: sessionId)
             self.flashcards = try await FlashcardRepository.shared.all(sessionId: sessionId)
             self.studyToolResults = try await StudyToolResultRepository.shared.all(sessionId: sessionId)
+            self.qaMessages = try await QAMessageRepository.shared.all(sessionId: sessionId)
         } catch {
             NSLog("SessionDetail load error: \(error)")
         }
@@ -936,10 +1134,26 @@ final class SessionDetailViewModel: ObservableObject {
                          model: version.model)
     }
 
+    func deleteCurrentNote() async {
+        guard let sid = currentSessionId else { return }
+        do {
+            try await NoteRepository.shared.delete(sessionId: sid)
+            note = nil
+            noteVersions = []
+            streamingNoteMarkdown = ""
+        } catch {
+            AppState.shared.setError("Delete note failed: \(error.localizedDescription)")
+        }
+    }
+
     func generateNotes(template: NoteTemplate = NoteTemplates.find("study")) async {
         guard let s = session, !s.segments.isEmpty else { return }
         isGeneratingNotes = true
-        defer { isGeneratingNotes = false }
+        streamingNoteMarkdown = ""
+        defer {
+            isGeneratingNotes = false
+            streamingNoteMarkdown = ""
+        }
         let config = AppState.shared.apiConfig
         let llm = EngineFactory.makeLLM(config: config)
         let transcriptText = s.segments.map { seg in
@@ -953,11 +1167,15 @@ final class SessionDetailViewModel: ObservableObject {
         """
         let user = "Transcript:\n\(transcriptText)"
         do {
-            let md = try await llm.chatComplete(messages: [
+            var md = ""
+            for try await delta in llm.chat(messages: [
                 .init(role: .system, content: system),
                 .init(role: .user, content: user)
             ], model: config.llmModel, temperature: 0.3)
-
+            {
+                md += delta
+                streamingNoteMarkdown = md
+            }
             let noteEntity = Note(id: note?.id ?? UUID().uuidString,
                                    sessionId: s.session.id,
                                    markdown: md,
@@ -976,32 +1194,92 @@ final class SessionDetailViewModel: ObservableObject {
     func askQuestion(_ question: String) async {
         guard let s = session, !s.segments.isEmpty else { return }
         isAnsweringQuestion = true
-        defer { isAnsweringQuestion = false }
+        streamingQAResponse = ""
+        defer {
+            isAnsweringQuestion = false
+            streamingQAResponse = ""
+        }
         let config = AppState.shared.apiConfig
         let llm = EngineFactory.makeLLM(config: config)
         let transcriptText = transcriptForLLM(s.segments)
+        let createdAt = Int64(Date().timeIntervalSince1970 * 1000)
+        let userMessage = QAMessage(id: UUID().uuidString,
+                                    sessionId: s.session.id,
+                                    role: .user,
+                                    content: question,
+                                    model: nil,
+                                    createdAt: createdAt)
+        let recentHistory = qaMessages.suffix(10)
+        qaMessages.append(userMessage)
         do {
-            qaAnswer = try await llm.chatComplete(messages: [
+            try await QAMessageRepository.shared.insert(userMessage)
+            var answer = ""
+            let messages = [
                 .init(role: .system, content: """
                 You answer questions about one lecture transcript for a Chinese student studying in the US.
                 Answer in Chinese, cite useful timecodes, and keep technical terms bilingual.
                 If the transcript does not contain enough evidence, say so.
                 """),
-                .init(role: .user, content: "Question:\n\(question)\n\nTranscript:\n\(transcriptText)")
-            ], model: config.llmModel, temperature: 0.2)
+                .init(role: .user, content: "Lecture transcript:\n\(transcriptText)")
+            ] + recentHistory.map { message in
+                ChatMessage(role: message.role == .user ? .user : .assistant,
+                            content: message.content)
+            } + [
+                .init(role: .user, content: question)
+            ]
+            for try await delta in llm.chat(messages: messages, model: config.llmModel, temperature: 0.2)
+            {
+                answer += delta
+                streamingQAResponse = answer
+            }
+            let assistantMessage = QAMessage(id: UUID().uuidString,
+                                             sessionId: s.session.id,
+                                             role: .assistant,
+                                             content: answer,
+                                             model: config.llmModel,
+                                             createdAt: Int64(Date().timeIntervalSince1970 * 1000))
+            try await QAMessageRepository.shared.insert(assistantMessage)
+            qaMessages.append(assistantMessage)
         } catch {
+            try? await QAMessageRepository.shared.delete(id: userMessage.id)
+            qaMessages.removeAll { $0.id == userMessage.id }
             AppState.shared.setError("QA failed: \(error.localizedDescription)")
+        }
+    }
+
+    func deleteQAMessage(_ message: QAMessage) async {
+        do {
+            try await QAMessageRepository.shared.delete(id: message.id)
+            qaMessages.removeAll { $0.id == message.id }
+        } catch {
+            AppState.shared.setError("Delete QA message failed: \(error.localizedDescription)")
+        }
+    }
+
+    func clearQAMessages() async {
+        guard let sid = currentSessionId else { return }
+        do {
+            try await QAMessageRepository.shared.deleteAll(sessionId: sid)
+            qaMessages = []
+            streamingQAResponse = ""
+        } catch {
+            AppState.shared.setError("Clear QA history failed: \(error.localizedDescription)")
         }
     }
 
     func generateFlashcards() async {
         guard let s = session, !s.segments.isEmpty else { return }
         isGeneratingFlashcards = true
-        defer { isGeneratingFlashcards = false }
+        streamingFlashcardsRaw = ""
+        defer {
+            isGeneratingFlashcards = false
+            streamingFlashcardsRaw = ""
+        }
         let config = AppState.shared.apiConfig
         let llm = EngineFactory.makeLLM(config: config)
         do {
-            let raw = try await llm.chatComplete(messages: [
+            var raw = ""
+            for try await delta in llm.chat(messages: [
                 .init(role: .system, content: """
                 Generate 8-12 high-value review flashcards from this lecture.
                 Return one card per line exactly as: front || back
@@ -1009,6 +1287,10 @@ final class SessionDetailViewModel: ObservableObject {
                 """),
                 .init(role: .user, content: transcriptForLLM(s.segments))
             ], model: config.llmModel, temperature: 0.25)
+            {
+                raw += delta
+                streamingFlashcardsRaw = raw
+            }
             var parsed: [Flashcard] = []
             let createdAt = Int64(Date().timeIntervalSince1970 * 1000)
             for line in raw.split(separator: "\n") {
@@ -1049,14 +1331,25 @@ final class SessionDetailViewModel: ObservableObject {
               !s.segments.isEmpty,
               let tool = selectedStudyTool else { return }
         isGeneratingStudyTool = true
-        defer { isGeneratingStudyTool = false }
+        streamingStudyToolId = tool.id
+        streamingStudyToolMarkdown = ""
+        defer {
+            isGeneratingStudyTool = false
+            streamingStudyToolId = nil
+            streamingStudyToolMarkdown = ""
+        }
         let config = AppState.shared.apiConfig
         let llm = EngineFactory.makeLLM(config: config)
         do {
-            let markdown = try await llm.chatComplete(messages: [
+            var markdown = ""
+            for try await delta in llm.chat(messages: [
                 .init(role: .system, content: tool.systemPrompt),
                 .init(role: .user, content: "Lecture transcript:\n\(StudyTools.transcriptForLLM(s.segments))")
             ], model: config.llmModel, temperature: 0.25)
+            {
+                markdown += delta
+                streamingStudyToolMarkdown = markdown
+            }
             let result = StudyToolResult(id: UUID().uuidString,
                                          sessionId: s.session.id,
                                          toolId: tool.id,

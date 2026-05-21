@@ -180,6 +180,20 @@ final class Database {
                           unique: true)
         }
 
+        migrator.registerMigration("v6_qa_messages") { db in
+            try db.create(table: "qa_message") { t in
+                t.column("id", .text).primaryKey()
+                t.column("session_id", .text).notNull().references("session", onDelete: .cascade)
+                t.column("role", .text).notNull()
+                t.column("content", .text).notNull().defaults(to: "")
+                t.column("model", .text)
+                t.column("created_at", .integer).notNull()
+            }
+            try db.create(index: "idx_qa_message_session",
+                          on: "qa_message",
+                          columns: ["session_id", "created_at"])
+        }
+
         return migrator
     }
 }

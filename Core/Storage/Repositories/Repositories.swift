@@ -369,6 +369,12 @@ actor NoteRepository {
             try version.insert(db)
         }
     }
+
+    func delete(sessionId: String) async throws {
+        try await Database.shared.dbPool.write { db in
+            try db.execute(sql: "DELETE FROM note WHERE session_id=?", arguments: [sessionId])
+        }
+    }
 }
 
 actor FlashcardRepository {
@@ -431,6 +437,37 @@ actor StudyToolResultRepository {
             } else {
                 try result.insert(db)
             }
+        }
+    }
+}
+
+actor QAMessageRepository {
+    static let shared = QAMessageRepository()
+
+    func all(sessionId: String) async throws -> [QAMessage] {
+        try await Database.shared.dbPool.read { db in
+            try QAMessage
+                .filter(Column("session_id") == sessionId)
+                .order(Column("created_at"), Column("id"))
+                .fetchAll(db)
+        }
+    }
+
+    func insert(_ message: QAMessage) async throws {
+        try await Database.shared.dbPool.write { db in
+            try message.insert(db)
+        }
+    }
+
+    func delete(id: String) async throws {
+        try await Database.shared.dbPool.write { db in
+            try QAMessage.deleteOne(db, key: id)
+        }
+    }
+
+    func deleteAll(sessionId: String) async throws {
+        try await Database.shared.dbPool.write { db in
+            try db.execute(sql: "DELETE FROM qa_message WHERE session_id=?", arguments: [sessionId])
         }
     }
 }

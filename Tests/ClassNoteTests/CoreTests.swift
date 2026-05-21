@@ -107,7 +107,7 @@ final class DatabaseTests: XCTestCase {
         let tables: [String] = try Database.shared.dbPool.read { db in
             try String.fetchAll(db, sql: "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         }
-        for required in ["course", "session", "segment", "highlight", "note", "api_config", "flashcard", "study_tool_result"] {
+        for required in ["course", "session", "segment", "highlight", "note", "api_config", "flashcard", "study_tool_result", "qa_message"] {
             XCTAssertTrue(tables.contains(required), "Missing table \(required)")
         }
         let virtualTables: [String] = try Database.shared.dbPool.read { db in
@@ -268,6 +268,67 @@ final class DatabaseTests: XCTestCase {
 
         let loaded = try await StudyToolResultRepository.shared.get(sessionId: session.id, toolId: "catch_up")
         XCTAssertEqual(loaded?.markdown, "# Catch up")
+
+        try await SessionRepository.shared.delete(id: session.id)
+    }
+
+    func testNoteDeleteRemovesCurrentAndVersions() async throws {
+        try Database.shared.setup()
+        let session = Session.new(courseId: nil, title: "Note delete source")
+        try await SessionRepository.shared.insert(session)
+
+        let note = Note(id: UUID().uuidString,
+                        sessionId: session.id,
+                        markdown: "# Notes",
+                        version: 1,
+                        generatedAt: 10,
+                        model: "test-model")
+        try await NoteRepository.shared.upsert(note)
+        let savedNote = try await NoteRepository.shared.get(sessionId: session.id)
+        let savedVersions = try await NoteRepository.shared.versions(sessionId: session.id)
+        XCTAssertNotNil(savedNote)
+        XCTAssertEqual(savedVersions.count, 1)
+
+        try await NoteRepository.shared.delete(sessionId: session.id)
+        let deletedNote = try await NoteRepository.shared.get(sessionId: session.id)
+        let deletedVersions = try await NoteRepository.shared.versions(sessionId: session.id)
+        XCTAssertNil(deletedNote)
+        XCTAssertEqual(deletedVersions.count, 0)
+
+        try await SessionRepository.shared.delete(id: session.id)
+    }
+
+    func testQAMessagePersistenceAndDeletion() async throws {
+        try Database.shared.setup()
+        let session = Session.new(courseId: nil, title: "QA source")
+        try await SessionRepository.shared.insert(session)
+
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let user = QAMessage(id: UUID().uuidString,
+                             sessionId: session.id,
+                             role: .user,
+                             content: "What is entropy?",
+                             model: nil,
+                             createdAt: now)
+        let assistant = QAMessage(id: UUID().uuidString,
+                                  sessionId: session.id,
+                                  role: .assistant,
+                                  content: "Entropy measures disorder.",
+                                  model: "test-model",
+                                  createdAt: now + 1)
+        try await QAMessageRepository.shared.insert(user)
+        try await QAMessageRepository.shared.insert(assistant)
+
+        var messages = try await QAMessageRepository.shared.all(sessionId: session.id)
+        XCTAssertEqual(messages.map(\.role), [.user, .assistant])
+
+        try await QAMessageRepository.shared.delete(id: user.id)
+        messages = try await QAMessageRepository.shared.all(sessionId: session.id)
+        XCTAssertEqual(messages.map(\.id), [assistant.id])
+
+        try await QAMessageRepository.shared.deleteAll(sessionId: session.id)
+        messages = try await QAMessageRepository.shared.all(sessionId: session.id)
+        XCTAssertTrue(messages.isEmpty)
 
         try await SessionRepository.shared.delete(id: session.id)
     }
