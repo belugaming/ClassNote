@@ -479,29 +479,20 @@ actor ApiConfigRepository {
         var cfg = try await Database.shared.dbPool.read { db in
             try ApiConfig.fetchOne(db, key: 1) ?? .default
         }
-        let databaseKey = cfg.apiKey
-
         if shouldRestoreFromBackup(cfg),
            let backup = ApiConfigBackupStore.read(),
            !shouldRestoreFromBackup(backup) {
+            let databaseKey = cfg.apiKey
             cfg = backup
             if cfg.apiKey.isEmpty {
                 cfg.apiKey = databaseKey
             }
             try await save(cfg)
         }
-
-        if let keychainKey = try? APIKeyStore.read(), !keychainKey.isEmpty {
-            cfg.apiKey = keychainKey
-            try await save(cfg)
-        } else if !cfg.apiKey.isEmpty {
-            try? APIKeyStore.save(cfg.apiKey)
-        }
         return cfg
     }
 
     func save(_ cfg: ApiConfig) async throws {
-        try? APIKeyStore.save(cfg.apiKey)
         ApiConfigBackupStore.save(cfg)
         let databaseConfig = cfg
         try await Database.shared.dbPool.write { db in

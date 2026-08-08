@@ -126,14 +126,34 @@ struct MarkdownView: View {
     }
 
     private func inlineText(_ raw: String) -> some View {
-        // .onlyEquations splits the string into text + equation chunks; text
-        // chunks go through AttributedString(markdown:) so `*bold*`, `_italic_`,
-        // `` `code` ``, links still render. .all wraps the whole line as one
-        // equation, MathJax fails, and the raw `*`s leak through.
-        LaTeX(raw)
-            .parsingMode(.onlyEquations)
-            .blockMode(.alwaysInline)
-            .fixedSize(horizontal: false, vertical: true)
+        InlineMarkdownText(raw)
+    }
+
+    private struct InlineMarkdownText: View {
+        let raw: String
+
+        init(_ raw: String) {
+            self.raw = raw
+        }
+
+        var body: some View {
+            let displayText = MarkdownParser.inlineMarkdownForRendering(raw)
+            if displayText.contains("$") {
+                LaTeX(displayText)
+                    .parsingMode(.onlyEquations)
+                    .blockMode(.alwaysInline)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let attributed = try? AttributedString(
+                markdown: displayText,
+                options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+            ) {
+                Text(attributed)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(displayText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     private func headingFont(_ level: Int) -> Font {
@@ -145,6 +165,17 @@ struct MarkdownView: View {
         case 5: return .subheadline.weight(.semibold)
         default: return .body.weight(.semibold)
         }
+    }
+}
+
+struct StreamingMarkdownPreview: View {
+    let markdown: String
+
+    var body: some View {
+        Text(MarkdownParser.streamingPreviewText(markdown))
+            .font(.body)
+            .lineSpacing(4)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -269,10 +300,17 @@ enum MarkdownParser {
                     if row.trimmingCharacters(in: .whitespaces).isEmpty || !row.contains("|") {
                         break
                     }
-                    rows.append(splitTableRow(row))
+                    let cells = splitTableRow(row)
+                    if cells.contains(where: { !$0.isEmpty }) {
+                        rows.append(cells)
+                    }
                     i += 1
                 }
-                blocks.append(.table(headers: headers, rows: rows))
+                if rows.isEmpty {
+                    blocks.append(.paragraph(headers.joined(separator: " / ")))
+                } else {
+                    blocks.append(.table(headers: headers, rows: rows))
+                }
                 continue
             }
 
@@ -412,5 +450,118 @@ enum MarkdownParser {
         if t.hasSuffix("|") { t.removeLast() }
         return t.split(separator: "|", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    static func streamingPreviewText(_ source: String) -> String {
+        let lines = source
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+
+        var output: [String] = []
+        var inCodeFence = false
+
+        for rawLine in lines {
+            var line = rawLine.trimmingCharacters(in: .whitespaces)
+            if codeFence(line) != nil {
+                inCodeFence.toggle()
+                continue
+            }
+            if inCodeFence {
+                output.append(rawLine)
+                continue
+            }
+            if line.isEmpty {
+                output.append("")
+                continue
+            }
+            if isTableSeparator(line) {
+                continue
+            }
+            if line.contains("|") {
+                let cells = splitTableRow(line).filter { !$0.isEmpty }
+                if cells.isEmpty {
+                    continue
+                }
+                line = cells.joined(separator: "  /  ")
+            }
+            var listPrefix = ""
+            if let heading = atxHeading(line) {
+                line = heading.text
+            } else if isBullet(line) {
+                listPrefix = "• "
+                line = stripBullet(line)
+            } else if isOrdered(line) {
+                listPrefix = orderedPrefix(line)
+                line = stripOrdered(line)
+            } else if line.hasPrefix(">") {
+                line = String(line.dropFirst()).trimmingCharacters(in: .whitespaces)
+            }
+            line = inlineMarkdownForStreaming(line)
+            if line.isEmpty {
+                continue
+            }
+            output.append(listPrefix + line)
+        }
+
+        return output.joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func orderedPrefix(_ s: String) -> String {
+        var idx = s.startIndex
+        while idx < s.endIndex, s[idx].isNumber {
+            idx = s.index(after: idx)
+        }
+        guard idx < s.endIndex else { return "" }
+        let end = s.index(after: idx)
+        return String(s[s.startIndex..<end]) + " "
+    }
+
+    static func inlineMarkdownForRendering(_ source: String) -> String {
+        var output = source
+        output = removeMarker(output, marker: "**", whenUnbalancedOnly: true)
+        output = removeMarker(output, marker: "__", whenUnbalancedOnly: true)
+        output = removeMarker(output, marker: "`", whenUnbalancedOnly: true)
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func inlineMarkdownForStreaming(_ source: String) -> String {
+        var output = inlineMarkdownForRendering(source)
+        output = simplifyMarkdownLinks(output)
+        return output
+            .replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "__", with: "")
+            .replacingOccurrences(of: "`", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func removeMarker(_ source: String, marker: String, whenUnbalancedOnly: Bool) -> String {
+        guard !marker.isEmpty else { return source }
+        let count = source.components(separatedBy: marker).count - 1
+        if whenUnbalancedOnly && count % 2 == 0 {
+            return source
+        }
+        return source.replacingOccurrences(of: marker, with: "")
+    }
+
+    private static func simplifyMarkdownLinks(_ source: String) -> String {
+        var output = ""
+        var rest = source[...]
+        while let labelOpen = rest.firstIndex(of: "["),
+              let labelClose = rest[labelOpen...].firstIndex(of: "]") {
+            let afterLabel = rest.index(after: labelClose)
+            guard afterLabel < rest.endIndex,
+                  rest[afterLabel] == "(",
+                  let urlClose = rest[afterLabel...].firstIndex(of: ")")
+            else {
+                break
+            }
+            output += rest[..<labelOpen]
+            output += rest[rest.index(after: labelOpen)..<labelClose]
+            rest = rest[rest.index(after: urlClose)...]
+        }
+        output += rest
+        return output
     }
 }

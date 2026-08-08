@@ -344,7 +344,12 @@ struct NotesPane: View {
                 noteToolbar
                 Divider()
                 ScrollView {
-                    if vm.isGeneratingNotes || !displayedMarkdown.isEmpty {
+                    if vm.isGeneratingNotes {
+                        StreamingMarkdownPreview(markdown: vm.streamingNoteMarkdown)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(20)
+                    } else if !displayedMarkdown.isEmpty {
                         MarkdownView(markdown: displayedMarkdown)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -592,7 +597,7 @@ private struct QAStreamingBubble: View {
                     ProgressView()
                         .controlSize(.small)
                 } else {
-                    MarkdownView(markdown: text)
+                    StreamingMarkdownPreview(markdown: text)
                         .textSelection(.enabled)
                 }
             }
@@ -706,9 +711,12 @@ struct StudyToolsPane: View {
                                 Label(L10n.t("studyTools.status.streaming"), systemImage: "sparkles")
                                     .font(.caption.weight(.semibold))
                                     .foregroundStyle(Theme.accent)
+                                StreamingMarkdownPreview(markdown: markdown)
+                                    .textSelection(.enabled)
+                            } else {
+                                MarkdownView(markdown: markdown)
+                                    .textSelection(.enabled)
                             }
-                            MarkdownView(markdown: markdown)
-                                .textSelection(.enabled)
                         }
                         .padding(18)
                     } else {

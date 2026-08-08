@@ -207,7 +207,7 @@ final class DatabaseTests: XCTestCase {
         custom.targetLanguage = "ko"
         custom.sourceLanguage = "auto"
         ApiConfigBackupStore.save(custom)
-        XCTAssertEqual(ApiConfigBackupStore.read()?.apiKey, "")
+        XCTAssertEqual(ApiConfigBackupStore.read()?.apiKey, "backup-key")
 
         try await Database.shared.dbPool.write { db in
             var defaultConfig = ApiConfig.default
@@ -217,7 +217,7 @@ final class DatabaseTests: XCTestCase {
 
         let restored = try await ApiConfigRepository.shared.load()
         XCTAssertEqual(restored.baseUrl, "https://backup.example.test/v1")
-        XCTAssertEqual(restored.apiKey, "database-key")
+        XCTAssertEqual(restored.apiKey, "backup-key")
         XCTAssertEqual(restored.sttModel, "backup-stt")
         XCTAssertEqual(restored.translationModel, "backup-translation")
         XCTAssertEqual(restored.llmModel, "backup-llm")
@@ -296,6 +296,32 @@ final class DatabaseTests: XCTestCase {
         XCTAssertTrue(md.contains("# Biology 101 Flashcards"))
         XCTAssertTrue(md.contains("**Front:** What is ATP?"))
         XCTAssertTrue(md.contains("**Back:** Energy carrier"))
+    }
+
+    func testStreamingMarkdownPreviewStabilizesPartialMarkdown() {
+        let partial = """
+        - **目标
+        - **
+        | English Term | Chinese Translation | Context/Note |
+        | --- | --- | --- |
+        | AWS | 亚马逊云 |
+        """
+
+        let preview = MarkdownParser.streamingPreviewText(partial)
+        XCTAssertTrue(preview.contains("• 目标"))
+        XCTAssertTrue(preview.contains("English Term  /  Chinese Translation  /  Context/Note"))
+        XCTAssertTrue(preview.contains("AWS  /  亚马逊云"))
+        XCTAssertFalse(preview.contains("**"))
+        XCTAssertFalse(preview.contains("| ---"))
+        XCTAssertFalse(preview.contains("• \n"))
+        XCTAssertFalse(preview.hasSuffix("•"))
+    }
+
+    func testInlineMarkdownRenderingDropsOnlyUnbalancedMarkers() {
+        XCTAssertEqual(MarkdownParser.inlineMarkdownForRendering("**目标"), "目标")
+        XCTAssertEqual(MarkdownParser.inlineMarkdownForRendering("**目标**"), "**目标**")
+        XCTAssertEqual(MarkdownParser.inlineMarkdownForRendering("Use `code"), "Use code")
+        XCTAssertEqual(MarkdownParser.inlineMarkdownForRendering("Use `code`"), "Use `code`")
     }
 
     func testStudyToolResultPersistence() async throws {
