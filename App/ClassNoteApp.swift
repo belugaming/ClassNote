@@ -19,6 +19,7 @@ struct ClassNoteApp: App {
                 .environmentObject(appState)
                 .frame(minWidth: 1000, minHeight: 640)
                 .background(LiveSessionOpener().environmentObject(appState))
+                .background(translationBridgeView)
                 .id(appState.languageRefreshToken)
         }
         .defaultSize(width: 1240, height: 780)
@@ -69,6 +70,15 @@ struct ClassNoteApp: App {
             Image(systemName: appState.isRecording ? "record.circle.fill" : "waveform")
         }
         .menuBarExtraStyle(.window)
+    }
+
+    @ViewBuilder
+    private var translationBridgeView: some View {
+        if #available(macOS 15.0, *) {
+            AppleTranslationBridgeView()
+        } else {
+            EmptyView()
+        }
     }
 }
 

@@ -8,9 +8,10 @@ struct ApiConfig: Codable, FetchableRecord, PersistableRecord, Hashable, Sendabl
     var sttModel: String
     var translationModel: String
     var llmModel: String
-    var sttBackend: String  // "openai" | "whisperkit"
+    var sttBackend: String  // "openai" | "whisperkit" | "apple"
     var targetLanguage: String
     var sourceLanguage: String
+    var translationBackend: String  // "openai" | "apple"
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -22,6 +23,7 @@ struct ApiConfig: Codable, FetchableRecord, PersistableRecord, Hashable, Sendabl
         case sttBackend = "stt_backend"
         case targetLanguage = "target_language"
         case sourceLanguage = "source_language"
+        case translationBackend = "translation_backend"
     }
 
     static let databaseTableName = "api_config"
@@ -36,7 +38,8 @@ struct ApiConfig: Codable, FetchableRecord, PersistableRecord, Hashable, Sendabl
             llmModel: "gpt-4o-mini",
             sttBackend: "openai",
             targetLanguage: "zh-Hans",
-            sourceLanguage: "en"
+            sourceLanguage: "en",
+            translationBackend: "openai"
         )
     }
 

@@ -156,6 +156,7 @@ struct ApiSettingsView: View {
     @State private var testStatus: String = ""
     @State private var testIsError: Bool = false
     @State private var autosaveTask: Task<Void, Never>?
+    @State private var localNetworkDenied: Bool = false
 
     private let providerPresets: [(label: String, base: String, stt: String, llm: String, color: Color)] = [
         ("OpenAI", "https://api.openai.com/v1", "whisper-1", "gpt-4o-mini", .green),
@@ -212,6 +213,19 @@ struct ApiSettingsView: View {
                     LabeledRow(label: L10n.t("settings.api.key")) {
                         SecureField("sk-…", text: apiKeyBinding)
                             .textFieldStyle(.roundedBorder)
+                    }
+                    if localNetworkDenied {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label(L10n.t("settings.api.localNetworkDenied"), systemImage: "wifi.exclamationmark")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                            Button {
+                                LocalNetworkAccess.openSystemSettings()
+                            } label: {
+                                Text(L10n.t("settings.api.openSystemSettings"))
+                                    .font(.caption)
+                            }
+                        }
                     }
                 }
 
@@ -285,7 +299,21 @@ struct ApiSettingsView: View {
             await appState.saveConfig(config)
             testStatus = L10n.t("settings.api.saved")
             testIsError = false
+            await probeLocalNetworkIfNeeded(config.baseUrl)
         }
+    }
+
+    /// If the base URL points at a local-network host, open a throwaway
+    /// connection so macOS surfaces (or we can detect denial of) the Local
+    /// Network permission prompt. See `LocalNetworkAccess` for why this is
+    /// necessary — declaring the Info.plist key alone never triggers it.
+    private func probeLocalNetworkIfNeeded(_ baseUrl: String) async {
+        guard LocalNetworkAccess.isLocalNetworkHost(baseUrl) else {
+            localNetworkDenied = false
+            return
+        }
+        let result = await LocalNetworkAccess.probe(baseUrlString: baseUrl)
+        localNetworkDenied = (result == .denied)
     }
 
     private func updateConfig(immediate: Bool = false, _ update: (inout ApiConfig) -> Void) {
@@ -414,6 +442,11 @@ struct EngineSettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }
+                    if appState.sttBackend == .appleSpeech {
+                        Label(L10n.t("settings.engines.appleSpeechNote"), systemImage: "info.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 SettingsSection(title: L10n.t("settings.engines.translationSection"),
@@ -421,6 +454,19 @@ struct EngineSettingsView: View {
                     Toggle(L10n.t("settings.engines.liveTranslationToggle"), isOn: $appState.translationEnabled)
                         .toggleStyle(.switch)
                         .tint(Theme.accent)
+                    if appState.translationEnabled {
+                        Picker(L10n.t("settings.engines.translationBackendPicker"), selection: $appState.translationBackend) {
+                            ForEach(TranslationBackend.allCases) { backend in
+                                Text(backend.displayName).tag(backend)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        if appState.translationBackend == .appleTranslation {
+                            Label(L10n.t("settings.engines.appleTranslationNote"), systemImage: "info.circle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
 
                 SettingsSection(title: L10n.t("settings.audio.input"),
@@ -463,6 +509,11 @@ struct EngineSettingsView: View {
         .onChange(of: appState.sttBackend) { _, backend in
             var config = appState.apiConfig
             config.sttBackend = backend.rawValue
+            Task { await appState.saveConfig(config) }
+        }
+        .onChange(of: appState.translationBackend) { _, backend in
+            var config = appState.apiConfig
+            config.translationBackend = backend.rawValue
             Task { await appState.saveConfig(config) }
         }
     }

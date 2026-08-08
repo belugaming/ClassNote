@@ -16,6 +16,7 @@ final class AppState: ObservableObject {
     @Published var lastError: String? = nil
     @Published var translationEnabled: Bool = true
     @Published var sttBackend: SttBackend = .openAICompatible
+    @Published var translationBackend: TranslationBackend = .openAICompatible
     @Published var interruptedSessions: [Session] = []
     @Published var microphoneDevices: [MicrophoneInputDevice] = []
     @AppStorage("preferredMicrophoneDeviceID") var preferredMicrophoneDeviceID: String = MicrophoneInputDevice.systemDefaultID
@@ -44,6 +45,7 @@ final class AppState: ObservableObject {
         if let cfg = try? await ApiConfigRepository.shared.load() {
             self.apiConfig = cfg
             self.sttBackend = SttBackend(rawValue: cfg.sttBackend) ?? .openAICompatible
+            self.translationBackend = TranslationBackend(rawValue: cfg.translationBackend) ?? .openAICompatible
         }
     }
 
@@ -60,6 +62,7 @@ final class AppState: ObservableObject {
             try await ApiConfigRepository.shared.save(cfg)
             self.apiConfig = try await ApiConfigRepository.shared.load()
             self.sttBackend = SttBackend(rawValue: self.apiConfig.sttBackend) ?? .openAICompatible
+            self.translationBackend = TranslationBackend(rawValue: self.apiConfig.translationBackend) ?? .openAICompatible
         } catch {
             setError("Save settings failed: \(error.localizedDescription)")
         }
@@ -396,11 +399,25 @@ extension Notification.Name {
 enum SttBackend: String, CaseIterable, Identifiable {
     case openAICompatible = "openai"
     case whisperKitLocal = "whisperkit"
+    case appleSpeech = "apple"
     var id: String { rawValue }
     var displayName: String {
         switch self {
         case .openAICompatible: return "OpenAI Compatible (Cloud)"
         case .whisperKitLocal: return "WhisperKit (Local, macOS Apple Silicon)"
+        case .appleSpeech: return L10n.t("settings.engines.sttBackend.apple")
+        }
+    }
+}
+
+enum TranslationBackend: String, CaseIterable, Identifiable {
+    case openAICompatible = "openai"
+    case appleTranslation = "apple"
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .openAICompatible: return L10n.t("settings.engines.translationBackend.openai")
+        case .appleTranslation: return L10n.t("settings.engines.translationBackend.apple")
         }
     }
 }

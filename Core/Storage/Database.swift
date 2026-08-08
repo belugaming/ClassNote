@@ -194,6 +194,12 @@ final class Database {
                           columns: ["session_id", "created_at"])
         }
 
+        migrator.registerMigration("v7_translation_backend") { db in
+            try db.alter(table: "api_config") { t in
+                t.add(column: "translation_backend", .text).notNull().defaults(to: "openai")
+            }
+        }
+
         return migrator
     }
 }

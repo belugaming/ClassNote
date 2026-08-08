@@ -95,12 +95,22 @@ struct EngineFactory {
             return OpenAICompatibleSTT(config: config)
         case .whisperKitLocal:
             return OpenAICompatibleSTT(config: config)  // fallback until WhisperKit wired
+        case .appleSpeech:
+            return AppleSpeechSTT()
         }
     }
 
     @MainActor
-    static func makeTranslator(config: ApiConfig) -> TranslationProvider {
-        OpenAICompatibleTranslator(config: config)
+    static func makeTranslator(config: ApiConfig, backend: TranslationBackend = .openAICompatible) -> TranslationProvider {
+        switch backend {
+        case .openAICompatible:
+            return OpenAICompatibleTranslator(config: config)
+        case .appleTranslation:
+            if #available(macOS 15.0, *) {
+                return AppleTranslationEngine()
+            }
+            return OpenAICompatibleTranslator(config: config)
+        }
     }
 
     @MainActor

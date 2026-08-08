@@ -39,6 +39,10 @@
 	<string>© 2026 ClassNote</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>ClassNote 需要麦克风权限以录制现场课程音频</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>ClassNote 需要语音识别权限以使用 macOS 系统自带的本地语音转写</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>ClassNote 需要本地网络权限以连接局域网内的本地 AI 服务</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSScreenCaptureUsageDescription</key>

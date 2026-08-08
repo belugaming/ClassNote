@@ -137,8 +137,8 @@ final class SessionOrchestrator: ObservableObject {
         self.importTotal = 0
         self.importErrorMessage = nil
 
-        let stt = EngineFactory.makeSTT(config: config, backend: .openAICompatible)
-        let translator = EngineFactory.makeTranslator(config: config)
+        let stt = EngineFactory.makeSTT(config: config, backend: AppState.shared.sttBackend)
+        let translator = EngineFactory.makeTranslator(config: config, backend: AppState.shared.translationBackend)
         let sessionId = sess.id
 
         importTask?.cancel()
@@ -270,7 +270,7 @@ final class SessionOrchestrator: ObservableObject {
         guard let manager = audioManager else { return }
         let backend = AppState.shared.sttBackend
         let stt = EngineFactory.makeSTT(config: config, backend: backend)
-        let translator = EngineFactory.makeTranslator(config: config)
+        let translator = EngineFactory.makeTranslator(config: config, backend: AppState.shared.translationBackend)
 
         // Feed all chunks (including short silences) to STT — it does its own
         // silence-aware sentence buffering. A naive VAD pre-filter would prevent
@@ -355,7 +355,7 @@ final class SessionOrchestrator: ObservableObject {
 
     func retranslateSession(sessionId: String) async throws {
         let config = AppState.shared.apiConfig
-        let translator = EngineFactory.makeTranslator(config: config)
+        let translator = EngineFactory.makeTranslator(config: config, backend: AppState.shared.translationBackend)
         let segs = try await SegmentRepository.shared.all(sessionId: sessionId)
         for seg in segs {
             guard let sid = seg.id else { continue }

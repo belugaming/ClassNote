@@ -48,6 +48,8 @@ targets:
         LSMinimumSystemVersion: "14.0"
         NSHumanReadableCopyright: "© 2026 ClassNote"
         NSMicrophoneUsageDescription: "ClassNote 需要麦克风权限以录制现场课程音频"
+        NSSpeechRecognitionUsageDescription: "ClassNote 需要语音识别权限以使用 macOS 系统自带的本地语音转写"
+        NSLocalNetworkUsageDescription: "ClassNote 需要本地网络权限以连接局域网内的本地 AI 服务"
         NSScreenCaptureUsageDescription: "ClassNote 需要屏幕录制权限以捕获 Zoom/Teams 等会议系统音频,仅使用音频流"
         NSAppleEventsUsageDescription: "ClassNote 需要辅助功能以支持全局快捷键(可选)"
         LSApplicationCategoryType: public.app-category.education
@@ -62,6 +64,7 @@ targets:
         com.apple.security.device.camera: false
         com.apple.security.network.client: true
         com.apple.security.files.user-selected.read-write: true
+        com.apple.security.personal-information.speech-recognition: true
     dependencies:
       - package: GRDB
       - package: KeyboardShortcuts
