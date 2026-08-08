@@ -26,6 +26,7 @@ final class SessionOrchestrator: ObservableObject {
     private var importTask: Task<Void, Never>?
     private var importWaiters: [CheckedContinuation<Void, Error>] = []
     private var translateTasks: [Int64: Task<Void, Never>] = [:]
+    private var draftTranslateTask: Task<Void, Never>?
     private var tickerTask: Task<Void, Never>?
     private var ephemeralRowId: Int64 = 0
 
@@ -221,6 +222,8 @@ final class SessionOrchestrator: ObservableObject {
         tickerTask = nil
         for (_, t) in translateTasks { t.cancel() }
         translateTasks.removeAll()
+        draftTranslateTask?.cancel()
+        draftTranslateTask = nil
 
         let finalMs = currentTimestampMs
         let audioPath = audioManager?.state.audioFileURL?.path
@@ -282,6 +285,27 @@ final class SessionOrchestrator: ObservableObject {
             let ttStream = stt.transcribe(audio: stream, language: config.sourceLanguage.isEmpty ? nil : config.sourceLanguage)
             do {
                 for try await event in ttStream {
+                    guard event.isFinal else {
+                        // Volatile/in-progress result — only the on-device
+                        // Apple engines emit these. Show it as a live draft
+                        // line and, if translation is on, kick off a debounced
+                        // translation of the draft so the translated line
+                        // keeps pace with the still-changing original instead
+                        // of waiting for the sentence to be committed.
+                        let polishedDraft = TranscriptTextPolisher.polish(event.text)
+                        await MainActor.run {
+                            transcript.updateDraft(polishedDraft)
+                        }
+                        if AppState.shared.translationEnabled {
+                            self.translateDraft(text: polishedDraft, translator: translator, config: config)
+                        }
+                        continue
+                    }
+
+                    await MainActor.run {
+                        self.draftTranslateTask?.cancel()
+                        self.draftTranslateTask = nil
+                    }
                     let rowId: Int64
                     let polishedText = TranscriptTextPolisher.polish(event.text)
                     if persistSegments {
@@ -349,6 +373,45 @@ final class SessionOrchestrator: ObservableObject {
             }
         }
         translateTasks[rowId] = task
+    }
+
+    /// Translates the in-progress draft line so the translation keeps pace
+    /// with the still-changing original instead of only starting once the
+    /// sentence is committed. Debounced: STT emits a new draft on every
+    /// partial result (multiple times per second while speaking), and
+    /// translating every single one would spam the engine and show a
+    /// flickering, constantly-restarted translation. Waiting for a short
+    /// pause in the draft's growth means we only translate text that's
+    /// already stopped changing for a moment — still well before the
+    /// sentence is finalized.
+    private func translateDraft(text: String, translator: TranslationProvider, config: ApiConfig) {
+        draftTranslateTask?.cancel()
+        guard !text.isEmpty else { return }
+        draftTranslateTask = Task { @MainActor [transcript] in
+            do {
+                try await Task.sleep(nanoseconds: 250_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            let ctx = transcript.recent(4)
+            let stream = translator.translate(text: text,
+                                               sourceLanguage: config.sourceLanguage,
+                                               targetLanguage: config.targetLanguage,
+                                               context: ctx)
+            do {
+                var accumulated = ""
+                for try await delta in stream {
+                    guard !Task.isCancelled else { return }
+                    accumulated += delta
+                    transcript.updateDraftTranslation(accumulated, forDraft: text)
+                }
+            } catch {
+                // A draft translation failing (or being superseded by a
+                // newer draft mid-stream) isn't worth surfacing as a user
+                // facing error — the final-segment translation will retry.
+            }
+        }
     }
 
     // MARK: - Retranslate / Resummarize helpers

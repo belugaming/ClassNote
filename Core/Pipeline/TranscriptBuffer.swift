@@ -9,6 +9,16 @@ final class TranscriptBuffer: ObservableObject {
     @Published private(set) var segments: [LiveSegment] = []
     @Published var translationEnabled: Bool = true
 
+    /// The in-progress line for the sentence currently being spoken — only
+    /// ever populated by backends that report volatile/partial results
+    /// (currently the on-device Apple STT engines). Cleared as soon as that
+    /// sentence lands as a committed `LiveSegment`.
+    @Published private(set) var draftText: String = ""
+
+    /// Translation of `draftText`, refreshed on a debounce while the draft is
+    /// still changing. Always cleared together with `draftText`.
+    @Published private(set) var draftTranslated: String = ""
+
     /// Locally-known mapping from row id (database) to index in the array.
     private var indexById: [Int64: Int] = [:]
 
@@ -17,6 +27,20 @@ final class TranscriptBuffer: ObservableObject {
                                original: original, translated: "", isFinal: true)
         segments.append(item)
         indexById[rowId] = segments.count - 1
+        draftText = ""
+        draftTranslated = ""
+    }
+
+    func updateDraft(_ text: String) {
+        draftText = text
+    }
+
+    /// Only applied if `text` still matches the current draft — guards
+    /// against a stale debounced translation overwriting a newer draft's
+    /// translation after the user kept talking past the debounce window.
+    func updateDraftTranslation(_ translated: String, forDraft text: String) {
+        guard draftText == text else { return }
+        draftTranslated = translated
     }
 
     func updateTranslation(rowId: Int64, translated: String) {
@@ -32,6 +56,8 @@ final class TranscriptBuffer: ObservableObject {
     func reset() {
         segments.removeAll()
         indexById.removeAll()
+        draftText = ""
+        draftTranslated = ""
     }
 
     func recent(_ count: Int = 4) -> [String] {

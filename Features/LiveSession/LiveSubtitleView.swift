@@ -28,6 +28,10 @@ struct LiveSubtitleView: View {
                                 .id(seg.rowId)
                                 .transition(.opacity.combined(with: .move(edge: .bottom)))
                         }
+                        if !buffer.draftText.isEmpty {
+                            DraftSubtitleBubble(text: buffer.draftText, translated: buffer.draftTranslated)
+                                .id("live-draft")
+                        }
                         Color.clear.frame(height: 12).id("live-bottom")
                     }
                     .padding(16)
@@ -37,6 +41,9 @@ struct LiveSubtitleView: View {
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo("live-bottom", anchor: .bottom)
                     }
+                }
+                .onChange(of: buffer.draftText) { _, _ in
+                    proxy.scrollTo("live-bottom", anchor: .bottom)
                 }
             }
         }
@@ -89,5 +96,37 @@ struct SubtitleBubble: View {
         }
         .padding(12)
         .cardBackground(radius: Theme.cornerMedium)
+    }
+}
+
+/// The sentence currently being spoken, before the STT engine has committed
+/// it as final. Only ever populated by backends that report volatile
+/// results (on-device Apple STT) — dimmed/italic to read as "still typing".
+struct DraftSubtitleBubble: View {
+    let text: String
+    let translated: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Color.clear
+                .frame(width: 68, height: 1)
+                .padding(.top, 4)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(text)
+                    .font(.title3.italic())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                if !translated.isEmpty {
+                    Text(translated)
+                        .font(.body.italic())
+                        .foregroundStyle(Theme.translation.opacity(0.7))
+                        .textSelection(.enabled)
+                }
+            }
+
+            Spacer()
+        }
+        .padding(12)
     }
 }

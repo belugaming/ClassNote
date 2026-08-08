@@ -15,25 +15,34 @@ ClassNote 目前是纯 macOS 应用,深度依赖 AppKit(菜单栏、独立窗口
 
 ## 1. 工程结构
 
-`project.yml` 里 `ClassNote` target 的 `platform: macOS` 改为多平台:
+XcodeGen 的多平台 `platform: [macOS, iOS]` 语法实际会为**每个平台生成独立的
+Xcode target**(例如 `ClassNote_macOS` / `ClassNote_iOS`),而不是一个物理上
+单一的 target。两者共享同一份 `sources`(`App`/`Core`/`Features`),但
+`dependencies`(SPM 包)、`settings`、`info.properties`、`entitlements` 需要
+按平台分别声明——具体键名/写法(是用 XcodeGen 的平台后缀 key,还是拆成两个
+`targets` 条目共享 `sources` 路径)在实现阶段用一份最小 `project.yml` 验证
+`xcodegen generate` 的实际产出后再定稿,这里先明确方向,不假定语法细节。
 
-```yaml
-targets:
-  ClassNote:
-    type: application
-    platform: [macOS, iOS]
-    deploymentTarget:
-      macOS: "14.0"
-      iOS: "17.0"
-```
+`deploymentTarget` 分别为 macOS 14.0 / iOS 17.0。
 
-单 target 共享 `App/Core/Features` 全部源码,不新建独立 iOS target。新增
-`App/ClassNote-iOS.entitlements`(iOS 沙盒 key 与 macOS 不同,不能共用同一份
-entitlements 文件),Info.plist 权限描述按平台差异化(iOS 去掉屏幕录制、
-AppleEvents 相关 key,保留麦克风/语音识别/本地网络)。
+**SPM 依赖逐个确认平台兼容性**(而非只看调用点代码):
+- `KeyboardShortcuts` 的 `Package.swift` 声明 `platforms: [.macOS(.v10_15)]`,
+  是纯 macOS 包,**无法链接进 iOS target**。因此 iOS target 的依赖列表里不
+  包含它;`Core/Hotkeys/GlobalShortcuts.swift` 这个文件本身只归属于 macOS
+  target 的 `sources`(而不是靠 `#if os(macOS)` 包裹内容——这样即使不链接
+  KeyboardShortcuts,该文件也不会参与 iOS 编译)。
+- `GRDB` 和 `LaTeXSwiftUI` 均声明了 iOS 支持,可在两个 target 间共享。
 
-平台专属代码用 `#if os(iOS)` / `#if os(macOS)` 条件编译分叉,不引入额外抽象层
-或协议;能直接共享的业务逻辑(`AppState`、引擎、数据库)不做改动。
+新增 `App/ClassNote-iOS.entitlements`(iOS 沙盒 key 与 macOS 不同,不能共用
+同一份 entitlements 文件)。iOS target 的 Info.plist 只保留会用到的权限描述
+(麦克风/语音识别/本地网络),不包含 `NSScreenCaptureUsageDescription`、
+`NSAppleEventsUsageDescription`,也不包含 macOS 专属的
+`LSMinimumSystemVersion`、`NSPrincipalClass`、`LSUIElement`、
+`NSSupportsAutomaticTermination`/`NSSupportsSuddenTermination` 等
+AppKit/`NSApplication` 语境下的 key。
+
+跨平台共享文件内部用 `#if os(iOS)` / `#if os(macOS)` 条件编译分叉,不引入
+额外抽象层或协议;能直接共享的业务逻辑(`AppState`、引擎、数据库)不做改动。
 
 ## 2. 音频捕获(`AudioSourceManager`)
 
@@ -52,20 +61,30 @@ AppleEvents 相关 key,保留麦克风/语音识别/本地网络)。
 `Window("Overlay")`、`MenuBarExtra`、`Settings{}`、`.commands` 全局菜单项。
 
 **iOS(新增)**:单一 `WindowGroup`,根视图 `MainWindowView`。具体映射:
-- `MainWindowView` 的 `NavigationSplitView` 保持不变——SwiftUI 在 iPhone 上
-  自动折叠为单列堆栈导航,iPad 上保留双栏/三栏,不需要重写。
+- `MainWindowView` 的 `NavigationSplitView` 结构预期可以直接复用,SwiftUI
+  在 iPhone 上会将其折叠为单列堆栈导航,iPad 上保留双栏/三栏。但这只是
+  预期,不是保证——具体折叠后的返回手势、`selection` 绑定行为、以及
+  `.navigationSplitViewColumnWidth` 在 compact 宽度下的表现,需要在实现
+  阶段实际跑起来验证,不排除需要针对 iPhone 单列场景做局部调整。
 - Live Session 独立窗口 → 同一个 `LiveSessionView` 通过
   `NavigationStack` push 或 `.fullScreenCover` 呈现。
 - `Settings{}` scene → `SettingsView` 通过 `.sheet` 呈现,入口放在主界面
   工具条或列表页的设置按钮里。
-- 悬浮字幕 Overlay 独立窗口 → 不做独立窗口,`OverlayView` 的内容作为
-  `LiveSessionView` 内部顶部的浮动卡片(同一份视图逻辑换宿主容器,非"真正
-  浮在其他 App 上面"的窗口)。
-- `MenuBarExtra` 图标 → 无对应物,直接不编译进 iOS 分支。
+- 悬浮字幕 Overlay 独立窗口 → 不做独立窗口。`OverlayView.swift` 当前依赖
+  AppKit 的 `WindowAccessor`(`NSViewRepresentable` + `NSWindow`,用于把
+  背景设为透明/取消标题栏),这部分**不能直接复用**。字幕文案渲染部分
+  (`OverlayCaptionView` 等纯 SwiftUI 视图)可以拆出来给 iOS 复用,但
+  `WindowAccessor` 及窗口外观设置逻辑保留在 macOS-only 代码里,iOS 端
+  的浮动卡片只是普通 SwiftUI `overlay`/`ZStack`,不需要也无法用同一套
+  窗口访问逻辑。
+- `MenuBarExtra` 图标 → 无对应物,归属 macOS target 的 `sources`,不参与
+  iOS 编译。
 
-`GlobalShortcuts.register()` 调用及 `Core/Hotkeys/GlobalShortcuts.swift` 整体
-`#if os(macOS)`。iOS 上"开始录音 / 标记高光 / 切换翻译 / 切换字幕"复用
-`AppState` 上已有的方法,触发入口换成主界面工具条按钮,不重写业务逻辑。
+`Core/Hotkeys/GlobalShortcuts.swift` 依赖 `KeyboardShortcuts` 包(见第 1 节,
+该包不支持 iOS),因此这个文件本身只归属于 macOS target 的 `sources` 列表,
+不是靠 `#if os(macOS)` 包裹内容。iOS 上"开始录音 / 标记高光 / 切换翻译 /
+切换字幕"复用 `AppState` 上已有的方法,触发入口换成主界面工具条按钮,不
+重写业务逻辑。
 
 ## 4. AppKit → 跨平台系统集成
 
@@ -84,7 +103,29 @@ AppleEvents 相关 key,保留麦克风/语音识别/本地网络)。
 `PlatformBridge` 上的封装函数,而不是直接 import AppKit。iOS 上没有对应物的
 操作(打开 Finder)在调用侧通过 `#if os(macOS)` 隐藏按钮,不提供空实现。
 
-## 5. 权限与 Info.plist
+## 5. 版本可用性标注(`@available`)
+
+`AppleSpeechSTT+Modern.swift`、`AppleTranslationBridge.swift`、
+`AppleTranslationEngine.swift` 现有的 `@available(macOS 26.0, *)` /
+`@available(macOS 15.0, *)` 标注只约束了 macOS 版本,`*` 通配符对 iOS
+不设下限——意味着编译进 iOS target 后,这些用到 `SpeechAnalyzer`/
+`SpeechTranscriber`/`Translation` 框架新 API 的代码会被当作"iOS 全版本
+可用",在旧 iOS 上运行时会崩溃而非编译期/运行期优雅降级。实现阶段需要
+把这些标注改成同时声明两个平台的下限,例如
+`@available(macOS 26.0, iOS 26.0, *)`(对应 iOS 版本以实际 API 引入版本
+为准,需要查阅当年 WWDC 的 iOS 对应发布版本号,不能直接照抄 macOS 版本号)。
+
+## 6. 数据存储路径(GRDB / 录音文件)
+
+`App/AppBootstrap.swift` 的 `applicationSupportURL` 用
+`FileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, ...)`
+定位数据库和录音文件目录。这段代码本身跨平台可编译,但 iOS 沙盒下
+`.applicationSupportDirectory` 位于 App 私有容器内,且不参与 iCloud 备份
+默认排除逻辑与 macOS 不同;此外 iOS 后台执行受限,长录音时 App 切到后台
+可能被系统暂停写入。这两点在本设计范围内不展开解决方案,列为实现阶段
+需要专门验证的风险点,不假定"无需改动"。
+
+## 7. 权限与 Info.plist
 
 iOS 保留:`NSMicrophoneUsageDescription`、
 `NSSpeechRecognitionUsageDescription`、`NSLocalNetworkUsageDescription`。
@@ -97,5 +138,12 @@ iOS 保留:`NSMicrophoneUsageDescription`、
 - iOS 版无法录制 Zoom/Teams 等会议系统音频,只支持现场麦克风录课堂。
 - iOS 悬浮字幕是应用内浮层,不是独立跨 App 悬浮窗口。
 - iOS 无全局快捷键,所有操作需在主界面内触发。
+- XcodeGen 生成 iOS/macOS 两个独立 target 的具体 `project.yml` 写法(平台级
+  `sources`/`dependencies`/`info`/`entitlements` 覆盖语法),需要在实现阶段
+  用最小示例跑 `xcodegen generate` 验证后确定,本设计只定方向。
+- `@available` 标注的 iOS 版本号需要逐个核对 API 文档后再定,不能照抄
+  macOS 版本号。
+- iOS 沙盒下的数据存储路径行为(iCloud 备份排除、后台录音写入限制)是待验证
+  风险点,本设计未给出解决方案。
 - 本设计不包含 iOS 版的视觉/交互细节打磨(如 iPad 分栏比例、iPhone 单列下的
-  工具条布局),后续实现阶段按 SwiftUI 默认行为验证后再迭代。
+  工具条布局),后续实现阶段按 SwiftUI 实际运行表现验证后再迭代。

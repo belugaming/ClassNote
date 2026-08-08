@@ -209,6 +209,8 @@ private final class LegacyRecognitionSink: @unchecked Sendable {
             }
             emittedSegmentCount = segments.count
             markFinished()
+        } else {
+            emitDraft(result.bestTranscription.formattedString)
         }
     }
 
@@ -218,6 +220,12 @@ private final class LegacyRecognitionSink: @unchecked Sendable {
         let startMs = baseMs + Int64(segment.timestamp * 1000)
         let endMs = baseMs + Int64((segment.timestamp + segment.duration) * 1000)
         continuation.yield(TranscriptEvent(startMs: startMs, endMs: endMs, text: text, isFinal: true))
+    }
+
+    private func emitDraft(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        continuation.yield(TranscriptEvent(startMs: baseMs, endMs: baseMs, text: trimmed, isFinal: false))
     }
 
     private func markFinished() {

@@ -15,7 +15,7 @@ extension AppleSpeechSTT {
                     let locale = try await resolvedLocale(for: language)
                     let transcriber = SpeechTranscriber(locale: locale,
                                                         transcriptionOptions: [],
-                                                        reportingOptions: [],
+                                                        reportingOptions: [.volatileResults],
                                                         attributeOptions: [])
                     try await ensureAssetsInstalled(for: transcriber)
 
@@ -25,12 +25,16 @@ extension AppleSpeechSTT {
 
                     let resultsTask = Task {
                         for try await result in transcriber.results {
-                            guard result.isFinal else { continue }
                             let text = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard OpenAICompatibleSTT.shouldEmit(text, minChars: 3) else { continue }
                             let startMs = Int64(result.range.start.seconds * 1000)
                             let endMs = Int64((result.range.start + result.range.duration).seconds * 1000)
-                            continuation.yield(TranscriptEvent(startMs: startMs, endMs: endMs, text: text, isFinal: true))
+                            if result.isFinal {
+                                guard OpenAICompatibleSTT.shouldEmit(text, minChars: 3) else { continue }
+                                continuation.yield(TranscriptEvent(startMs: startMs, endMs: endMs, text: text, isFinal: true))
+                            } else {
+                                guard !text.isEmpty else { continue }
+                                continuation.yield(TranscriptEvent(startMs: startMs, endMs: endMs, text: text, isFinal: false))
+                            }
                         }
                     }
 
