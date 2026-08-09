@@ -3,7 +3,6 @@ import SwiftUI
 struct MainWindowView: View {
     @EnvironmentObject var appState: AppState
     @StateObject private var vm = MainWindowViewModel()
-    @State private var selectedCourse: CourseSidebarSelection? = .all
     @State private var selectedSessionId: String? = nil
     @State private var searchText: String = ""
     @State private var showingSearchResults = false
@@ -12,46 +11,30 @@ struct MainWindowView: View {
     @State private var showingFirstLaunchGuide = false
     @AppStorage("hasCompletedFirstLaunchTutorial.v1") private var hasCompletedFirstLaunchTutorial = false
 
-    private var selectedCourseId: String? {
-        selectedCourse?.courseId
-    }
-
     var body: some View {
         NavigationSplitView {
-            CourseListView(selection: $selectedCourse,
-                           totalSessionCount: vm.totalSessionCount,
-                           courses: vm.courses,
-                           onCreate: { vm.createCourse(name: $0) },
-                           onDelete: { id in
-                               vm.deleteCourse(id: id)
-                               if selectedCourse == .course(id: id) {
-                                   selectedCourse = .all
-                                   selectedSessionId = nil
-                               }
-                           })
-                .navigationSplitViewColumnWidth(min: 200, ideal: 240)
-        } content: {
-            SessionListView(courseId: selectedCourseId,
-                            selection: $selectedSessionId,
-                            courses: vm.courses,
-                            sessions: vm.sessions(for: selectedCourseId),
-                            onStartSession: {
-                                Task { await vm.startSession(courseId: selectedCourseId, source: .microphone) }
-                            },
-                            onImport: { urls in
-                                Task { await vm.importFiles(urls: urls, courseId: selectedCourseId) }
-                            },
-                            onDelete: { vm.deleteSession(id: $0) },
-                            onMove: { sessionId, courseId in
-                                Task {
-                                    await vm.moveSession(id: sessionId, courseId: courseId)
-                                    syncSelectedSessionWithVisibleList()
-                                }
-                            },
-                            onRevealStorage: {
-                                NSWorkspace.shared.open(AppBootstrap.applicationSupportURL)
-                            })
-                .navigationSplitViewColumnWidth(min: 300, ideal: 360)
+            CourseSessionSidebarView(selectedSessionId: $selectedSessionId,
+                                      totalSessionCount: vm.totalSessionCount,
+                                      courses: vm.courses,
+                                      allSessions: vm.sessions(for: nil),
+                                      onCreateCourse: { vm.createCourse(name: $0) },
+                                      onDeleteCourse: { id in
+                                          vm.deleteCourse(id: id)
+                                      },
+                                      onStartSession: { courseId in
+                                          Task { await vm.startSession(courseId: courseId, source: .microphone) }
+                                      },
+                                      onImport: { urls, courseId in
+                                          Task { await vm.importFiles(urls: urls, courseId: courseId) }
+                                      },
+                                      onDeleteSession: { vm.deleteSession(id: $0) },
+                                      onMoveSession: { sessionId, courseId in
+                                          Task { await vm.moveSession(id: sessionId, courseId: courseId) }
+                                      },
+                                      onRevealStorage: {
+                                          NSWorkspace.shared.open(AppBootstrap.applicationSupportURL)
+                                      })
+                .navigationSplitViewColumnWidth(min: 260, ideal: 300)
         } detail: {
             VStack(spacing: 0) {
                 if let interrupted = appState.interruptedSessions.first {
@@ -79,7 +62,7 @@ struct MainWindowView: View {
                     } else {
                         MainEmptyStateView(isApiKeyMissing: appState.apiConfig.apiKey.isEmpty && appState.sttBackend == .openAICompatible,
                                            onStart: {
-                                               Task { await vm.startSession(courseId: selectedCourseId, source: .microphone) }
+                                               Task { await vm.startSession(courseId: nil, source: .microphone) }
                                            },
                                            onImport: {
                                                NotificationCenter.default.post(name: .requestImportFile, object: nil)
@@ -120,7 +103,7 @@ struct MainWindowView: View {
                     } label: {
                         Label(L10n.t("toolbar.classroomMode"), systemImage: "rectangle.grid.1x2")
                     } primaryAction: {
-                        Task { await vm.startSession(courseId: selectedCourseId, source: .microphone, translationEnabled: true) }
+                        Task { await vm.startSession(courseId: nil, source: .microphone, translationEnabled: true) }
                     }
                     .disabled(appState.apiConfig.apiKey.isEmpty && appState.sttBackend == .openAICompatible)
                     .help(appState.apiConfig.apiKey.isEmpty
@@ -160,14 +143,8 @@ struct MainWindowView: View {
                 showingFirstLaunchGuide = true
             }
         }
-        .onChange(of: selectedCourse) { _, _ in
-            syncSelectedSessionWithVisibleList()
-        }
         .onChange(of: appState.isRecording) { _, _ in
-            Task {
-                await vm.refresh()
-                syncSelectedSessionWithVisibleList()
-            }
+            Task { await vm.refresh() }
         }
         .alert(L10n.t("common.error"),
                isPresented: Binding(get: { appState.lastError != nil },
@@ -191,21 +168,13 @@ struct MainWindowView: View {
         }
     }
 
-    private func syncSelectedSessionWithVisibleList() {
-        guard let selectedSessionId else { return }
-        let visibleSessionIds = Set(vm.sessions(for: selectedCourseId).map(\.id))
-        if !visibleSessionIds.contains(selectedSessionId) {
-            self.selectedSessionId = nil
-        }
-    }
-
     @ViewBuilder
     private func classroomModeButton(_ mode: ClassroomMode) -> some View {
         Button {
             Task {
                 switch mode {
                 case .recordMicrophone, .recordSystem, .recordMixed, .transcribeOnlyMicrophone:
-                    await vm.startSession(courseId: selectedCourseId,
+                    await vm.startSession(courseId: nil,
                                           source: mode.source,
                                           translationEnabled: mode.translationEnabled)
                 case .temporaryMicrophone, .temporarySystem, .temporaryMixed:
