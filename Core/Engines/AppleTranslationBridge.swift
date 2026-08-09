@@ -10,7 +10,7 @@ import Translation
 /// On macOS 26+ `TranslationSession(installedSource:target:)` exists and
 /// needs no view at all, so `AppleTranslationEngine` prefers that path and
 /// only falls back to this bridge on macOS 15-25.
-@available(macOS 15.0, *)
+@available(macOS 15.0, iOS 18.0, *)
 @MainActor
 final class AppleTranslationBridge: ObservableObject {
     static let shared = AppleTranslationBridge()
@@ -50,7 +50,7 @@ final class AppleTranslationBridge: ObservableObject {
     }
 }
 
-@available(macOS 15.0, *)
+@available(macOS 15.0, iOS 18.0, *)
 struct AppleTranslationBridgeView: View {
     @ObservedObject var bridge = AppleTranslationBridge.shared
 

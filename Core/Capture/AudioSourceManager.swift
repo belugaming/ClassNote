@@ -1,8 +1,10 @@
 import Foundation
 @preconcurrency import AVFoundation
-import CoreAudio
 import CoreMedia
+#if os(macOS)
+import CoreAudio
 @preconcurrency import ScreenCaptureKit
+#endif
 
 enum AudioSourceKind: String, CaseIterable, Sendable, Identifiable {
     case microphone
@@ -18,6 +20,16 @@ enum AudioSourceKind: String, CaseIterable, Sendable, Identifiable {
         case .mixed: return "Microphone + System audio"
         case .file: return "Imported file"
         }
+    }
+
+    /// `.system`/`.mixed` need ScreenCaptureKit, which iOS doesn't have.
+    /// UI source pickers should use this instead of `allCases`.
+    static var availableCases: [AudioSourceKind] {
+        #if os(macOS)
+        return Self.allCases
+        #else
+        return [.microphone, .file]
+        #endif
     }
 }
 
@@ -75,9 +87,11 @@ final class AudioSourceManager: NSObject {
     private(set) var state = State()
 
     private var engine: AVAudioEngine?
+    #if os(macOS)
     private var scStream: SCStream?
     private var scStreamOutputHandler: SCStreamOutputHandler?
     private var scStreamDelegate: SCStreamDelegateAdapter?
+    #endif
     private var micConverter: AVAudioConverter?
     private var targetFormat: AVAudioFormat!
     private var running = false
@@ -116,11 +130,16 @@ final class AudioSourceManager: NSObject {
         switch source {
         case .microphone:
             try startMic()
+        #if os(macOS)
         case .system:
             try await startSystemAudio()
         case .mixed:
             try startMic()
             try await startSystemAudio()
+        #else
+        case .system, .mixed:
+            throw EngineError.unsupported("System audio capture is only available on macOS.")
+        #endif
         case .file:
             throw EngineError.unsupported("Use ingestFile() for .file source")
         }
@@ -133,12 +152,14 @@ final class AudioSourceManager: NSObject {
         engine?.stop()
         engine = nil
 
+        #if os(macOS)
         if let scStream = scStream {
             do { try await scStream.stopCapture() } catch { NSLog("[ClassNote] SCStream stop err: \(error)") }
         }
         scStream = nil
         scStreamOutputHandler = nil
         scStreamDelegate = nil
+        #endif
 
         await writer?.finish()
         writer = nil
@@ -203,6 +224,7 @@ final class AudioSourceManager: NSObject {
     }
 
     private func configurePreferredInputDevice(on input: AVAudioInputNode) throws {
+        #if os(macOS)
         guard let microphoneDeviceID, !microphoneDeviceID.isEmpty else { return }
         guard let deviceID = Self.audioDeviceID(for: microphoneDeviceID) else {
             throw EngineError.unsupported("Selected microphone is not available: \(MicrophoneDeviceCatalog.name(for: microphoneDeviceID))")
@@ -218,8 +240,12 @@ final class AudioSourceManager: NSObject {
         guard status == noErr else {
             throw EngineError.unsupported("Could not switch to microphone \(MicrophoneDeviceCatalog.name(for: microphoneDeviceID)) (OSStatus \(status)).")
         }
+        #endif
+        // iOS has no per-device AVAudioEngine input selection API; the system
+        // default input (managed via AVAudioSession) is always used.
     }
 
+    #if os(macOS)
     nonisolated private static func audioDeviceID(for uniqueID: String) -> AudioDeviceID? {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
@@ -266,6 +292,7 @@ final class AudioSourceManager: NSObject {
         }
         return nil
     }
+    #endif
 
     nonisolated private static func pcmData(from buffer: AVAudioPCMBuffer) -> Data? {
         guard let ch = buffer.int16ChannelData else { return nil }
@@ -275,8 +302,9 @@ final class AudioSourceManager: NSObject {
         return Data(bytes: ch[0], count: bytes)
     }
 
-    // MARK: - System audio (ScreenCaptureKit)
+    // MARK: - System audio (ScreenCaptureKit, macOS only)
 
+    #if os(macOS)
     private var systemAudioSampleCount: Int = 0
 
     private func startSystemAudio() async throws {
@@ -420,6 +448,7 @@ final class AudioSourceManager: NSObject {
         }
         continuation.yield(AudioChunk(pcmData: data, sampleRate: targetSampleRate, timestamp: max(0, sessionMs)))
     }
+    #endif
 
     // MARK: - File import
 
@@ -614,8 +643,9 @@ final class SampleCounter: @unchecked Sendable {
     }
 }
 
-// MARK: - SCK adapters
+// MARK: - SCK adapters (macOS only)
 
+#if os(macOS)
 final class SCStreamOutputHandler: NSObject, SCStreamOutput {
     let handler: @Sendable (CMSampleBuffer) -> Void
     init(_ handler: @escaping @Sendable (CMSampleBuffer) -> Void) {
@@ -636,3 +666,4 @@ final class SCStreamDelegateAdapter: NSObject, SCStreamDelegate {
         onError(error)
     }
 }
+#endif

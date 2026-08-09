@@ -5,7 +5,7 @@ import Translation
 /// cloud LLM translator this returns each sentence as a single chunk rather
 /// than a token stream — `TranslationSession.translate(_:)` has no streaming
 /// API, so the whole result is yielded at once.
-@available(macOS 15.0, *)
+@available(macOS 15.0, iOS 18.0, *)
 final class AppleTranslationEngine: TranslationProvider, Sendable {
     func translate(text: String,
                    sourceLanguage: String,
@@ -43,7 +43,7 @@ final class AppleTranslationEngine: TranslationProvider, Sendable {
         case .unsupported:
             throw EngineError.unsupported("macOS 本地翻译不支持该语言对(\(source.languageCode?.identifier ?? "?") → \(target.languageCode?.identifier ?? "?"))。")
         case .installed:
-            if #available(macOS 26.0, *) {
+            if #available(macOS 26.0, iOS 26.0, *) {
                 return TranslationSession(installedSource: source, target: target)
             }
             return await AppleTranslationBridge.shared.session(source: source, target: target)

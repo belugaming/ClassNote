@@ -32,7 +32,9 @@ struct MainWindowView: View {
                                           Task { await vm.moveSession(id: sessionId, courseId: courseId) }
                                       },
                                       onRevealStorage: {
+                                          #if os(macOS)
                                           NSWorkspace.shared.open(AppBootstrap.applicationSupportURL)
+                                          #endif
                                       })
                 .navigationSplitViewColumnWidth(min: 260, ideal: 300)
         } detail: {

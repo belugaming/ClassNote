@@ -1,7 +1,11 @@
 import SwiftUI
 import AVFoundation
-import AppKit
 import UniformTypeIdentifiers
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 
 struct SessionDetailView: View {
     let sessionId: String
@@ -362,7 +366,7 @@ struct NotesPane: View {
     @State private var confirmingDelete = false
 
     var body: some View {
-        HSplitView {
+        AdaptiveSplitView {
             VStack(spacing: 0) {
                 noteToolbar
                 Divider()
@@ -748,7 +752,7 @@ struct StudyToolsPane: View {
     @ObservedObject var vm: SessionDetailViewModel
 
     var body: some View {
-        HSplitView {
+        AdaptiveSplitView {
             List(StudyTools.all, selection: $vm.selectedStudyToolId) { tool in
                 VStack(alignment: .leading, spacing: 5) {
                     Label(L10n.t(tool.labelKey), systemImage: tool.icon)
@@ -1319,8 +1323,7 @@ final class SessionDetailViewModel: ObservableObject {
                                            highlights: self.highlights,
                                            flashcards: self.flashcards,
                                            studyToolResults: self.studyToolResults)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(SessionExporter.flashcardsTSV(input), forType: .string)
+        Clipboard.copy(SessionExporter.flashcardsTSV(input))
     }
 
     func generateSelectedStudyTool() async {
@@ -1611,6 +1614,7 @@ final class SessionDetailViewModel: ObservableObject {
         }
     }
 
+    #if os(macOS)
     private func saveFileWithPanel(suggestedName: String,
                                     utType: UTType,
                                     write: (URL) throws -> Void) throws {
@@ -1632,6 +1636,38 @@ final class SessionDetailViewModel: ObservableObject {
         try SessionExporter.writeBundle(input, to: url)
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
+    #else
+    /// iOS has no save panel; write to a temp location and hand off to the
+    /// system share sheet so the user can save to Files, AirDrop, etc.
+    private func saveFileWithPanel(suggestedName: String,
+                                    utType: UTType,
+                                    write: (URL) throws -> Void) throws {
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent(suggestedName)
+        if FileManager.default.fileExists(atPath: dest.path) {
+            try? FileManager.default.removeItem(at: dest)
+        }
+        try write(dest)
+        presentShareSheet(for: [dest])
+    }
+
+    private func saveBundleWithPanel(input: SessionExporter.Input, suggestedFolderName: String) throws {
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent(suggestedFolderName, isDirectory: true)
+        if FileManager.default.fileExists(atPath: dest.path) {
+            try? FileManager.default.removeItem(at: dest)
+        }
+        try SessionExporter.writeBundle(input, to: dest)
+        presentShareSheet(for: [dest])
+    }
+
+    private func presentShareSheet(for items: [Any]) {
+        guard let root = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first?.windows.first(where: { $0.isKeyWindow })?.rootViewController
+        else { return }
+        let sheet = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        root.present(sheet, animated: true)
+    }
+    #endif
 
     private func formatTimecode(_ ms: Int64) -> String {
         let s = Int(ms / 1000)

@@ -9,8 +9,13 @@ enum Theme {
     static let accent = Color.primary
     static let accentSoft = Color.primary.opacity(0.08)
     static let accentMuted = Color.secondary
+    #if os(macOS)
     static let surface = Color(nsColor: .controlBackgroundColor)
     static let surfaceElevated = Color(nsColor: .textBackgroundColor)
+    #else
+    static let surface = Color(uiColor: .secondarySystemBackground)
+    static let surfaceElevated = Color(uiColor: .systemBackground)
+    #endif
     static let chrome = Color.primary.opacity(0.055)
     static let hairline = Color.primary.opacity(0.08)
 

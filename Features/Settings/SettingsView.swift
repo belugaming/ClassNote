@@ -1,18 +1,26 @@
 import SwiftUI
+#if os(macOS)
 import KeyboardShortcuts
+#endif
 
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
     @State private var selection: Tab = .api
 
     enum Tab: String, CaseIterable, Hashable {
-        case api, engines, shortcuts, appearance, about
+        case api, engines
+        #if os(macOS)
+        case shortcuts
+        #endif
+        case appearance, about
 
         var titleKey: String {
             switch self {
             case .api: return "settings.tab.api"
             case .engines: return "settings.tab.engines"
+            #if os(macOS)
             case .shortcuts: return "settings.tab.shortcuts"
+            #endif
             case .appearance: return "settings.tab.appearance"
             case .about: return "settings.tab.about"
             }
@@ -21,7 +29,9 @@ struct SettingsView: View {
             switch self {
             case .api: return "network"
             case .engines: return "waveform.circle"
+            #if os(macOS)
             case .shortcuts: return "keyboard"
+            #endif
             case .appearance: return "paintpalette"
             case .about: return "info.circle"
             }
@@ -36,9 +46,11 @@ struct SettingsView: View {
             EngineSettingsView()
                 .tabItem { Label(L10n.t("settings.tab.engines"), systemImage: "waveform.circle") }
                 .tag(Tab.engines)
+            #if os(macOS)
             ShortcutsSettingsView()
                 .tabItem { Label(L10n.t("settings.tab.shortcuts"), systemImage: "keyboard") }
                 .tag(Tab.shortcuts)
+            #endif
             AppearanceSettingsView()
                 .tabItem { Label(L10n.t("settings.tab.appearance"), systemImage: "paintpalette") }
                 .tag(Tab.appearance)
@@ -493,11 +505,13 @@ struct EngineSettingsView: View {
                             path: AppBootstrap.recordingsURL.path)
                     PathRow(label: L10n.t("settings.engines.database"),
                             path: AppBootstrap.applicationSupportURL.appendingPathComponent("classnote.sqlite").path)
+                    #if os(macOS)
                     Button {
                         NSWorkspace.shared.open(AppBootstrap.applicationSupportURL)
                     } label: {
                         Label(L10n.t("settings.engines.reveal"), systemImage: "folder")
                     }
+                    #endif
                 }
             }
             .padding(20)
@@ -536,8 +550,9 @@ private struct PathRow: View {
     }
 }
 
-// MARK: - Shortcuts
+// MARK: - Shortcuts (macOS only — no global hotkeys on iOS)
 
+#if os(macOS)
 struct ShortcutsSettingsView: View {
     var body: some View {
         ScrollView {
@@ -569,6 +584,7 @@ private struct ShortcutRow: View {
         }
     }
 }
+#endif
 
 // MARK: - About
 

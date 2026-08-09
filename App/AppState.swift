@@ -369,9 +369,11 @@ final class AppState: ObservableObject {
         checks.append(.init(name: L10n.t("diagnostics.microphone"),
                             status: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized ? .ok : .warning,
                             detail: "\(L10n.t("diagnostics.microphone.detail")) \(selectedMicrophoneName)"))
+        #if os(macOS)
         checks.append(.init(name: L10n.t("diagnostics.screen"),
                             status: CGPreflightScreenCaptureAccess() ? .ok : .warning,
                             detail: L10n.t("diagnostics.screen.detail")))
+        #endif
         diagnosticReport = checks
         taskCenter.succeed(id: taskId, detail: L10n.t("diagnostics.done"))
     }
