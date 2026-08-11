@@ -70,8 +70,8 @@ struct ClassNoteApp: App {
         Settings {
             SettingsView()
                 .environmentObject(appState)
-                .frame(width: 640, height: 520)
         }
+        .defaultSize(width: 720, height: 560)
 
         MenuBarExtra {
             MenuBarExtraView()

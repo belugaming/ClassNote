@@ -449,7 +449,8 @@ struct EngineSettingsView: View {
                             Text(backend.displayName).tag(backend)
                         }
                     }
-                    .pickerStyle(.segmented)
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     if appState.sttBackend == .whisperKitLocal {
                         Label(L10n.t("settings.engines.whisperKitNote"), systemImage: "exclamationmark.triangle")
                             .font(.caption)
