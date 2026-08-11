@@ -355,7 +355,6 @@
   ```
   只加到 `ClassNote`（macOS）target，不加到 `ClassNote_iOS`——本地 ASR sidecar 只在 macOS 上跑。加完后运行 `xcodegen generate` 重新生成工程文件。
 - [ ] **Step 3:** `xcodegen generate && xcodebuild -project ClassNote.xcodeproj -scheme ClassNote -configuration Debug build`，确认 `Scripts/asr_server.py` 出现在 `build/DerivedData/.../ClassNote.app/Contents/Resources/` 下（可用 `find build -name asr_server.py` 验证）。
-- [ ] **Step 3:** `swift build` 确认编译通过。
 - [ ] **Step 4:** 提交：`git commit -m "feat: add LocalASREnvironment for venv/package install"`
 
 ### Task 6: LocalASRProcessManager (actor)
@@ -392,13 +391,18 @@
 
           let ready: URL = try await withCheckedThrowingContinuation { cont in
               var resumed = false
+              // `availableData` can return partial lines split mid-word across
+              // reads (e.g. "REA" then "DY 8765\n") — accumulate into a buffer
+              // and only scan whole lines, not each raw chunk.
+              var pending = Data()
               stdout.fileHandleForReading.readabilityHandler = { handle in
                   let data = handle.availableData
-                  guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else { return }
-                  if line.contains("READY"), !resumed {
-                      resumed = true
-                      cont.resume(returning: URL(string: "ws://127.0.0.1:\(port)")!)
-                  }
+                  guard !data.isEmpty else { return }
+                  pending.append(data)
+                  guard let text = String(data: pending, encoding: .utf8) else { return }
+                  guard !resumed, text.contains("READY") else { return }
+                  resumed = true
+                  cont.resume(returning: URL(string: "ws://127.0.0.1:\(port)")!)
               }
               proc.terminationHandler = { p in
                   if !resumed {
