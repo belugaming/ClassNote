@@ -27,8 +27,9 @@ enum Theme {
     static let chrome = Color.primary.opacity(0.055)
     static let hairline = Color.primary.opacity(0.08)
 
-    /// Translation color in overlay + transcript.
-    static let translation = Color(red: 0.12, green: 0.52, blue: 0.48)
+    /// Translation color in overlay + transcript. Darker/more saturated than
+    /// the previous value, which read as low-contrast on light backgrounds.
+    static let translation = Color(red: 0.05, green: 0.42, blue: 0.38)
 
     static let recording = Color(red: 0.95, green: 0.30, blue: 0.30)
     static let success = Color(red: 0.20, green: 0.62, blue: 0.38)

@@ -24,9 +24,11 @@ struct LiveSubtitleView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         ForEach(buffer.segments) { seg in
-                            SubtitleBubble(segment: seg)
-                                .id(seg.rowId)
-                                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                            SubtitleBubble(segment: seg) { rowId in
+                                buffer.clearRevisedFlag(rowId: rowId)
+                            }
+                            .id(seg.rowId)
+                            .transition(.opacity.combined(with: .move(edge: .bottom)))
                         }
                         if !buffer.draftText.isEmpty {
                             DraftSubtitleBubble(text: buffer.draftText, translated: buffer.draftTranslated)
@@ -52,6 +54,11 @@ struct LiveSubtitleView: View {
 
 struct SubtitleBubble: View {
     let segment: LiveSegment
+    /// Called ~0.3s after a revision highlight has finished fading, so the
+    /// caller can clear the transient `wasRevised` flag on the underlying model.
+    var onRevisionSettled: ((Int64) -> Void)?
+
+    @State private var showRevisionHighlight = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -66,7 +73,8 @@ struct SubtitleBubble: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(segment.original)
-                    .font(.title3)
+                    .font(.system(size: 20, weight: .medium))
+                    .lineSpacing(4)
                     .textSelection(.enabled)
                 if !segment.translated.isEmpty {
                     Text(segment.translated)
@@ -77,7 +85,7 @@ struct SubtitleBubble: View {
                     HStack(spacing: 4) {
                         ForEach(0..<3) { i in
                             Circle()
-                                .fill(Theme.translation.opacity(0.6))
+                                .fill(Theme.translation)
                                 .frame(width: 5, height: 5)
                                 .scaleEffect(1.0)
                                 .opacity(0.6)
@@ -95,7 +103,25 @@ struct SubtitleBubble: View {
             Spacer()
         }
         .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
+                .fill(Theme.surfaceElevated.opacity(0.55))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
+                .fill(showRevisionHighlight ? Theme.accentSoft : Color.clear)
+        )
         .cardBackground(radius: Theme.cornerMedium)
+        .animation(.easeOut(duration: 0.3), value: showRevisionHighlight)
+        .onChange(of: segment.wasRevised) { _, revised in
+            guard revised else { return }
+            showRevisionHighlight = true
+            Task {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                showRevisionHighlight = false
+                onRevisionSettled?(segment.rowId)
+            }
+        }
     }
 }
 
@@ -114,7 +140,7 @@ struct DraftSubtitleBubble: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(text)
-                    .font(.title3.italic())
+                    .font(.system(size: 20, weight: .medium).italic())
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                 if !translated.isEmpty {
