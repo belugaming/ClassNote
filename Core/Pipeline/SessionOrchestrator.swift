@@ -29,6 +29,10 @@ final class SessionOrchestrator: ObservableObject {
     private var draftTranslateTask: Task<Void, Never>?
     private var tickerTask: Task<Void, Never>?
     private var ephemeralRowId: Int64 = 0
+    /// Maps engine-local segment IDs (from local streaming ASR engines that
+    /// emit revision events) to their corresponding database rowId, so we can
+    /// apply the revised text to the correct row when a 2-pass correction arrives.
+    private var engineSegmentToRowId: [Int64: Int64] = [:]
 
     /// Starts a new session, opens audio capture, begins STT/translation pipeline.
     /// Returns the new session id.
@@ -49,6 +53,7 @@ final class SessionOrchestrator: ObservableObject {
         self.isEphemeralTranslation = false
         self.statusText = "Starting capture…"
         self.transcript.reset()
+        self.engineSegmentToRowId.removeAll()
         self.currentTimestampMs = 0
 
         let outputURL = AppBootstrap.recordingURL(sessionId: sess.id)
@@ -99,6 +104,7 @@ final class SessionOrchestrator: ObservableObject {
         self.isEphemeralTranslation = true
         self.statusText = "Live translation only"
         self.transcript.reset()
+        self.engineSegmentToRowId.removeAll()
         self.currentTimestampMs = 0
         self.ephemeralRowId = 0
 
@@ -132,6 +138,7 @@ final class SessionOrchestrator: ObservableObject {
         self.isEphemeralTranslation = false
         self.statusText = "Importing \(url.lastPathComponent)"
         self.transcript.reset()
+        self.engineSegmentToRowId.removeAll()
         self.currentTimestampMs = 0
         self.isImporting = true
         self.importCompleted = 0
@@ -285,6 +292,28 @@ final class SessionOrchestrator: ObservableObject {
             let ttStream = stt.transcribe(audio: stream, language: config.sourceLanguage.isEmpty ? nil : config.sourceLanguage)
             do {
                 for try await event in ttStream {
+                    // 2-pass correction from a local streaming engine (FunASR):
+                    // replaces the text of a segment we already committed as
+                    // final. Must be checked before the isFinal guard below,
+                    // since revision events themselves report isFinal == true.
+                    if event.isRevision, let segId = event.engineSegmentId {
+                        let maybeRowId = await MainActor.run { self.engineSegmentToRowId[segId] }
+                        if let rowId = maybeRowId {
+                            let polishedText = TranscriptTextPolisher.polish(event.text)
+                            let existingTranslation = await MainActor.run {
+                                transcript.reviseFinal(rowId: rowId, newText: polishedText)
+                                return transcript.translatedText(rowId: rowId)
+                            }
+                            if persistSegments {
+                                try? await SegmentRepository.shared.updateText(id: rowId,
+                                                                                textOriginal: polishedText,
+                                                                                textTranslated: existingTranslation,
+                                                                                isFinal: true)
+                            }
+                        }
+                        continue
+                    }
+
                     guard event.isFinal else {
                         // Volatile/in-progress result — only the on-device
                         // Apple engines emit these. Show it as a live draft
@@ -329,6 +358,9 @@ final class SessionOrchestrator: ObservableObject {
                     }
                     await MainActor.run {
                         transcript.appendFinal(rowId: rowId, startMs: event.startMs, endMs: event.endMs, original: polishedText)
+                    }
+                    if let segId = event.engineSegmentId {
+                        await MainActor.run { self.engineSegmentToRowId[segId] = rowId }
                     }
                     if AppState.shared.translationEnabled {
                         self.translate(rowId: rowId,
