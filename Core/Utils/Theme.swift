@@ -7,6 +7,14 @@ enum Theme {
 
     /// Minimal editorial style: monochrome accent, no color-coded chrome.
     static let accent = Color.primary
+    /// Label color for controls filled with `accent`. Because `accent` is
+    /// `Color.primary` (white in dark mode), prominent buttons must use the
+    /// inverse color for their label or the text disappears.
+    #if os(macOS)
+    static let onAccent = Color(nsColor: .windowBackgroundColor)
+    #else
+    static let onAccent = Color(uiColor: .systemBackground)
+    #endif
     static let accentSoft = Color.primary.opacity(0.08)
     static let accentMuted = Color.secondary
     #if os(macOS)
@@ -191,6 +199,12 @@ extension View {
         modifier(CardBackground(radius: radius, filled: filled))
     }
     func pill(_ color: Color) -> some View { modifier(PillStyle(color: color)) }
+    /// Monochrome filled button: `accent` fill with the inverse label color.
+    func prominentAccentButton() -> some View {
+        buttonStyle(.borderedProminent)
+            .tint(Theme.accent)
+            .foregroundStyle(Theme.onAccent)
+    }
 }
 
 /// Standard section container with a title — replaces Form's default ugly frame.

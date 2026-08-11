@@ -117,8 +117,7 @@ struct EmptySessionList: View {
                         .frame(maxWidth: .infinity)
                 }
                 .controlSize(.large)
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.accent)
+                .prominentAccentButton()
                 Button {
                     onImport()
                 } label: {

@@ -9,6 +9,9 @@ struct MainWindowView: View {
     @State private var showingTaskCenter = false
     @State private var showingDiagnostics = false
     @State private var showingFirstLaunchGuide = false
+    #if os(iOS)
+    @State private var showingSettings = false
+    #endif
     @AppStorage("hasCompletedFirstLaunchTutorial.v1") private var hasCompletedFirstLaunchTutorial = false
 
     var body: some View {
@@ -136,6 +139,14 @@ struct MainWindowView: View {
                     Label(L10n.t("onboarding.replay"), systemImage: "questionmark.circle")
                 }
                 .help(L10n.t("onboarding.replay.help"))
+
+                #if os(iOS)
+                Button {
+                    showingSettings = true
+                } label: {
+                    Label(L10n.t("settings.title"), systemImage: "gearshape")
+                }
+                #endif
             }
         }
         .task { await vm.refresh() }
@@ -168,6 +179,21 @@ struct MainWindowView: View {
                 showingFirstLaunchGuide = false
             }
         }
+        #if os(iOS)
+        .sheet(isPresented: $showingSettings) {
+            NavigationStack {
+                SettingsView()
+                    .navigationTitle(L10n.t("settings.title"))
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button(L10n.t("common.close")) { showingSettings = false }
+                        }
+                    }
+            }
+            .environmentObject(appState)
+        }
+        #endif
     }
 
     @ViewBuilder
@@ -308,7 +334,8 @@ private struct FirstLaunchGuideSheet: View {
 
             Divider()
 
-            VStack(spacing: 22) {
+            ScrollView {
+                VStack(spacing: 22) {
                 Image(systemName: step.icon)
                     .font(.system(size: 50, weight: .semibold))
                     .foregroundStyle(step.tint)
@@ -346,10 +373,12 @@ private struct FirstLaunchGuideSheet: View {
                 .padding(16)
                 .frame(maxWidth: 520, alignment: .leading)
                 .cardBackground()
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 28)
+                .padding(.vertical, 22)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(.horizontal, 28)
-            .padding(.vertical, 22)
 
             Divider()
 
@@ -388,12 +417,13 @@ private struct FirstLaunchGuideSheet: View {
                     Label(selectedIndex == steps.count - 1 ? L10n.t("onboarding.finish") : L10n.t("onboarding.next"),
                           systemImage: selectedIndex == steps.count - 1 ? "checkmark.circle" : "chevron.right")
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.accent)
+                .prominentAccentButton()
             }
             .padding(18)
         }
+        #if os(macOS)
         .frame(width: 680, height: 560)
+        #endif
         .interactiveDismissDisabled()
     }
 }
@@ -443,8 +473,7 @@ struct MainEmptyStateView: View {
                         .frame(minWidth: 116)
                 }
                 .controlSize(.large)
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.accent)
+                .prominentAccentButton()
                 .disabled(isApiKeyMissing)
 
                 Button {

@@ -269,6 +269,7 @@ enum L10n {
         "overlay.close": "Close overlay (⌘⇧O)",
 
         // Settings
+        "settings.title": "Settings",
         "settings.tab.api": "API",
         "settings.tab.engines": "Engines",
         "settings.tab.shortcuts": "Shortcuts",
@@ -624,6 +625,7 @@ enum L10n {
         "overlay.close": "关闭浮窗(⌘⇧O)",
 
         // 设置
+        "settings.title": "设置",
         "settings.tab.api": "API",
         "settings.tab.engines": "引擎",
         "settings.tab.shortcuts": "快捷键",

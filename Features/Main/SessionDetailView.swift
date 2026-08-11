@@ -72,8 +72,7 @@ struct SessionDetailView: View {
                           systemImage: "sparkles")
                 }
                 .controlSize(.large)
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.accent)
+                .prominentAccentButton()
                 .disabled(vm.isGeneratingNotes || (vm.session?.segments.isEmpty ?? true))
             }
 

@@ -58,7 +58,9 @@ struct SettingsView: View {
                 .tabItem { Label(L10n.t("settings.tab.about"), systemImage: "info.circle") }
                 .tag(Tab.about)
         }
+        #if os(macOS)
         .frame(minWidth: 640, minHeight: 540)
+        #endif
         .background(Theme.surface.opacity(0.26))
         .id(appState.languageRefreshToken)   // force full re-render on language switch
     }
@@ -273,8 +275,7 @@ struct ApiSettingsView: View {
                             .frame(minWidth: 100)
                     }
                     .controlSize(.large)
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.accent)
+                    .prominentAccentButton()
 
                     Button {
                         Task { await testConnection() }

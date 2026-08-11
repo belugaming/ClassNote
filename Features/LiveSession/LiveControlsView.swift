@@ -55,8 +55,7 @@ struct LiveControlsView: View {
                 } label: {
                     Label(L10n.t("live.start"), systemImage: "record.circle")
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.accent)
+                .prominentAccentButton()
             }
         }
     }
