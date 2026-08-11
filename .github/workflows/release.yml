@@ -1,0 +1,78 @@
+name: Release macOS DMG
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Resolve Swift package dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project ClassNote.xcodeproj \
+            -scheme ClassNote
+
+      - name: Build Release
+        run: |
+          xcodebuild -project ClassNote.xcodeproj \
+                     -scheme ClassNote \
+                     -configuration Release \
+                     -destination 'platform=macOS,arch=arm64' \
+                     -derivedDataPath build/DerivedData \
+                     -skipMacroValidation \
+                     build
+
+      - name: Package DMG
+        run: |
+          set -euo pipefail
+          APP_PATH="build/DerivedData/Build/Products/Release/ClassNote.app"
+          if [[ ! -d "$APP_PATH" ]]; then
+            echo "✗ ClassNote.app not found at $APP_PATH"
+            exit 1
+          fi
+
+          VERSION="${GITHUB_REF_NAME#v}"
+          STAGE_DIR="build/dmg-stage"
+          rm -rf "$STAGE_DIR"
+          mkdir -p "$STAGE_DIR"
+          cp -R "$APP_PATH" "$STAGE_DIR/"
+          ln -s /Applications "$STAGE_DIR/Applications"
+
+          DMG_NAME="ClassNote-${VERSION}.dmg"
+          hdiutil create -volname "ClassNote" \
+                          -srcfolder "$STAGE_DIR" \
+                          -ov -format UDZO \
+                          "$DMG_NAME"
+
+          echo "DMG_NAME=$DMG_NAME" >> "$GITHUB_ENV"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClassNote-dmg
+          path: ${{ env.DMG_NAME }}
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.DMG_NAME }}
+          generate_release_notes: true
