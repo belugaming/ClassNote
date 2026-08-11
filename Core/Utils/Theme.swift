@@ -5,12 +5,17 @@ import SwiftUI
 enum Theme {
     // MARK: - Colors
 
-    /// Clear academic blue: modern, readable, and calmer than the old amber UI.
-    static let accent = Color(red: 0.16, green: 0.38, blue: 0.78)
-    static let accentSoft = Color(red: 0.16, green: 0.38, blue: 0.78).opacity(0.12)
-    static let accentMuted = Color(red: 0.31, green: 0.48, blue: 0.76)
+    /// Minimal editorial style: monochrome accent, no color-coded chrome.
+    static let accent = Color.primary
+    static let accentSoft = Color.primary.opacity(0.08)
+    static let accentMuted = Color.secondary
+    #if os(macOS)
     static let surface = Color(nsColor: .controlBackgroundColor)
     static let surfaceElevated = Color(nsColor: .textBackgroundColor)
+    #else
+    static let surface = Color(uiColor: .secondarySystemBackground)
+    static let surfaceElevated = Color(uiColor: .systemBackground)
+    #endif
     static let chrome = Color.primary.opacity(0.055)
     static let hairline = Color.primary.opacity(0.08)
 
@@ -150,16 +155,13 @@ extension String {
 }
 
 /// Card chrome used everywhere (settings sections, session rows, transcript bubbles).
+/// Editorial style: content + hairline border, no filled background block.
 struct CardBackground: ViewModifier {
     var radius: CGFloat = Theme.cornerMedium
     var filled: Bool = true
 
     func body(content: Content) -> some View {
         content
-            .background(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(filled ? Theme.surface.opacity(0.72) : Color.clear)
-            )
             .overlay(
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
                     .stroke(Theme.hairline, lineWidth: 1)
@@ -167,16 +169,20 @@ struct CardBackground: ViewModifier {
     }
 }
 
-/// Soft filled pill used for status labels.
+/// Outlined pill used for status labels. Only `Theme.recording` keeps a
+/// filled/colored treatment — everything else stays monochrome to avoid
+/// turning every list into a wall of colored badges.
 struct PillStyle: ViewModifier {
     var color: Color
     func body(content: Content) -> some View {
+        let isRecording = color == Theme.recording
         content
             .font(.caption.weight(.medium))
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(Capsule().fill(color.opacity(0.14)))
-            .foregroundStyle(color)
+            .background(Capsule().fill(isRecording ? color.opacity(0.14) : Color.clear))
+            .overlay(Capsule().stroke(isRecording ? Color.clear : color.opacity(0.5), lineWidth: 1))
+            .foregroundStyle(isRecording ? color : Color.secondary)
     }
 }
 

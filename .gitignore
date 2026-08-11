@@ -26,3 +26,4 @@ recordings/
 
 # Claude Code / local agent state
 .claude/
+.superpowers/

@@ -1,9 +1,9 @@
 import Foundation
-import AppKit
 
 /// Produces user-facing artifacts (Markdown / plain text / SRT / audio copy /
 /// full bundle) from a SessionDetail. Caller is responsible for prompting the
-/// user with NSSavePanel and passing the chosen destination URL.
+/// user with a save panel (macOS) or file exporter (iOS) and passing the
+/// chosen destination URL.
 enum SessionExporter {
     enum Kind: String, CaseIterable, Identifiable {
         case transcriptMarkdown

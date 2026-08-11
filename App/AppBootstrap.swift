@@ -7,7 +7,9 @@ enum AppBootstrap {
         } catch {
             NSLog("[ClassNote] Database setup failed: \(error)")
         }
+        #if os(macOS)
         GlobalShortcuts.register()
+        #endif
     }
 
     static var applicationSupportURL: URL {

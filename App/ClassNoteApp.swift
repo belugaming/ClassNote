@@ -14,6 +14,16 @@ struct ClassNoteApp: App {
     }
 
     var body: some Scene {
+        #if os(macOS)
+        macOSScenes
+        #else
+        iOSScenes
+        #endif
+    }
+
+    #if os(macOS)
+    @SceneBuilder
+    private var macOSScenes: some Scene {
         WindowGroup(id: "main") {
             MainWindowView()
                 .environmentObject(appState)
@@ -71,10 +81,24 @@ struct ClassNoteApp: App {
         }
         .menuBarExtraStyle(.window)
     }
+    #else
+    /// iOS/iPadOS has no independent windows, menu bar, or global shortcuts.
+    /// Everything lives in one WindowGroup; live session and settings are
+    /// presented as a full-screen cover / sheet from `MainWindowView`.
+    @SceneBuilder
+    private var iOSScenes: some Scene {
+        WindowGroup {
+            MainWindowView()
+                .environmentObject(appState)
+                .background(translationBridgeView)
+                .id(appState.languageRefreshToken)
+        }
+    }
+    #endif
 
     @ViewBuilder
     private var translationBridgeView: some View {
-        if #available(macOS 15.0, *) {
+        if #available(macOS 15.0, iOS 18.0, *) {
             AppleTranslationBridgeView()
         } else {
             EmptyView()
@@ -82,6 +106,7 @@ struct ClassNoteApp: App {
     }
 }
 
+#if os(macOS)
 /// Hidden helper view that listens for the `openLiveSession` notification and uses
 /// the environment's openWindow to pop the live session window.
 private struct LiveSessionOpener: View {
@@ -108,3 +133,4 @@ private struct LiveSessionOpener: View {
             }
     }
 }
+#endif

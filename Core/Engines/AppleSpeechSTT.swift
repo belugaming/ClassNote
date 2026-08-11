@@ -16,7 +16,7 @@ final class AppleSpeechSTT: STTProvider, Sendable {
 
     func transcribe(audio: AsyncStream<AudioChunk>,
                     language: String?) -> AsyncThrowingStream<TranscriptEvent, Error> {
-        if #available(macOS 26.0, *) {
+        if #available(macOS 26.0, iOS 26.0, *) {
             return Self.transcribeModern(audio: audio, language: language)
         } else {
             return Self.transcribeLegacy(audio: audio, language: language)
@@ -25,7 +25,7 @@ final class AppleSpeechSTT: STTProvider, Sendable {
 
     func transcribeFile(url: URL,
                         language: String?) -> AsyncThrowingStream<FileTranscriptionEvent, Error> {
-        if #available(macOS 26.0, *) {
+        if #available(macOS 26.0, iOS 26.0, *) {
             return Self.transcribeFileModern(url: url, language: language)
         } else {
             return Self.transcribeFileLegacy(url: url, language: language)

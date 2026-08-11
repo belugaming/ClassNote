@@ -1,7 +1,11 @@
 import SwiftUI
 import AVFoundation
-import AppKit
 import UniformTypeIdentifiers
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 
 struct SessionDetailView: View {
     let sessionId: String
@@ -10,26 +14,20 @@ struct SessionDetailView: View {
     @State private var selectedTab: DetailTab = .transcript
 
     enum DetailTab: String, CaseIterable, Identifiable {
-        case transcript, notes, tools, qa, flashcards, highlights
+        case transcript, notes, study
         var id: String { rawValue }
         var titleKey: String {
             switch self {
             case .transcript: return "session.tab.transcript"
             case .notes: return "session.tab.notes"
-            case .tools: return "session.tab.tools"
-            case .qa: return "session.tab.qa"
-            case .flashcards: return "session.tab.flashcards"
-            case .highlights: return "session.tab.highlights"
+            case .study: return "session.tab.study"
             }
         }
         var icon: String {
             switch self {
             case .transcript: return "captions.bubble"
             case .notes: return "sparkles"
-            case .tools: return "wand.and.stars"
-            case .qa: return "questionmark.bubble"
-            case .flashcards: return "rectangle.stack"
-            case .highlights: return "star.fill"
+            case .study: return "wand.and.stars"
             }
         }
     }
@@ -42,10 +40,7 @@ struct SessionDetailView: View {
                 switch selectedTab {
                 case .transcript: TranscriptPane(vm: vm)
                 case .notes: NotesPane(vm: vm)
-                case .tools: StudyToolsPane(vm: vm)
-                case .qa: QAPane(vm: vm)
-                case .flashcards: FlashcardsPane(vm: vm)
-                case .highlights: HighlightsPane(vm: vm)
+                case .study: StudyPane(vm: vm)
                 }
             }
             .background(Theme.surfaceElevated.opacity(0.25))
@@ -220,10 +215,28 @@ struct TranscriptPane: View {
     @ObservedObject var vm: SessionDetailViewModel
     @AppStorage("transcriptFontSize") private var transcriptFontSize: Double = 17
     @AppStorage("transcriptCompactMode") private var compactMode: Bool = false
+    @State private var showingHighlightDetail = false
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
+                if !vm.highlights.isEmpty {
+                    Menu {
+                        ForEach(vm.highlights) { h in
+                            Button {
+                                vm.seek(to: h.timestampMs)
+                                vm.selectHighlight(h.id)
+                                showingHighlightDetail = true
+                            } label: {
+                                Text(h.userNote.isEmpty ? formatHighlightTs(h.timestampMs) : h.userNote)
+                            }
+                        }
+                    } label: {
+                        Label(L10n.t("session.tab.highlights"), systemImage: "star.fill")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
                 Spacer()
                 Button {
                     transcriptFontSize = max(13, transcriptFontSize - 1)
@@ -270,7 +283,21 @@ struct TranscriptPane: View {
                 .padding(.vertical, 16)
             }
         }
+        .sheet(isPresented: $showingHighlightDetail) {
+            HighlightDetailPane(vm: vm)
+                .frame(minWidth: 480, minHeight: 420)
+                .padding(4)
+        }
     }
+}
+
+private func formatHighlightTs(_ ms: Int64) -> String {
+    let s = Int(ms / 1000)
+    let h = s / 3600
+    let m = (s % 3600) / 60
+    let sec = s % 60
+    if h > 0 { return String(format: "%d:%02d:%02d", h, m, sec) }
+    return String(format: "%02d:%02d", m, sec)
 }
 
 struct SegmentRowView: View {
@@ -339,7 +366,7 @@ struct NotesPane: View {
     @State private var confirmingDelete = false
 
     var body: some View {
-        HSplitView {
+        AdaptiveSplitView {
             VStack(spacing: 0) {
                 noteToolbar
                 Divider()
@@ -682,11 +709,50 @@ struct FlashcardsPane: View {
     }
 }
 
+/// Merges the old Tools / Q&A / Flashcards tabs into one, switched by a
+/// segmented picker instead of top-level tabs.
+struct StudyPane: View {
+    @ObservedObject var vm: SessionDetailViewModel
+    @State private var section: Section = .tools
+
+    enum Section: String, CaseIterable, Identifiable {
+        case tools, qa, flashcards
+        var id: String { rawValue }
+        var titleKey: String {
+            switch self {
+            case .tools: return "session.tab.tools"
+            case .qa: return "session.tab.qa"
+            case .flashcards: return "session.tab.flashcards"
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $section) {
+                ForEach(Section.allCases) { s in
+                    Text(L10n.t(s.titleKey)).tag(s)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(10)
+            Divider().opacity(0.45)
+            Group {
+                switch section {
+                case .tools: StudyToolsPane(vm: vm)
+                case .qa: QAPane(vm: vm)
+                case .flashcards: FlashcardsPane(vm: vm)
+                }
+            }
+        }
+    }
+}
+
 struct StudyToolsPane: View {
     @ObservedObject var vm: SessionDetailViewModel
 
     var body: some View {
-        HSplitView {
+        AdaptiveSplitView {
             List(StudyTools.all, selection: $vm.selectedStudyToolId) { tool in
                 VStack(alignment: .leading, spacing: 5) {
                     Label(L10n.t(tool.labelKey), systemImage: tool.icon)
@@ -797,81 +863,8 @@ private struct FlashcardStudyCard: View {
     }
 }
 
-struct HighlightsPane: View {
-    @ObservedObject var vm: SessionDetailViewModel
-    var body: some View {
-        Group {
-            if vm.highlights.isEmpty {
-                ContentUnavailableView {
-                    Label(L10n.t("session.empty.highlights.title"), systemImage: "star")
-                } description: {
-                    Text(L10n.t("session.empty.highlights.desc"))
-                }
-            } else {
-                HSplitView {
-                    HighlightListPane(vm: vm)
-                        .frame(minWidth: 220, idealWidth: 280)
-                    HighlightDetailPane(vm: vm)
-                        .frame(minWidth: 380)
-                }
-            }
-        }
-    }
-}
-
-struct HighlightListPane: View {
-    @ObservedObject var vm: SessionDetailViewModel
-    var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 6) {
-                ForEach(vm.highlights) { h in
-                    Button {
-                        vm.selectHighlight(h.id)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "star.fill")
-                                .foregroundStyle(Theme.accent)
-                            Text(formatTs(h.timestampMs))
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                            if !h.userNote.isEmpty {
-                                Text(h.userNote)
-                                    .font(.callout)
-                                    .lineLimit(1)
-                            }
-                            Spacer()
-                            if h.explanationMd != nil {
-                                Image(systemName: "sparkles")
-                                    .font(.caption2)
-                                    .foregroundStyle(Theme.accent)
-                            }
-                        }
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(vm.selectedHighlightId == h.id
-                                      ? Theme.accentSoft
-                                      : Color.clear)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(10)
-        }
-    }
-
-    private func formatTs(_ ms: Int64) -> String {
-        let s = Int(ms / 1000)
-        let h = s / 3600
-        let m = (s % 3600) / 60
-        let sec = s % 60
-        if h > 0 { return String(format: "%d:%02d:%02d", h, m, sec) }
-        return String(format: "%02d:%02d", m, sec)
-    }
-}
-
+/// Reached from a sheet triggered by the highlight menu in `TranscriptPane`
+/// (highlights no longer have their own top-level tab).
 struct HighlightDetailPane: View {
     @ObservedObject var vm: SessionDetailViewModel
 
@@ -1330,8 +1323,7 @@ final class SessionDetailViewModel: ObservableObject {
                                            highlights: self.highlights,
                                            flashcards: self.flashcards,
                                            studyToolResults: self.studyToolResults)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(SessionExporter.flashcardsTSV(input), forType: .string)
+        Clipboard.copy(SessionExporter.flashcardsTSV(input))
     }
 
     func generateSelectedStudyTool() async {
@@ -1622,6 +1614,7 @@ final class SessionDetailViewModel: ObservableObject {
         }
     }
 
+    #if os(macOS)
     private func saveFileWithPanel(suggestedName: String,
                                     utType: UTType,
                                     write: (URL) throws -> Void) throws {
@@ -1643,6 +1636,38 @@ final class SessionDetailViewModel: ObservableObject {
         try SessionExporter.writeBundle(input, to: url)
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
+    #else
+    /// iOS has no save panel; write to a temp location and hand off to the
+    /// system share sheet so the user can save to Files, AirDrop, etc.
+    private func saveFileWithPanel(suggestedName: String,
+                                    utType: UTType,
+                                    write: (URL) throws -> Void) throws {
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent(suggestedName)
+        if FileManager.default.fileExists(atPath: dest.path) {
+            try? FileManager.default.removeItem(at: dest)
+        }
+        try write(dest)
+        presentShareSheet(for: [dest])
+    }
+
+    private func saveBundleWithPanel(input: SessionExporter.Input, suggestedFolderName: String) throws {
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent(suggestedFolderName, isDirectory: true)
+        if FileManager.default.fileExists(atPath: dest.path) {
+            try? FileManager.default.removeItem(at: dest)
+        }
+        try SessionExporter.writeBundle(input, to: dest)
+        presentShareSheet(for: [dest])
+    }
+
+    private func presentShareSheet(for items: [Any]) {
+        guard let root = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first?.windows.first(where: { $0.isKeyWindow })?.rootViewController
+        else { return }
+        let sheet = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        root.present(sheet, animated: true)
+    }
+    #endif
 
     private func formatTimecode(_ ms: Int64) -> String {
         let s = Int(ms / 1000)

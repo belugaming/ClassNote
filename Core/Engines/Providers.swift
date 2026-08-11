@@ -106,7 +106,7 @@ struct EngineFactory {
         case .openAICompatible:
             return OpenAICompatibleTranslator(config: config)
         case .appleTranslation:
-            if #available(macOS 15.0, *) {
+            if #available(macOS 15.0, iOS 18.0, *) {
                 return AppleTranslationEngine()
             }
             return OpenAICompatibleTranslator(config: config)
