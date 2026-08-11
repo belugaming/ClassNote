@@ -13,6 +13,10 @@ final class AppState: ObservableObject {
     @Published var presentNewCourseSheet: Bool = false
     @Published var presentPermissionsSheet: Bool = false
     @Published var apiConfig: ApiConfig = .default
+    /// False until `loadConfig()` has read the stored config. `apiConfig` holds
+    /// `.default` before that, so saving during this window would overwrite the
+    /// user's real settings with defaults.
+    private(set) var hasLoadedConfig = false
     @Published var lastError: String? = nil
     @Published var translationEnabled: Bool = true
     @Published var sttBackend: SttBackend = .openAICompatible
@@ -43,10 +47,15 @@ final class AppState: ObservableObject {
 
     func loadConfig() async {
         if let cfg = try? await ApiConfigRepository.shared.load() {
+            // Assign the backend pickers first, then the config. Both are
+            // @Published and views observe them with onChange, so setting them
+            // while hasLoadedConfig is still false keeps those handlers from
+            // saving a half-applied state.
             self.apiConfig = cfg
             self.sttBackend = SttBackend(rawValue: cfg.sttBackend) ?? .openAICompatible
             self.translationBackend = TranslationBackend(rawValue: cfg.translationBackend) ?? .openAICompatible
         }
+        hasLoadedConfig = true
     }
 
     func cleanupOrphanedRecordings() async {
@@ -58,6 +67,13 @@ final class AppState: ObservableObject {
     }
 
     func saveConfig(_ cfg: ApiConfig) async {
+        // Ignore saves triggered before the stored config has been read (SwiftUI
+        // onChange handlers can fire during startup). Persisting then would
+        // write the placeholder `.default` over real settings.
+        guard hasLoadedConfig else {
+            NSLog("[ClassNote] Ignoring config save before initial load completed")
+            return
+        }
         do {
             try await ApiConfigRepository.shared.save(cfg)
             self.apiConfig = try await ApiConfigRepository.shared.load()

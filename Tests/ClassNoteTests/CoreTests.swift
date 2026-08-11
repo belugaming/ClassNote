@@ -523,3 +523,58 @@ final class ShouldEmitTests: XCTestCase {
         XCTAssertFalse(OpenAICompatibleSTT.shouldEmit(". . .", minChars: 3))
     }
 }
+
+/// Guards the config-loss bug: a stale in-memory `.default` (before
+/// `loadConfig()` finishes) used to be written to both the database and the
+/// UserDefaults backup, destroying the copy meant to recover from exactly that.
+final class ApiConfigBackupTests: XCTestCase {
+    override func setUp() async throws {
+        try Database.shared.setup()
+        ApiConfigBackupStore.clear()
+    }
+
+    override func tearDown() async throws {
+        ApiConfigBackupStore.clear()
+    }
+
+    func testSavingRealConfigWritesBackup() async throws {
+        var cfg = ApiConfig.default
+        cfg.baseUrl = "https://example.test/v1"
+        cfg.apiKey = "sk-regression-test"
+        try await ApiConfigRepository.shared.save(cfg)
+
+        let backup = ApiConfigBackupStore.read()
+        XCTAssertEqual(backup?.baseUrl, "https://example.test/v1")
+        XCTAssertEqual(backup?.apiKey, "sk-regression-test")
+    }
+
+    func testSavingDefaultsDoesNotClobberBackup() async throws {
+        var real = ApiConfig.default
+        real.baseUrl = "https://example.test/v1"
+        real.apiKey = "sk-must-survive"
+        try await ApiConfigRepository.shared.save(real)
+
+        // An all-defaults save is what a premature write looks like.
+        try await ApiConfigRepository.shared.save(.default)
+
+        let backup = ApiConfigBackupStore.read()
+        XCTAssertEqual(backup?.apiKey, "sk-must-survive",
+                       "An all-defaults save must not overwrite the backup")
+    }
+
+    func testLoadRestoresFromBackupWhenDatabaseIsDefaulted() async throws {
+        var real = ApiConfig.default
+        real.baseUrl = "https://example.test/v1"
+        real.apiKey = "sk-restore-me"
+        try await ApiConfigRepository.shared.save(real)
+
+        // Simulate the damage: database row reset to defaults, backup intact.
+        try await Database.shared.dbPool.write { db in
+            try ApiConfig.default.insert(db, onConflict: .replace)
+        }
+
+        let loaded = try await ApiConfigRepository.shared.load()
+        XCTAssertEqual(loaded.baseUrl, "https://example.test/v1")
+        XCTAssertEqual(loaded.apiKey, "sk-restore-me")
+    }
+}

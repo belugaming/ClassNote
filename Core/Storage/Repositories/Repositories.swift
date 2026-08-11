@@ -493,7 +493,13 @@ actor ApiConfigRepository {
     }
 
     func save(_ cfg: ApiConfig) async throws {
-        ApiConfigBackupStore.save(cfg)
+        // Only mirror real settings into the backup. Writing an all-defaults
+        // config here would destroy the very copy the backup exists to protect,
+        // which is how a stale in-memory `.default` could wipe both stores at
+        // once and make the loss unrecoverable.
+        if !shouldRestoreFromBackup(cfg) {
+            ApiConfigBackupStore.save(cfg)
+        }
         let databaseConfig = cfg
         try await Database.shared.dbPool.write { db in
             try databaseConfig.insert(db, onConflict: .replace)

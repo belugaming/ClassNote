@@ -532,12 +532,17 @@ struct EngineSettingsView: View {
         .onAppear {
             appState.refreshMicrophoneDevices()
         }
+        // Skip the write when the picker already matches what is stored: that
+        // means loadConfig() just applied it, not the user changing it. Saving
+        // here would race the load and could persist a stale config.
         .onChange(of: appState.sttBackend) { _, backend in
+            guard appState.apiConfig.sttBackend != backend.rawValue else { return }
             var config = appState.apiConfig
             config.sttBackend = backend.rawValue
             Task { await appState.saveConfig(config) }
         }
         .onChange(of: appState.translationBackend) { _, backend in
+            guard appState.apiConfig.translationBackend != backend.rawValue else { return }
             var config = appState.apiConfig
             config.translationBackend = backend.rawValue
             Task { await appState.saveConfig(config) }
