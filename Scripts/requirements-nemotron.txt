@@ -1,2 +1,7 @@
+# The MLX streaming engine. numpy and mlx are used directly by the sidecar to
+# convert PCM frames into model input, so pin them here rather than relying on
+# them arriving as transitive dependencies.
 nemotron-asr-mlx
+mlx
+numpy
 websockets

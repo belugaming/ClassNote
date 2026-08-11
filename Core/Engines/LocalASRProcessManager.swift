@@ -19,6 +19,7 @@ enum LocalASRProcessError: Error, LocalizedError {
 actor LocalASRProcessManager {
     private let engine: LocalASREngineKind
     private var process: Process?
+    private var stderrPipe: Pipe?
 
     init(engine: LocalASREngineKind) {
         self.engine = engine
@@ -26,36 +27,84 @@ actor LocalASRProcessManager {
 
     /// Spawns the sidecar and waits for its READY marker on stdout, returns the ws URL.
     func start() async throws -> URL {
+        NSLog("[LocalASRProcessManager] start() called for engine=\(engine.rawValue)")
         guard LocalASREnvironment.shared.isReady(engine: engine) else {
+            NSLog("[LocalASRProcessManager] environment not ready")
             throw LocalASREnvironmentError.pipInstallFailed("环境未安装")
         }
         guard let scriptPath = Bundle.main.path(forResource: "asr_server", ofType: "py") else {
+            NSLog("[LocalASRProcessManager] asr_server.py not found in bundle")
             throw LocalASRProcessError.launchFailed("找不到 asr_server.py")
         }
+        NSLog("[LocalASRProcessManager] script path: \(scriptPath)")
         let port = try Self.findFreePort()
+        NSLog("[LocalASRProcessManager] assigned port: \(port)")
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: LocalASREnvironment.shared.pythonExecutablePath)
-        process.arguments = [scriptPath, "--engine", engine.rawValue, "--port", "\(port)"]
+        // --device auto lets the sidecar pick MPS for the streaming pass when
+        // the GPU is available; it keeps the offline pass on CPU, which measured
+        // faster for short utterances.
+        process.arguments = [scriptPath, "--engine", engine.rawValue, "--port", "\(port)",
+                             "--device", "auto"]
+        // Force unbuffered stdout so the READY marker arrives as soon as the
+        // models finish loading rather than sitting in Python's block buffer.
+        // Model weights stay in the default ~/.cache/modelscope location, which
+        // is shared with any other FunASR install the user already has.
+        var environment = ProcessInfo.processInfo.environment
+        environment["PYTHONUNBUFFERED"] = "1"
+        process.environment = environment
         let stdout = Pipe()
         process.standardOutput = stdout
         let stderr = Pipe()
         process.standardError = stderr
         self.process = process
+        self.stderrPipe = stderr
 
+        // asr_server.py's dependencies (torch/FunASR model loading, tqdm
+        // progress bars, library warnings) write heavily to stderr. If
+        // nothing reads this pipe, its buffer fills up and the Python
+        // process blocks on write() forever — which looks like a dead
+        // socket on the Swift side minutes later. Drain it continuously.
+        stderr.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            NSLog("[asr_server stderr] \(text)")
+        }
+
+        NSLog("[LocalASRProcessManager] launching process...")
         do {
             try process.run()
+            NSLog("[LocalASRProcessManager] process.run() succeeded, pid=\(process.processIdentifier)")
         } catch {
+            NSLog("[LocalASRProcessManager] process.run() failed: \(error)")
             throw LocalASRProcessError.launchFailed(error.localizedDescription)
         }
 
+        NSLog("[LocalASRProcessManager] waiting for READY marker...")
         try await Self.waitForReady(pipe: stdout, expectedPort: port)
-        return URL(string: "ws://127.0.0.1:\(port)")!
+        let url = URL(string: "ws://127.0.0.1:\(port)")!
+        NSLog("[LocalASRProcessManager] sidecar ready at \(url)")
+        return url
     }
 
     func shutdown() async {
-        process?.terminate()
-        process = nil
+        stderrPipe?.fileHandleForReading.readabilityHandler = nil
+        stderrPipe = nil
+        guard let process, process.isRunning else {
+            self.process = nil
+            return
+        }
+        self.process = nil
+        process.terminate()
+        // SIGTERM can be swallowed while Python sits inside a blocking torch
+        // call, leaving an orphan holding a port and several GB of weights.
+        // Give it a moment, then make sure it is gone.
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        if process.isRunning {
+            NSLog("[LocalASRProcessManager] sidecar ignored SIGTERM, sending SIGKILL")
+            kill(process.processIdentifier, SIGKILL)
+        }
     }
 
     private static func findFreePort() throws -> UInt16 {

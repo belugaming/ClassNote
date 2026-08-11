@@ -1,2 +1,9 @@
+# funasr lazily imports AutoModel, so a missing dependency here does not fail
+# until the first transcription attempt. torchaudio in particular is imported at
+# module scope by funasr.utils.load_utils — without it the sidecar dies on
+# startup while the venv still looks correctly installed.
 funasr
+torch
+torchaudio
+soundfile
 websockets
