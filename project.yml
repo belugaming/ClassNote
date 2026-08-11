@@ -39,6 +39,8 @@ targets:
       - path: Core
       - path: Resources
         buildPhase: resources
+      - path: Scripts
+        buildPhase: resources
     info:
       path: App/Info.plist
       properties:

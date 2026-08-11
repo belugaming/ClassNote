@@ -13,14 +13,24 @@ struct TranscriptEvent: Sendable, Identifiable, Hashable {
     let text: String
     let isFinal: Bool
     let speakerId: String?
+    /// Engine-local segment identifier, only populated by local streaming
+    /// engines (FunASR/Nemotron) so a later `isRevision` event can be matched
+    /// back to the segment it corrects.
+    let engineSegmentId: Int64?
+    /// True when this event replaces the text of a previously emitted final
+    /// event with the same `engineSegmentId` (2-pass correction).
+    let isRevision: Bool
 
-    init(startMs: Int64, endMs: Int64, text: String, isFinal: Bool, speakerId: String? = nil) {
+    init(startMs: Int64, endMs: Int64, text: String, isFinal: Bool, speakerId: String? = nil,
+         engineSegmentId: Int64? = nil, isRevision: Bool = false) {
         self.id = UUID()
         self.startMs = startMs
         self.endMs = endMs
         self.text = text
         self.isFinal = isFinal
         self.speakerId = speakerId
+        self.engineSegmentId = engineSegmentId
+        self.isRevision = isRevision
     }
 }
 
@@ -97,6 +107,10 @@ struct EngineFactory {
             return OpenAICompatibleSTT(config: config)  // fallback until WhisperKit wired
         case .appleSpeech:
             return AppleSpeechSTT()
+        case .funasr:
+            return LocalWebSocketSTT(engine: .funasr)
+        case .nemotronStreaming:
+            return LocalWebSocketSTT(engine: .nemotron)
         }
     }
 

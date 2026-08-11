@@ -419,6 +419,51 @@ final class TranscriptBufferTests: XCTestCase {
         XCTAssertEqual(buf.segments[1].translated, "你怎么样")
         XCTAssertEqual(buf.recent(1), ["How are you"])
     }
+
+    @MainActor
+    func testReviseFinalUpdatesInPlaceWithoutAffectingOtherRows() {
+        let buf = TranscriptBuffer()
+        buf.appendFinal(rowId: 1, startMs: 0, endMs: 1000, original: "Hello wold")
+        buf.appendFinal(rowId: 2, startMs: 1000, endMs: 2000, original: "How are you")
+
+        buf.reviseFinal(rowId: 1, newText: "Hello world")
+
+        XCTAssertEqual(buf.segments[0].original, "Hello world")
+        XCTAssertTrue(buf.segments[0].wasRevised)
+        XCTAssertEqual(buf.segments[1].original, "How are you")
+        XCTAssertFalse(buf.segments[1].wasRevised)
+    }
+
+    @MainActor
+    func testClearRevisedFlagResetsOnlyTargetRow() {
+        let buf = TranscriptBuffer()
+        buf.appendFinal(rowId: 1, startMs: 0, endMs: 1000, original: "Hello wold")
+        buf.reviseFinal(rowId: 1, newText: "Hello world")
+        XCTAssertTrue(buf.segments[0].wasRevised)
+
+        buf.clearRevisedFlag(rowId: 1)
+        XCTAssertFalse(buf.segments[0].wasRevised)
+        XCTAssertEqual(buf.segments[0].original, "Hello world")
+    }
+
+    @MainActor
+    func testTranslatedTextReturnsExistingTranslation() {
+        let buf = TranscriptBuffer()
+        buf.appendFinal(rowId: 1, startMs: 0, endMs: 1000, original: "Hello world")
+        buf.appendTranslationDelta(rowId: 1, delta: "你好世界")
+
+        XCTAssertEqual(buf.translatedText(rowId: 1), "你好世界")
+        XCTAssertEqual(buf.translatedText(rowId: 999), "")
+    }
+
+    @MainActor
+    func testReviseFinalIgnoresUnknownRowId() {
+        let buf = TranscriptBuffer()
+        buf.appendFinal(rowId: 1, startMs: 0, endMs: 1000, original: "Hello world")
+        buf.reviseFinal(rowId: 999, newText: "should not apply")
+        XCTAssertEqual(buf.segments[0].original, "Hello world")
+        XCTAssertFalse(buf.segments[0].wasRevised)
+    }
 }
 
 final class OverlayCaptionFormatterTests: XCTestCase {

@@ -460,6 +460,16 @@ struct EngineSettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    if appState.sttBackend == .funasr {
+                        Label(L10n.t("settings.engines.funasrNote"), systemImage: "arrow.down.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if appState.sttBackend == .nemotronStreaming {
+                        Label(L10n.t("settings.engines.nemotronNote"), systemImage: "arrow.down.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 SettingsSection(title: L10n.t("settings.engines.translationSection"),

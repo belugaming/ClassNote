@@ -402,12 +402,25 @@ enum SttBackend: String, CaseIterable, Identifiable {
     case openAICompatible = "openai"
     case whisperKitLocal = "whisperkit"
     case appleSpeech = "apple"
+    case funasr = "funasr"
+    case nemotronStreaming = "nemotron"
     var id: String { rawValue }
     var displayName: String {
         switch self {
         case .openAICompatible: return "OpenAI Compatible (Cloud)"
         case .whisperKitLocal: return "WhisperKit (Local, macOS Apple Silicon)"
         case .appleSpeech: return L10n.t("settings.engines.sttBackend.apple")
+        case .funasr: return "FunASR (Local, 2-Pass)"
+        case .nemotronStreaming: return "Nemotron Streaming (Local, English)"
+        }
+    }
+
+    /// True for backends backed by a local Python WebSocket sidecar process
+    /// that may need first-run installation before it can be used.
+    var isLocalSidecar: Bool {
+        switch self {
+        case .funasr, .nemotronStreaming: return true
+        case .openAICompatible, .whisperKitLocal, .appleSpeech: return false
         }
     }
 }

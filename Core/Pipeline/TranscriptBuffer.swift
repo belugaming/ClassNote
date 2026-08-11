@@ -48,6 +48,24 @@ final class TranscriptBuffer: ObservableObject {
         segments[idx].translated = translated
     }
 
+    /// Replaces an already-committed segment's text with a more accurate
+    /// result from a 2-pass local ASR engine's offline correction pass.
+    func reviseFinal(rowId: Int64, newText: String) {
+        guard let idx = indexById[rowId], idx < segments.count else { return }
+        segments[idx].original = newText
+        segments[idx].wasRevised = true
+    }
+
+    func clearRevisedFlag(rowId: Int64) {
+        guard let idx = indexById[rowId], idx < segments.count else { return }
+        segments[idx].wasRevised = false
+    }
+
+    func translatedText(rowId: Int64) -> String {
+        guard let idx = indexById[rowId], idx < segments.count else { return "" }
+        return segments[idx].translated
+    }
+
     func appendTranslationDelta(rowId: Int64, delta: String) {
         guard let idx = indexById[rowId], idx < segments.count else { return }
         segments[idx].translated += delta
@@ -73,6 +91,9 @@ struct LiveSegment: Identifiable, Hashable {
     var original: String
     var translated: String
     var isFinal: Bool
+    /// Set briefly when a 2-pass local ASR engine replaces this segment's
+    /// text with a more accurate offline result, so the UI can flash a highlight.
+    var wasRevised: Bool = false
 
     init(rowId: Int64, startMs: Int64, endMs: Int64, original: String, translated: String, isFinal: Bool) {
         self.id = rowId
