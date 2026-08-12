@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Unit tests for asr_server helpers. Run: python3 -m unittest Scripts.test_asr_server"""
+"""Unit tests for asr_server helpers.
+
+Lives outside Scripts/ because that whole directory is a resources build phase,
+so anything in it ships inside ClassNote.app.
+
+Run: python3 -m unittest discover -s Tests/PythonTests
+"""
 import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Scripts"))
 
 from asr_server import _is_cjk, _is_silent, _join_partial
 
