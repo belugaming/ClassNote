@@ -7,3 +7,10 @@ torch
 torchaudio
 soundfile
 websockets
+
+# English streaming. FunASR's only streaming model is Chinese-only, so English
+# partials come from Nemotron's MLX transducer instead. Optional at runtime: if
+# these are missing the sidecar logs it and English falls back to
+# sentence-at-a-time, so keep them last.
+nemotron-asr-mlx
+mlx

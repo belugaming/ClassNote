@@ -24,9 +24,16 @@ Swift decoder can treat them uniformly:
   {"type": "error",    "message"}
 
 Two-pass design mirrors runtime/python/websocket/funasr_wss_server.py from the
-FunASR repo: FSMN-VAD finds utterance boundaries, paraformer-zh-streaming emits
-low-latency partials, and paraformer-zh + ct-punc re-transcribes each finished
+FunASR repo: FSMN-VAD finds utterance boundaries, a streaming model emits
+low-latency partials, and an offline model + ct-punc re-transcribes each finished
 utterance for an accurate, punctuated replacement.
+
+The streaming model depends on the language, since FunASR's only streaming model
+is Chinese:
+  zh -> paraformer-zh-streaming (600ms steps), revised by paraformer-zh + ct-punc
+  en -> nemotron-asr-mlx        (160ms steps), single pass -- it already emits
+        punctuation, and paraformer-en measured far worse on the same audio, so
+        revising with it would corrupt correct text
 """
 
 from __future__ import annotations
@@ -141,6 +148,11 @@ class Models:
     ModelScope), so this happens once at process start, before the READY line.
     """
 
+    NEMOTRON_MODEL = "dboris/nemotron-asr-mlx"
+    # Nemotron streams in 160ms steps, finer than paraformer's 600ms, so English
+    # partials arrive more smoothly than Chinese ones.
+    NEMOTRON_CHUNK_MS = 160
+
     def __init__(self, device: str, offline_device: str | None = None,
                  language: str = "zh", on_stage=None):
         # Measured on an M-series CPU vs MPS (600ms streaming chunks, 10s
@@ -155,18 +167,34 @@ class Models:
         self.offline_device = offline_device or device
         # FunASR ships exactly one streaming model and it is Chinese-only, so
         # English audio fed through it comes back as meaningless Chinese
-        # characters until the offline pass corrects them. For English we skip
-        # the streaming pass entirely and let the offline model own the text.
+        # characters. English therefore streams via Nemotron's MLX transducer.
         self.language = language
         self.is_chinese = language.lower().startswith("zh")
         # Called with (stage_key, human_text) as loading progresses, so the app
         # can show real progress instead of appearing hung for ~30s.
         self.on_stage = on_stage
+        # FunASR's streaming model (Chinese) and Nemotron's MLX streaming model
+        # (English) are both fed through the same Session; exactly one is set.
         self.streaming = None
+        self.nemotron = None
         self.offline = None
         self.vad = None
         self.punc = None
         self._file_model = None
+
+    @property
+    def needs_offline_pass(self) -> bool:
+        """Whether a second, offline pass improves on the streaming text.
+
+        Chinese: yes -- paraformer-zh + ct-punc fixes homophones and adds
+        punctuation that the streaming model omits.
+        English: only as a fallback. Nemotron already emits punctuation and
+        capitalization, and paraformer-en measured far worse on the same audio,
+        so revising a Nemotron result with it would corrupt correct text.
+        """
+        if self.is_chinese:
+            return True
+        return self.nemotron is None
 
     @property
     def file_model(self):
@@ -210,8 +238,24 @@ class Models:
                       disable_update=True)
         offline_common = dict(common, device=self.offline_device)
 
-        offline_model = "paraformer-zh" if self.is_chinese else "paraformer-en"
-        total = 3 + (1 if self.is_chinese else 0)
+        # Whether English streaming is usable decides how many models load, so
+        # probe it before computing the step count the UI displays.
+        if not self.is_chinese:
+            # FunASR has no English streaming model, so use Nemotron's MLX
+            # transducer. If MLX or the weights are unavailable, English falls
+            # back to sentence-at-a-time via paraformer-en.
+            try:
+                from nemotron_asr_mlx import from_pretrained
+
+                nemotron_loader = from_pretrained
+            except Exception as exc:
+                log(f"[models] English streaming unavailable, falling back to "
+                    f"sentence-at-a-time: {exc}")
+                nemotron_loader = None
+        else:
+            nemotron_loader = None
+
+        total = 4 if (self.is_chinese or nemotron_loader is None) else 2
         step = 0
 
         def stage(key: str):
@@ -223,24 +267,38 @@ class Models:
             if self.on_stage:
                 self.on_stage(key, step, total)
 
+        stage("streaming")
         if self.is_chinese:
-            stage("streaming")
             self.streaming = AutoModel(model="paraformer-zh-streaming", **common)
-        else:
-            # English: no streaming model exists, so partials come from nowhere
-            # and the UI shows a "recognizing" indicator instead.
-            self.streaming = None
+        elif nemotron_loader is not None:
+            try:
+                self.nemotron = nemotron_loader(self.NEMOTRON_MODEL)
+            except Exception as exc:
+                log(f"[models] Nemotron failed to load, falling back to "
+                    f"sentence-at-a-time: {exc}")
+                self.nemotron = None
 
         stage("vad")
         self.vad = AutoModel(model="fsmn-vad", **common)
-        stage("offline")
-        self.offline = AutoModel(model=offline_model, **offline_common)
-        stage("punc")
-        try:
-            self.punc = AutoModel(model="ct-punc", **offline_common)
-        except Exception as exc:
-            # Punctuation is a nicety; transcription still works without it.
-            log(f"[models] punc unavailable, continuing without it: {exc}")
+
+        if self.needs_offline_pass:
+            stage("offline")
+            offline_model = "paraformer-zh" if self.is_chinese else "paraformer-en"
+            self.offline = AutoModel(model=offline_model, **offline_common)
+            stage("punc")
+            try:
+                self.punc = AutoModel(model="ct-punc", **offline_common)
+            except Exception as exc:
+                # Punctuation is a nicety; transcription still works without it.
+                log(f"[models] punc unavailable, continuing without it: {exc}")
+                self.punc = None
+        else:
+            # English with Nemotron streaming: no second pass. Measured on the
+            # same clip, Nemotron returned "The mitochondria is the powerhouse
+            # of the cell." while paraformer-en returned unrelated words, so
+            # "revising" with it would actively corrupt a correct result.
+            # Nemotron already emits punctuation and capitalization itself.
+            self.offline = None
             self.punc = None
 
         # First inference on MPS pays for kernel compilation and lazy weight
@@ -264,196 +322,6 @@ class Models:
 
         log("[models] all loaded")
 
-
-class NemotronModels:
-    """MLX-based English streaming ASR, an alternative to the FunASR stack.
-
-    Single-pass: the model streams text deltas directly and has no separate
-    offline refinement, so `Session` treats every flush as the segment's final.
-    """
-
-    NEMOTRON_CHUNK_MS = 160
-
-    def __init__(self, model_id: str):
-        self.model_id = model_id
-        self.asr = None
-
-    def load(self):
-        with contextlib.redirect_stdout(sys.stderr):
-            from nemotron_asr_mlx import from_pretrained
-
-            log(f"[models] loading {self.model_id} (mlx)")
-            self.asr = from_pretrained(self.model_id)
-            log("[models] all loaded")
-
-    def create_stream(self):
-        return self.asr.create_stream(chunk_ms=self.NEMOTRON_CHUNK_MS)
-
-
-class NemotronSession:
-    """Streams PCM into a Nemotron MLX session, emitting partials and finals.
-
-    Deliberately mirrors the FunASR `Session` surface (`start`/`enqueue`/
-    `feed`/`finish`/`close`) so `handle_connection` does not branch per engine.
-    """
-
-    def __init__(self, ws, models: NemotronModels, executor: ThreadPoolExecutor,
-                 language: str | None):
-        self.ws = ws
-        self.models = models
-        self.executor = executor
-        self.language = language
-        self.stream = models.create_stream()
-
-        self.segment_id = 0
-        self.segment_start_ms = 0
-        self.stream_ms = 0
-        self.buf = bytearray()
-        self.silence_ms = 0
-        self.have_text = False
-
-        self._inbox: asyncio.Queue = asyncio.Queue()
-        self._worker: asyncio.Task | None = None
-
-        # Nemotron has no VAD, so utterances are cut on an energy-based silence
-        # run, the same heuristic the app's own VADGate uses.
-        self.step_bytes = models.NEMOTRON_CHUNK_MS * BYTES_PER_MS
-
-    async def start(self):
-        self._worker = asyncio.create_task(self._process_loop())
-
-    def enqueue(self, pcm: bytes):
-        if pcm:
-            self._inbox.put_nowait(pcm)
-
-    async def _process_loop(self):
-        while True:
-            pcm = await self._inbox.get()
-            try:
-                await self.feed(pcm)
-            except Exception:
-                log(f"[process] {traceback.format_exc()}")
-
-    async def _run(self, fn, *a, **kw):
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self.executor, lambda: fn(*a, **kw))
-
-    async def _send(self, payload: dict):
-        try:
-            await self.ws.send(json.dumps(payload, ensure_ascii=False))
-        except websockets.ConnectionClosed:
-            pass
-
-    def _push_sync(self, pcm: bytes):
-        import mlx.core as mx
-        import numpy as np
-
-        samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-        with contextlib.redirect_stdout(sys.stderr):
-            return self.stream.push(mx.array(samples))
-
-    def _flush_sync(self):
-        with contextlib.redirect_stdout(sys.stderr):
-            return self.stream.flush()
-
-    async def feed(self, pcm: bytes):
-        if len(pcm) % 2:
-            pcm = pcm[:-1]
-        if not pcm:
-            return
-        self.stream_ms += len(pcm) // BYTES_PER_MS
-        self.buf.extend(pcm)
-
-        # Track a trailing silence run to find utterance boundaries.
-        if _is_silent(pcm):
-            self.silence_ms += len(pcm) // BYTES_PER_MS
-        else:
-            self.silence_ms = 0
-
-        while len(self.buf) >= self.step_bytes:
-            chunk = bytes(self.buf[:self.step_bytes])
-            del self.buf[:self.step_bytes]
-            try:
-                event = await self._run(self._push_sync, chunk)
-            except Exception as exc:
-                log(f"[nemotron] {exc}")
-                continue
-            if event is not None and event.text:
-                self.have_text = True
-                await self._send({
-                    "type": "partial", "segmentId": self.segment_id,
-                    "startMs": self.segment_start_ms, "endMs": self.stream_ms,
-                    "text": event.text,
-                })
-
-        if self.have_text and self.silence_ms >= SILENCE_CUT_MS:
-            await self._cut()
-
-    async def _cut(self):
-        try:
-            event = await self._run(self._flush_sync)
-        except Exception as exc:
-            log(f"[nemotron] flush failed: {exc}")
-            return
-        text = (event.text if event is not None else "") or ""
-        if text:
-            await self._send({
-                "type": "final", "segmentId": self.segment_id,
-                "startMs": self.segment_start_ms, "endMs": self.stream_ms,
-                "text": text,
-            })
-        # flush() ends the session's state, so a fresh one is needed to continue.
-        self.stream = self.models.create_stream()
-        self.segment_id += 1
-        self.segment_start_ms = self.stream_ms
-        self.silence_ms = 0
-        self.have_text = False
-
-    async def finish(self):
-        while not self._inbox.empty():
-            await asyncio.sleep(0.02)
-        if self.buf:
-            tail = bytes(self.buf)
-            self.buf.clear()
-            try:
-                await self._run(self._push_sync, tail)
-            except Exception as exc:
-                log(f"[nemotron] tail push failed: {exc}")
-        if self.have_text:
-            await self._cut()
-        await self._send({"type": "eof"})
-
-    async def transcribe_file(self, path: str):
-        if not os.path.exists(path):
-            await self._send({"type": "error", "message": f"文件不存在: {path}"})
-            return
-        await self._send({"type": "progress", "completed": 0, "total": 1})
-        try:
-            result = await self._run(self._transcribe_file_sync, path)
-        except Exception as exc:
-            log(f"[nemotron file] {traceback.format_exc()}")
-            await self._send({"type": "error", "message": f"文件转写失败: {exc}"})
-            return
-        if result:
-            await self._send({
-                "type": "final", "segmentId": self.segment_id,
-                "startMs": 0, "endMs": 0, "text": result,
-            })
-            self.segment_id += 1
-        await self._send({"type": "progress", "completed": 1, "total": 1})
-        await self._send({"type": "eof"})
-
-    def _transcribe_file_sync(self, path: str) -> str:
-        with contextlib.redirect_stdout(sys.stderr):
-            out = self.models.asr.transcribe(path)
-        return getattr(out, "text", None) or (out if isinstance(out, str) else "")
-
-    async def close(self):
-        if self._worker is not None:
-            self._worker.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._worker
-            self._worker = None
 
 
 class Session:
@@ -497,9 +365,12 @@ class Session:
         self._stream_calls = 0
         self._stream_time = 0.0
         self._skipped_ms = 0
-        # Whether a "listening" hint was already sent for the current segment,
-        # so the English path emits it once per utterance rather than per chunk.
+        # Whether a "listening" hint was already sent for the current segment.
+        # Only used when no streaming model is available for this language.
         self._sent_listening = False
+        # Nemotron's per-utterance stream state. Recreated for each segment,
+        # which is free (measured 0ms).
+        self._nemotron_stream = None
 
         # Audio arrives faster than the streaming model can consume it when the
         # machine is loaded, so reading and processing are separate tasks joined
@@ -534,9 +405,51 @@ class Session:
 
     # ---- model passes ---------------------------------------------------
 
+    @property
+    def has_streaming(self) -> bool:
+        """Whether this language has any streaming model to produce partials."""
+        return self.models.streaming is not None or self.models.nemotron is not None
+
+    @property
+    def stream_step_bytes(self) -> int:
+        """Audio per streaming call: 600ms for paraformer, 160ms for Nemotron."""
+        if self.models.nemotron is not None:
+            return Models.NEMOTRON_CHUNK_MS * BYTES_PER_MS
+        return ASR_STEP_BYTES
+
+    @property
+    def stream_deltas_are_prespaced(self) -> bool:
+        """True when the streaming model's output already carries its own
+        whitespace, so partials must be concatenated verbatim.
+
+        Nemotron emits subword deltas ("mito", "chond", "ri") with a leading
+        space on real word boundaries. Re-deriving spacing would split words
+        into "mito chond ri". FunASR's paraformer instead returns whole-chunk
+        text with no leading space, which does need spacing inserted.
+        """
+        return self.models.nemotron is not None
+
     def _streaming_sync(self, pcm: bytes, is_final: bool) -> str:
+        """Returns text to append. Nemotron reports incremental deltas, while
+        paraformer returns each chunk's text, so both are append-only here."""
+        if self.models.nemotron is not None:
+            return self._nemotron_sync(pcm, is_final)
         with contextlib.redirect_stdout(sys.stderr):
             return self._streaming_inner(pcm, is_final)
+
+    def _nemotron_sync(self, pcm: bytes, is_final: bool) -> str:
+        import mlx.core as mx
+        import numpy as np
+
+        if self._nemotron_stream is None:
+            self._nemotron_stream = self.models.nemotron.create_stream(
+                chunk_ms=Models.NEMOTRON_CHUNK_MS)
+        with contextlib.redirect_stdout(sys.stderr):
+            if not pcm:
+                return ""
+            samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+            event = self._nemotron_stream.push(mx.array(samples))
+        return getattr(event, "text_delta", "") or "" if event is not None else ""
 
     def _streaming_inner(self, pcm: bytes, is_final: bool) -> str:
         res = self.models.streaming.generate(
@@ -645,11 +558,11 @@ class Session:
 
     async def _drain_streaming(self):
         """Run the streaming model on every complete 600 ms stride available."""
-        if self.models.streaming is None:
-            # No streaming model for this language (English). Drop the buffered
-            # audio -- utt_buf still holds it for the offline pass -- and tell
-            # the client speech is being captured so the UI can show a
-            # "recognizing" indicator rather than looking idle.
+        if not self.has_streaming:
+            # No streaming model for this language. Drop the buffered audio --
+            # utt_buf still holds it for the offline pass -- and tell the client
+            # speech is being captured so the UI can show a "recognizing"
+            # indicator rather than looking idle.
             if len(self.asr_buf) >= ASR_STEP_BYTES:
                 self.asr_buf.clear()
                 if self.speech_active and not self._sent_listening:
@@ -662,7 +575,9 @@ class Session:
                     })
             return
 
-        while len(self.asr_buf) >= ASR_STEP_BYTES:
+        step = self.stream_step_bytes
+        step_ms = step // BYTES_PER_MS
+        while len(self.asr_buf) >= step:
             # Behind real time: drop this stride's partial instead of running
             # the model on it. Most of the lag sits in the inbox rather than in
             # asr_buf, so the backlog must be measured across both -- otherwise
@@ -672,20 +587,21 @@ class Session:
             # transcript text.
             backlog_ms = (len(self.asr_buf) + self._queued_bytes) // BYTES_PER_MS
             if backlog_ms > MAX_STREAM_BACKLOG_MS:
-                del self.asr_buf[:ASR_STEP_BYTES]
-                self._skipped_ms += ASR_STEP_MS
+                del self.asr_buf[:step]
+                self._skipped_ms += step_ms
                 self.segment_had_skip = True
-                if self._skipped_ms % (ASR_STEP_MS * 5) == 0:
+                if self._skipped_ms % (step_ms * 5) == 0:
                     log(f"[streaming] behind by {backlog_ms}ms, "
                         f"{self._skipped_ms}ms of partials skipped so far")
-                # Skipping leaves a hole in the streaming model's cache, so its
-                # next output would splice across missing audio. Reset the cache
-                # and let the partial restart from here.
+                # Skipping leaves a hole in the model's state, so its next output
+                # would splice across missing audio. Reset it and let the partial
+                # restart from here.
                 self.asr_cache = {}
+                self._nemotron_stream = None
                 continue
 
-            chunk = bytes(self.asr_buf[:ASR_STEP_BYTES])
-            del self.asr_buf[:ASR_STEP_BYTES]
+            chunk = bytes(self.asr_buf[:step])
+            del self.asr_buf[:step]
             started = time.monotonic()
             try:
                 text = await self._run(self._streaming_sync, chunk, False)
@@ -698,12 +614,14 @@ class Session:
             self._stream_calls += 1
             self._stream_time += elapsed
             if self._stream_calls % 25 == 0:
+                mean = self._stream_time / self._stream_calls
                 log(f"[streaming] {self._stream_calls} chunks, "
-                    f"mean {self._stream_time / self._stream_calls * 1000:.0f}ms/"
-                    f"{ASR_STEP_MS}ms audio "
-                    f"(RTF {self._stream_time / self._stream_calls / (ASR_STEP_MS / 1000):.2f})")
+                    f"mean {mean * 1000:.0f}ms/{step_ms}ms audio "
+                    f"(RTF {mean / (step_ms / 1000):.2f})")
             if text:
-                self.partial_text = _join_partial(self.partial_text, text)
+                self.partial_text = (
+                    self.partial_text + text if self.stream_deltas_are_prespaced
+                    else _join_partial(self.partial_text, text))
                 await self._emit("partial", self.partial_text,
                                  self.segment_start_ms, self.stream_ms)
 
@@ -742,19 +660,24 @@ class Session:
         # model releases its tail, then emit the first-pass result immediately.
         tail = bytes(self.asr_buf)
         self.asr_buf.clear()
-        if self.models.streaming is not None:
+        if self.has_streaming:
             try:
                 text = await self._run(self._streaming_sync, tail, True)
                 if text:
-                    self.partial_text = _join_partial(self.partial_text, text)
+                    self.partial_text = (
+                        self.partial_text + text if self.stream_deltas_are_prespaced
+                        else _join_partial(self.partial_text, text))
             except Exception as exc:
                 log(f"[streaming] final flush failed: {exc}")
 
         # If partials were skipped inside this segment, the accumulated text has
         # a hole in it and must not be committed as the segment's final. Emit
         # nothing now and let the offline pass -- which sees the whole
-        # utterance -- produce the final instead.
-        first_pass = "" if self.segment_had_skip else self.partial_text
+        # utterance -- produce the final instead. With no offline pass there is
+        # no better source, so the holed text is still better than dropping the
+        # segment entirely.
+        drop_holed_text = self.segment_had_skip and self.models.offline is not None
+        first_pass = "" if drop_holed_text else self.partial_text
         segment_id = self.segment_id
         if first_pass:
             await self._emit("final", first_pass, start, end, segment_id=segment_id)
@@ -762,6 +685,9 @@ class Session:
         # Reset streaming state and advance to the next segment immediately, so
         # audio arriving during the offline pass is handled without waiting.
         self.asr_cache = {}
+        # A Nemotron stream accumulates one utterance; start a fresh one for the
+        # next segment so its text does not carry across the boundary.
+        self._nemotron_stream = None
         self.partial_text = ""
         self.utt_buf.clear()
         self.speech_active = False
@@ -769,6 +695,11 @@ class Session:
         self._sent_listening = False
         self.segment_id += 1
         self.segment_start_ms = end
+
+        if self.models.offline is None:
+            # Single-pass language (English via Nemotron): the streaming text is
+            # already the authoritative result, so there is nothing to revise.
+            return
 
         # The offline pass is slow (seconds for a long utterance). Run it in the
         # background so reading audio never blocks on it; the revision arrives
@@ -838,6 +769,8 @@ class Session:
 
     def _file_inner(self, path: str):
         """Transcribe a whole file with VAD segmentation and per-sentence times."""
+        if self.models.nemotron is not None:
+            return self._file_via_nemotron(path)
         kwargs = {
             "input": path,
             "disable_pbar": True,
@@ -850,6 +783,48 @@ class Session:
         if self.language:
             kwargs["language"] = self.language
         return self.models.file_model.generate(**kwargs)
+
+    def _file_via_nemotron(self, path: str):
+        """English file import: segment with FSMN-VAD, transcribe each segment
+        with Nemotron.
+
+        paraformer-en measured far worse than Nemotron on the same audio, so the
+        FunASR file pipeline is not used for English. Returned in FunASR's
+        sentence_info shape so the caller stays engine-agnostic.
+        """
+        import mlx.core as mx
+        import numpy as np
+
+        from funasr.utils.load_utils import load_audio_text_image_video
+
+        waveform = load_audio_text_image_video(path, fs=SAMPLE_RATE)
+        if hasattr(waveform, "detach"):
+            waveform = waveform.detach().cpu().numpy()
+        audio = np.asarray(waveform, dtype=np.float32).reshape(-1)
+
+        vad_res = self.models.vad.generate(input=path, disable_pbar=True)
+        segments = vad_res[0].get("value", []) if vad_res else []
+        if not segments:
+            segments = [[0, int(len(audio) / SAMPLE_RATE * 1000)]]
+
+        sentences = []
+        for beg_ms, end_ms in segments:
+            beg_ms = max(0, int(beg_ms))
+            end_ms = int(end_ms) if end_ms and end_ms > 0 else beg_ms
+            chunk = audio[int(beg_ms * SAMPLE_RATE / 1000):int(end_ms * SAMPLE_RATE / 1000)]
+            if chunk.size == 0:
+                continue
+            stream = self.models.nemotron.create_stream(
+                chunk_ms=Models.NEMOTRON_CHUNK_MS)
+            step = int(Models.NEMOTRON_CHUNK_MS * SAMPLE_RATE / 1000)
+            for i in range(0, chunk.size, step):
+                stream.push(mx.array(chunk[i:i + step]))
+            text = (getattr(stream.flush(), "text", "") or "").strip()
+            if text:
+                sentences.append({"text": text, "start": beg_ms, "end": end_ms})
+
+        return [{"text": " ".join(s["text"] for s in sentences),
+                 "sentence_info": sentences}]
 
     async def transcribe_file(self, path: str):
         if not os.path.exists(path):
@@ -884,12 +859,9 @@ class Session:
         await self._send({"type": "eof"})
 
 
-async def handle_connection(ws, models, executor: ThreadPoolExecutor,
+async def handle_connection(ws, models: Models, executor: ThreadPoolExecutor,
                             default_language: str | None):
-    if isinstance(models, NemotronModels):
-        session = NemotronSession(ws, models, executor, default_language)
-    else:
-        session = Session(ws, models, executor, default_language)
+    session = Session(ws, models, executor, default_language)
     await session._send({"type": "status", "stage": "ready"})
     await session.start()
     try:
@@ -940,8 +912,6 @@ async def handle_connection(ws, models, executor: ThreadPoolExecutor,
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--engine", default="funasr", choices=["funasr", "nemotron"])
-    parser.add_argument("--nemotron-model", default="mlx-community/parakeet-tdt-0.6b-v2",
-                        help="model id for the nemotron/mlx engine")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--device", default="auto",
                         choices=["auto", "cpu", "mps"],
@@ -977,11 +947,13 @@ async def main():
         print(f"STAGE {step}/{total} {key}", flush=True)
 
     language = (args.language or "zh").strip() or "zh"
+    # --engine nemotron is kept for the app's existing backend setting; it means
+    # "prefer the English streaming model", which the language switch already
+    # selects. Both engines now share one code path.
     if args.engine == "nemotron":
-        models = NemotronModels(args.nemotron_model)
-    else:
-        models = Models(device, offline_device=args.offline_device,
-                        language=language, on_stage=emit_stage)
+        language = "en"
+    models = Models(device, offline_device=args.offline_device,
+                    language=language, on_stage=emit_stage)
     try:
         await asyncio.get_running_loop().run_in_executor(None, models.load)
     except Exception:

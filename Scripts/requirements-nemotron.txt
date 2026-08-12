@@ -1,7 +1,11 @@
-# The MLX streaming engine. numpy and mlx are used directly by the sidecar to
-# convert PCM frames into model input, so pin them here rather than relying on
-# them arriving as transitive dependencies.
+# Both local backends now share one sidecar code path (the language setting
+# selects the models), so this must install the same set as requirements-funasr:
+# the offline/VAD/punctuation models are FunASR's even when English streams
+# through Nemotron.
+funasr
+torch
+torchaudio
+soundfile
+websockets
 nemotron-asr-mlx
 mlx
-numpy
-websockets

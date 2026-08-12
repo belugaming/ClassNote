@@ -75,3 +75,26 @@ class SilenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrespacedDeltaTests(unittest.TestCase):
+    """Nemotron emits subword deltas that already carry their own leading space.
+
+    Running them through _join_partial split words apart ("mito chond ri a"), so
+    the streaming path concatenates them verbatim instead. These cases document
+    why _join_partial must NOT be applied to that engine's output.
+    """
+
+    def test_join_partial_would_split_subwords(self):
+        # Nemotron's actual deltas for "mitochondria".
+        text = ""
+        for delta in ["The", " mito", "chond", "ri", "a"]:
+            text = _join_partial(text, delta)
+        self.assertEqual(text, "The mito chond ri a",
+                         "documents the wrong behavior _join_partial produces here")
+
+    def test_plain_concatenation_keeps_subwords_intact(self):
+        text = ""
+        for delta in ["The", " mito", "chond", "ri", "a", " is"]:
+            text += delta
+        self.assertEqual(text, "The mitochondria is")
