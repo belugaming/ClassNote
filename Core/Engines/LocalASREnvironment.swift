@@ -15,7 +15,9 @@ enum LocalASREnvironmentError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .pythonNotFound: return "未找到 python3。请先安装 Python 3。"
+        // nemotron-asr-mlx requires >= 3.10; macOS's built-in /usr/bin/python3
+        // is 3.9 and shows up as "No matching distribution" otherwise.
+        case .pythonNotFound: return "需要 Python 3.10 或更高版本。请先安装（推荐：brew install python）后重试。"
         case .pipInstallFailed(let msg): return "依赖安装失败: \(msg)"
         }
     }
@@ -48,10 +50,15 @@ struct LocalASREnvironment {
                         throw LocalASREnvironmentError.pythonNotFound
                     }
                     if !FileManager.default.fileExists(atPath: pythonBinURL.path) {
+                        try createVenv(systemPython, continuation)
+                    } else if !Self.pythonIsUsable(pythonBinURL.path) {
+                        // The venv was created with a too-old interpreter (e.g.
+                        // macOS 3.9) and can never satisfy nemotron-asr-mlx.
+                        // Rebuild it rather than failing pip forever.
                         continuation.yield(InstallProgress(stage: L10n.t("localASR.creatingVenv"),
                                                           fraction: nil))
-                        try FileManager.default.createDirectory(at: venvURL, withIntermediateDirectories: true)
-                        try Self.run(systemPython, ["-m", "venv", venvURL.path])
+                        try FileManager.default.removeItem(at: venvURL)
+                        try createVenv(systemPython, continuation)
                     }
                     continuation.yield(InstallProgress(stage: L10n.t("localASR.installDeps"),
                                                       fraction: nil))
@@ -80,9 +87,85 @@ struct LocalASREnvironment {
         }
     }
 
+    private func createVenv(_ systemPython: String,
+                            _ continuation: AsyncThrowingStream<InstallProgress, Error>.Continuation) throws {
+        continuation.yield(InstallProgress(stage: L10n.t("localASR.creatingVenv"), fraction: nil))
+        try FileManager.default.createDirectory(at: venvURL, withIntermediateDirectories: true)
+        try Self.run(systemPython, ["-m", "venv", venvURL.path])
+    }
+
+    /// Minimum interpreter version the dependency set supports: nemotron-asr-mlx
+    /// requires Python >= 3.10, funasr/torch are fine with 3.10 too.
+    private static let minimumPythonVersion = (major: 10, minor: 0)
+
+    /// Locates the newest usable Python 3.10+ interpreter. Searches way beyond
+    /// the obvious locations: macOS's built-in /usr/bin/python3 is 3.9 and must
+    /// be rejected even though it exists.
     private static func findSystemPython() -> String? {
-        for candidate in ["/opt/homebrew/bin/python3", "/usr/bin/python3", "/usr/local/bin/python3"] {
-            if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
+        var candidates: [String] = []
+        let versionedRoots = ["/opt/homebrew/bin", "/usr/local/bin"]
+        for root in versionedRoots {
+            candidates.append("\(root)/python3")
+            for minor in stride(from: 14, through: 10, by: -1) {
+                candidates.append("\(root)/python3.\(minor)")
+            }
+        }
+        for minor in stride(from: 14, through: 10, by: -1) {
+            candidates.append("/Library/Frameworks/Python.framework/Versions/3.\(minor)/bin/python3")
+        }
+        candidates.append("/Library/Frameworks/Python.framework/Versions/Current/bin/python3")
+        let home = NSHomeDirectory()
+        candidates += [
+            "\(home)/.pyenv/shims/python3",
+            "\(home)/.local/bin/python3",
+            "\(home)/miniconda3/bin/python3",
+            "\(home)/miniforge3/bin/python3",
+            "\(home)/mambaforge/bin/python3",
+            "\(home)/anaconda3/bin/python3",
+            "/usr/bin/python3",
+        ]
+
+        var best: (version: (major: Int, minor: Int), path: String)?
+        for path in candidates {
+            guard FileManager.default.isExecutableFile(atPath: path) else { continue }
+            guard let version = pythonVersion(of: path) else { continue }
+            guard version >= minimumPythonVersion else { continue }
+            if best == nil || version > best!.version {
+                best = (version, path)
+            }
+        }
+        return best?.path
+    }
+
+    /// True when the interpreter at `path` satisfies the dependency set.
+    private static func pythonIsUsable(_ path: String) -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: path),
+              let version = pythonVersion(of: path) else { return false }
+        return version >= minimumPythonVersion
+    }
+
+    /// Runs `<python> --version` and parses the major/minor pair, or nil if the
+    /// binary isn't runnable. Some builds print to stderr, so both pipes count.
+    private static func pythonVersion(of executable: String) -> (major: Int, minor: Int)? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = ["--version"]
+        let out = Pipe()
+        let err = Pipe()
+        process.standardOutput = out
+        process.standardError = err
+        do { try process.run() } catch { return nil }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        let outputs = [String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
+                       String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""]
+        for text in outputs {
+            let parts = text.split(separator: " ")
+            guard parts.count >= 2, parts[0].lowercased() == "python" else { continue }
+            let numbers = parts[1].split(separator: ".")
+            guard numbers.count >= 2,
+                  let major = Int(numbers[0]), let minor = Int(numbers[1]) else { continue }
+            return (major, minor)
         }
         return nil
     }
