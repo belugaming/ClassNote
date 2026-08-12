@@ -74,6 +74,18 @@ MAX_STREAM_BACKLOG_MS = 2400
 # Force-cut an utterance VAD never closes, so a long monologue still produces
 # finals instead of growing one unbounded buffer.
 MAX_UTTERANCE_MS = 20_000
+
+# Sentence-ending punctuation. VAD rarely reports an endpoint during continuous
+# speech, so without this a speaker who does not pause produces one wall of text
+# until the 20s force-cut. Cutting on punctuation instead keeps each committed
+# line to roughly one spoken sentence, which is what makes it readable.
+SENTENCE_END_CHARS = ".!?。！？…"
+# Don't cut on a period that is probably an abbreviation or decimal ("Dr.",
+# "3.5"), and don't emit a fragment so short it reads as noise.
+MIN_SENTENCE_CHARS = 12
+# Once a segment reaches this, cut at the next sentence end even mid-thought, so
+# a run-on speaker still gets broken into readable lines.
+SOFT_CUT_MS = 6_000
 # When no speech is active, keep only a short pre-roll so the offline pass sees
 # the onset of a word instead of starting mid-syllable.
 PREROLL_MS = 300
@@ -555,9 +567,50 @@ class Session:
 
         # Safety valve: VAD occasionally never reports an endpoint on
         # continuous speech. Cut anyway so the user keeps getting finals.
+        # Prefer cutting where the speaker actually finished a sentence. The
+        # streaming models emit punctuation, so this produces one line per
+        # sentence instead of a wall of text between VAD endpoints.
+        if self.speech_active and self._should_cut_on_sentence():
+            await self.close_segment()
+            return
+
         if self.speech_active and len(self.utt_buf) >= MAX_UTTERANCE_MS * BYTES_PER_MS:
             log("[vad] max utterance length reached, forcing a cut")
             await self.close_segment()
+
+    def _should_cut_on_sentence(self) -> bool:
+        """Whether the partial text ends on a sentence the user can read as one line.
+
+        When the streaming model produced punctuation (English via Nemotron),
+        cut on sentence-ending chars.  When no punctuation is available (Chinese
+        streaming, or rapid English without periods), fall back to a time-based
+        soft limit so the user gets readable lines well before the 20s force-cut.
+        """
+        text = self.partial_text.rstrip()
+
+        # --- time-based soft cut (always active when speech is held long enough)
+        held_ms = len(self.utt_buf) // BYTES_PER_MS
+        if held_ms >= SOFT_CUT_MS and text:
+            # Prefer cutting where the speaker made a natural pause — comma,
+            # semicolon, or clause-ending mark.  Failing that, just cut: a
+            # reader can handle an abrupt break better than a wall of text.
+            if text[-1] in ",;，；:；":
+                return True
+            # Past SOFT_CUT even without a pause marker — the buffer is too long.
+            log(f"[sentence] soft cut after {held_ms}ms (no punctuation)")
+            return True
+
+        if len(text) < MIN_SENTENCE_CHARS or text[-1] not in SENTENCE_END_CHARS:
+            return False
+        # "Dr." / "3.5" -- a period after a single letter or between digits is
+        # almost never a sentence end.
+        if text[-1] == "." and len(text) >= 2:
+            prev = text[-2]
+            if prev.isdigit():
+                return False
+            if len(text) >= 3 and text[-3] in " (" and prev.isalpha():
+                return False
+        return True
 
     async def _drain_streaming(self):
         """Run the streaming model on every complete 600 ms stride available."""
