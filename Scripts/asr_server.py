@@ -79,6 +79,49 @@ def log(*a):
     print(*a, file=sys.stderr, flush=True)
 
 
+def _join_partial(accumulated: str, addition: str) -> str:
+    """Append a streaming chunk's text, inserting a space only where needed.
+
+    The model emits each chunk independently and does not carry leading
+    whitespace across a chunk boundary, so naive concatenation fuses Latin words
+    ("the" + "cell" -> "thecell"). CJK must NOT get a space, so only insert one
+    when both sides of the seam are word characters in a non-CJK script.
+    """
+    if not accumulated:
+        return addition.lstrip()
+    if not addition:
+        return accumulated
+    left, right = accumulated[-1], addition[0]
+    if left.isspace() or right.isspace():
+        return accumulated + addition
+    if _is_cjk(left) or _is_cjk(right):
+        return accumulated + addition
+    # Don't push punctuation away from the word it attaches to.
+    if not right.isalnum():
+        return accumulated + addition
+    # A trailing hyphen or apostrophe binds to the next word ("multi-word",
+    # "it's"), so no space there either.
+    if left in "-'":
+        return accumulated + addition
+    if left.isalnum():
+        return accumulated + " " + addition
+    return accumulated + addition
+
+
+def _is_cjk(ch: str) -> bool:
+    """True for CJK ideographs and CJK punctuation, which never need spacing."""
+    o = ord(ch)
+    return (
+        0x3000 <= o <= 0x303F      # CJK punctuation
+        or 0x3400 <= o <= 0x4DBF   # ext A
+        or 0x4E00 <= o <= 0x9FFF   # unified ideographs
+        or 0xF900 <= o <= 0xFAFF   # compatibility ideographs
+        or 0xFF00 <= o <= 0xFFEF   # fullwidth forms
+        or 0x3040 <= o <= 0x30FF   # kana
+        or 0xAC00 <= o <= 0xD7AF   # hangul
+    )
+
+
 def _is_silent(pcm: bytes, threshold: float = 0.008) -> bool:
     """RMS silence check on Int16LE mono PCM, matching VADGate.rms in the app."""
     if len(pcm) < 2:
@@ -98,7 +141,8 @@ class Models:
     ModelScope), so this happens once at process start, before the READY line.
     """
 
-    def __init__(self, device: str, offline_device: str | None = None):
+    def __init__(self, device: str, offline_device: str | None = None,
+                 language: str = "zh", on_stage=None):
         # Measured on an M-series CPU vs MPS (600ms streaming chunks, 10s
         # offline utterance):
         #   streaming  cpu RTF 1.12  |  mps RTF 0.39
@@ -109,6 +153,15 @@ class Models:
         # from fighting over the same device.
         self.device = device
         self.offline_device = offline_device or device
+        # FunASR ships exactly one streaming model and it is Chinese-only, so
+        # English audio fed through it comes back as meaningless Chinese
+        # characters until the offline pass corrects them. For English we skip
+        # the streaming pass entirely and let the offline model own the text.
+        self.language = language
+        self.is_chinese = language.lower().startswith("zh")
+        # Called with (stage_key, human_text) as loading progresses, so the app
+        # can show real progress instead of appearing hung for ~30s.
+        self.on_stage = on_stage
         self.streaming = None
         self.offline = None
         self.vad = None
@@ -125,9 +178,10 @@ class Models:
         if self._file_model is None:
             from funasr import AutoModel
 
-            log("[models] loading file-import model (paraformer-zh + vad + punc)")
+            base = "paraformer-zh" if self.is_chinese else "paraformer-en"
+            log(f"[models] loading file-import model ({base} + vad + punc)")
             self._file_model = AutoModel(
-                model="paraformer-zh",
+                model=base,
                 vad_model="fsmn-vad",
                 vad_kwargs={"max_single_segment_time": 30000},
                 punc_model="ct-punc",
@@ -156,13 +210,32 @@ class Models:
                       disable_update=True)
         offline_common = dict(common, device=self.offline_device)
 
-        log(f"[models] loading paraformer-zh-streaming on {self.device}")
-        self.streaming = AutoModel(model="paraformer-zh-streaming", **common)
-        log("[models] loading fsmn-vad")
+        offline_model = "paraformer-zh" if self.is_chinese else "paraformer-en"
+        total = 3 + (1 if self.is_chinese else 0)
+        step = 0
+
+        def stage(key: str):
+            """Report a loading step. Only the key crosses the boundary; the app
+            localizes it, so the sidecar carries no UI strings."""
+            nonlocal step
+            step += 1
+            log(f"[models] ({step}/{total}) {key}")
+            if self.on_stage:
+                self.on_stage(key, step, total)
+
+        if self.is_chinese:
+            stage("streaming")
+            self.streaming = AutoModel(model="paraformer-zh-streaming", **common)
+        else:
+            # English: no streaming model exists, so partials come from nowhere
+            # and the UI shows a "recognizing" indicator instead.
+            self.streaming = None
+
+        stage("vad")
         self.vad = AutoModel(model="fsmn-vad", **common)
-        log(f"[models] loading paraformer-zh on {self.offline_device}")
-        self.offline = AutoModel(model="paraformer-zh", **offline_common)
-        log("[models] loading ct-punc")
+        stage("offline")
+        self.offline = AutoModel(model=offline_model, **offline_common)
+        stage("punc")
         try:
             self.punc = AutoModel(model="ct-punc", **offline_common)
         except Exception as exc:
@@ -173,14 +246,17 @@ class Models:
         # First inference on MPS pays for kernel compilation and lazy weight
         # transfer (measured ~700ms vs ~240ms steady state). Burn that cost on
         # silence now, before the user's first words.
+        if self.on_stage:
+            self.on_stage("warmup", total, total)
         log("[models] warming up")
         silence = b"\x00" * ASR_STEP_BYTES
         try:
-            self.streaming.generate(
-                input=silence, cache={}, is_final=True, chunk_size=ASR_CHUNK_SIZE,
-                encoder_chunk_look_back=ENCODER_LOOK_BACK,
-                decoder_chunk_look_back=DECODER_LOOK_BACK, disable_pbar=True,
-            )
+            if self.streaming is not None:
+                self.streaming.generate(
+                    input=silence, cache={}, is_final=True, chunk_size=ASR_CHUNK_SIZE,
+                    encoder_chunk_look_back=ENCODER_LOOK_BACK,
+                    decoder_chunk_look_back=DECODER_LOOK_BACK, disable_pbar=True,
+                )
             self.vad.generate(input=b"\x00" * VAD_STEP_BYTES, cache={},
                               is_final=True, chunk_size=VAD_STEP_MS, disable_pbar=True)
         except Exception as exc:
@@ -421,6 +497,9 @@ class Session:
         self._stream_calls = 0
         self._stream_time = 0.0
         self._skipped_ms = 0
+        # Whether a "listening" hint was already sent for the current segment,
+        # so the English path emits it once per utterance rather than per chunk.
+        self._sent_listening = False
 
         # Audio arrives faster than the streaming model can consume it when the
         # machine is loaded, so reading and processing are separate tasks joined
@@ -566,6 +645,23 @@ class Session:
 
     async def _drain_streaming(self):
         """Run the streaming model on every complete 600 ms stride available."""
+        if self.models.streaming is None:
+            # No streaming model for this language (English). Drop the buffered
+            # audio -- utt_buf still holds it for the offline pass -- and tell
+            # the client speech is being captured so the UI can show a
+            # "recognizing" indicator rather than looking idle.
+            if len(self.asr_buf) >= ASR_STEP_BYTES:
+                self.asr_buf.clear()
+                if self.speech_active and not self._sent_listening:
+                    self._sent_listening = True
+                    await self._send({
+                        "type": "listening",
+                        "segmentId": self.segment_id,
+                        "startMs": self.segment_start_ms,
+                        "endMs": self.stream_ms,
+                    })
+            return
+
         while len(self.asr_buf) >= ASR_STEP_BYTES:
             # Behind real time: drop this stride's partial instead of running
             # the model on it. Most of the lag sits in the inbox rather than in
@@ -607,7 +703,7 @@ class Session:
                     f"{ASR_STEP_MS}ms audio "
                     f"(RTF {self._stream_time / self._stream_calls / (ASR_STEP_MS / 1000):.2f})")
             if text:
-                self.partial_text += text
+                self.partial_text = _join_partial(self.partial_text, text)
                 await self._emit("partial", self.partial_text,
                                  self.segment_start_ms, self.stream_ms)
 
@@ -646,12 +742,13 @@ class Session:
         # model releases its tail, then emit the first-pass result immediately.
         tail = bytes(self.asr_buf)
         self.asr_buf.clear()
-        try:
-            text = await self._run(self._streaming_sync, tail, True)
-            if text:
-                self.partial_text += text
-        except Exception as exc:
-            log(f"[streaming] final flush failed: {exc}")
+        if self.models.streaming is not None:
+            try:
+                text = await self._run(self._streaming_sync, tail, True)
+                if text:
+                    self.partial_text = _join_partial(self.partial_text, text)
+            except Exception as exc:
+                log(f"[streaming] final flush failed: {exc}")
 
         # If partials were skipped inside this segment, the accumulated text has
         # a hole in it and must not be committed as the segment's final. Emit
@@ -669,6 +766,7 @@ class Session:
         self.utt_buf.clear()
         self.speech_active = False
         self.segment_had_skip = False
+        self._sent_listening = False
         self.segment_id += 1
         self.segment_start_ms = end
 
@@ -815,6 +913,15 @@ async def handle_connection(ws, models, executor: ThreadPoolExecutor,
                 lang = cmd.get("language")
                 # "auto" is the app's own sentinel; FunASR wants it omitted.
                 session.language = lang if lang and lang != "auto" else None
+                # The model set is chosen at process start from --language, so a
+                # mismatch here means the app should have started a new sidecar.
+                # Log it rather than silently transcribing with the wrong model.
+                if lang and lang != "auto" and isinstance(models, Models):
+                    wants_zh = lang.lower().startswith("zh")
+                    if wants_zh != models.is_chinese:
+                        log(f"[ws] config language {lang!r} does not match the "
+                            f"loaded model set (chinese={models.is_chinese}); "
+                            f"restart the sidecar to switch languages")
             elif kind == "eof":
                 await session.finish()
             elif kind == "file":
@@ -842,7 +949,8 @@ async def main():
     parser.add_argument("--offline-device", default="cpu",
                         choices=["cpu", "mps"],
                         help="device for the offline pass; cpu is faster here")
-    parser.add_argument("--language", default=None)
+    parser.add_argument("--language", default="zh",
+                        help="source language; picks the model set (zh vs en)")
     parser.add_argument("--threads", type=int, default=4)
     args = parser.parse_args()
 
@@ -862,10 +970,18 @@ async def main():
             device = "cpu"
     log(f"[device] streaming={device} offline={args.offline_device}")
 
+    # Model loading happens before the WebSocket exists, so progress has to go
+    # out on stdout -- the same channel Swift already reads for READY. Without
+    # this the app looks frozen for ~30s on the first run of a session.
+    def emit_stage(key: str, step: int, total: int):
+        print(f"STAGE {step}/{total} {key}", flush=True)
+
+    language = (args.language or "zh").strip() or "zh"
     if args.engine == "nemotron":
         models = NemotronModels(args.nemotron_model)
     else:
-        models = Models(device, offline_device=args.offline_device)
+        models = Models(device, offline_device=args.offline_device,
+                        language=language, on_stage=emit_stage)
     try:
         await asyncio.get_running_loop().run_in_executor(None, models.load)
     except Exception:

@@ -48,19 +48,30 @@ struct LocalASREnvironment {
                         throw LocalASREnvironmentError.pythonNotFound
                     }
                     if !FileManager.default.fileExists(atPath: pythonBinURL.path) {
-                        continuation.yield(InstallProgress(stage: "创建虚拟环境…", fraction: nil))
+                        continuation.yield(InstallProgress(stage: L10n.t("localASR.creatingVenv"),
+                                                          fraction: nil))
                         try FileManager.default.createDirectory(at: venvURL, withIntermediateDirectories: true)
                         try Self.run(systemPython, ["-m", "venv", venvURL.path])
                     }
-                    continuation.yield(InstallProgress(stage: "安装依赖包…", fraction: nil))
+                    continuation.yield(InstallProgress(stage: L10n.t("localASR.installDeps"),
+                                                      fraction: nil))
                     let reqPath = Bundle.main.path(forResource: "requirements-\(engine.rawValue)", ofType: "txt")
                     guard let reqPath else {
                         throw LocalASREnvironmentError.pipInstallFailed("缺少 requirements 文件")
                     }
-                    try Self.run(pythonBinURL.path, ["-m", "pip", "install", "-r", reqPath])
+                    // Installing torch pulls hundreds of MB and can run for
+                    // minutes. Stream pip's progress out so the UI can show
+                    // which package is downloading instead of freezing.
+                    try Self.run(pythonBinURL.path,
+                                 ["-m", "pip", "install", "--progress-bar", "off", "-r", reqPath]) { line in
+                        guard let package = Self.installingPackageName(from: line) else { return }
+                        continuation.yield(InstallProgress(
+                            stage: "\(L10n.t("localASR.installDeps")) \(package)", fraction: nil))
+                    }
                     let marker = venvURL.appendingPathComponent(".installed-\(engine.rawValue)")
                     FileManager.default.createFile(atPath: marker.path, contents: nil)
-                    continuation.yield(InstallProgress(stage: "完成", fraction: 1.0))
+                    continuation.yield(InstallProgress(stage: L10n.t("localASR.installDone"),
+                                                      fraction: 1.0))
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -76,21 +87,86 @@ struct LocalASREnvironment {
         return nil
     }
 
-    private static func run(_ launchPath: String, _ arguments: [String]) throws {
+    /// Runs a subprocess to completion, forwarding each stdout line to
+    /// `onOutput`. Both pipes must be drained while the process runs: pip writes
+    /// enough output to fill a pipe buffer and deadlock if nothing reads it.
+    private static func run(_ launchPath: String,
+                            _ arguments: [String],
+                            onOutput: ((String) -> Void)? = nil) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: launchPath)
         process.arguments = arguments
-        let pipe = Pipe()
-        process.standardError = pipe
+        let errPipe = Pipe()
+        let outPipe = Pipe()
+        process.standardError = errPipe
+        process.standardOutput = outPipe
+
+        let collected = OutputCollector()
+        outPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            for line in text.split(separator: "\n") where !line.isEmpty {
+                onOutput?(String(line))
+            }
+        }
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            collected.append(text)
+        }
+
         try process.run()
         process.waitUntilExit()
+        outPipe.fileHandleForReading.readabilityHandler = nil
+        errPipe.fileHandleForReading.readabilityHandler = nil
+
         if process.terminationStatus != 0 {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let msg = String(data: data, encoding: .utf8) ?? "unknown error"
-            throw LocalASREnvironmentError.pipInstallFailed(msg)
+            let msg = collected.text.isEmpty ? "unknown error" : collected.text
+            throw LocalASREnvironmentError.pipInstallFailed(String(msg.suffix(2000)))
         }
     }
 
     /// Absolute path to the Python executable inside the venv, for LocalASRProcessManager.
     var pythonExecutablePath: String { pythonBinURL.path }
+
+    /// Extracts a package name from pip's "Collecting torch (from ...)" or
+    /// "Downloading torch-2.x..." lines, for display during a long install.
+    static func installingPackageName(from line: String) -> String? {
+        for prefix in ["Collecting ", "Downloading ", "Installing collected packages: "] {
+            guard line.hasPrefix(prefix) else { continue }
+            let rest = line.dropFirst(prefix.count)
+            if prefix.hasPrefix("Installing collected") {
+                return String(rest.prefix(60))
+            }
+            // Stop at the first version specifier or whitespace.
+            var name = String(rest.prefix { !" <>=!~(".contains($0) })
+            // "Downloading" reports a wheel filename ("torch-2.13.0-cp314.whl"),
+            // so trim it back to the distribution name.
+            if let dash = name.firstIndex(of: "-"),
+               name.hasSuffix(".whl") || name.hasSuffix(".tar.gz") {
+                name = String(name[name.startIndex..<dash])
+            }
+            return name.isEmpty ? nil : name
+        }
+        return nil
+    }
+}
+
+/// Thread-safe accumulator for a subprocess's stderr, which arrives on the
+/// pipe's callback queue while the caller blocks in `waitUntilExit`.
+private final class OutputCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffer = ""
+
+    func append(_ text: String) {
+        lock.lock()
+        buffer += text
+        lock.unlock()
+    }
+
+    var text: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return buffer
+    }
 }

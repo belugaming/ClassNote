@@ -26,11 +26,27 @@ actor LocalASRProcessManager {
     }
 
     /// Spawns the sidecar and waits for its READY marker on stdout, returns the ws URL.
-    func start() async throws -> URL {
+    ///
+    /// `onProgress` reports setup stages (dependency install, then per-model
+    /// loading) so the caller can show progress: a first run installs packages
+    /// and downloads ~1 GB of models, and loading them costs ~30s even when
+    /// cached, which otherwise looks like the app has hung.
+    func start(language: String? = nil,
+               onProgress: (@Sendable (String) -> Void)? = nil) async throws -> URL {
         NSLog("[LocalASRProcessManager] start() called for engine=\(engine.rawValue)")
-        guard LocalASREnvironment.shared.isReady(engine: engine) else {
-            NSLog("[LocalASRProcessManager] environment not ready")
-            throw LocalASREnvironmentError.pipInstallFailed("环境未安装")
+
+        // Install on demand rather than failing. Nothing else in the app ever
+        // called install(), so a fresh machine could only ever get an error.
+        if !LocalASREnvironment.shared.isReady(engine: engine) {
+            NSLog("[LocalASRProcessManager] environment not ready, installing")
+            onProgress?(L10n.t("localASR.installing"))
+            for try await progress in LocalASREnvironment.shared.install(engine: engine) {
+                NSLog("[LocalASRProcessManager] install: \(progress.stage)")
+                onProgress?(progress.stage)
+            }
+            guard LocalASREnvironment.shared.isReady(engine: engine) else {
+                throw LocalASREnvironmentError.pipInstallFailed(L10n.t("localASR.installIncomplete"))
+            }
         }
         guard let scriptPath = Bundle.main.path(forResource: "asr_server", ofType: "py") else {
             NSLog("[LocalASRProcessManager] asr_server.py not found in bundle")
@@ -45,8 +61,15 @@ actor LocalASRProcessManager {
         // --device auto lets the sidecar pick MPS for the streaming pass when
         // the GPU is available; it keeps the offline pass on CPU, which measured
         // faster for short utterances.
-        process.arguments = [scriptPath, "--engine", engine.rawValue, "--port", "\(port)",
-                             "--device", "auto"]
+        var arguments = [scriptPath, "--engine", engine.rawValue, "--port", "\(port)",
+                         "--device", "auto"]
+        // The sidecar picks its model set from this at startup (FunASR's only
+        // streaming model is Chinese-only), so it must be passed on the command
+        // line, not just in the later `config` frame.
+        if let language, !language.isEmpty, language != "auto" {
+            arguments += ["--language", language]
+        }
+        process.arguments = arguments
         // Force unbuffered stdout so the READY marker arrives as soon as the
         // models finish loading rather than sitting in Python's block buffer.
         // Model weights stay in the default ~/.cache/modelscope location, which
@@ -82,7 +105,8 @@ actor LocalASRProcessManager {
         }
 
         NSLog("[LocalASRProcessManager] waiting for READY marker...")
-        try await Self.waitForReady(pipe: stdout, expectedPort: port)
+        try await Self.waitForReady(pipe: stdout, expectedPort: port,
+                                    process: process, onProgress: onProgress)
         let url = URL(string: "ws://127.0.0.1:\(port)")!
         NSLog("[LocalASRProcessManager] sidecar ready at \(url)")
         return url
@@ -133,16 +157,40 @@ actor LocalASRProcessManager {
         return UInt16(bigEndian: actualAddr.sin_port)
     }
 
-    private static func waitForReady(pipe: Pipe, expectedPort: UInt16) async throws {
+    private static func waitForReady(pipe: Pipe,
+                                     expectedPort: UInt16,
+                                     process: Process,
+                                     onProgress: (@Sendable (String) -> Void)?) async throws {
         let handle = pipe.fileHandleForReading
-        let deadline = Date().addingTimeInterval(20)
+        // Loading four models can exceed 60s on a cold filesystem cache, and the
+        // very first run also downloads them. Progress lines let us distinguish
+        // "still working" from "hung", so the deadline only has to cover a stall.
+        var deadline = Date().addingTimeInterval(180)
         var pending = Data()
+
         while Date() < deadline {
+            if !process.isRunning, pending.isEmpty {
+                throw LocalASRProcessError.launchFailed(L10n.t("localASR.exitedEarly"))
+            }
             let chunk = handle.availableData
             if !chunk.isEmpty {
                 pending.append(chunk)
-                if let text = String(data: pending, encoding: .utf8),
-                   text.contains("READY port=\(expectedPort)") {
+                guard let text = String(data: pending, encoding: .utf8) else { continue }
+
+                // "STAGE 2/4 vad 加载断句模型…" — report it and extend the
+                // deadline, since visible progress means it is not stuck.
+                for line in text.split(separator: "\n") where line.hasPrefix("STAGE ") {
+                    let parts = line.split(separator: " ").map(String.init)
+                    guard parts.count >= 3 else { continue }
+                    let counter = parts[1]   // "2/4"
+                    let key = parts[2]       // "vad"
+                    onProgress?("\(L10n.t("localASR.stage.\(key)")) (\(counter))")
+                    deadline = Date().addingTimeInterval(180)
+                }
+                if text.contains("FATAL") {
+                    throw LocalASRProcessError.launchFailed(L10n.t("localASR.modelLoadFailed"))
+                }
+                if text.contains("READY port=\(expectedPort)") {
                     return
                 }
             }

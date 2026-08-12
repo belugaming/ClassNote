@@ -152,14 +152,30 @@ private struct InnerOverlayView: View {
     @ViewBuilder
     private var content: some View {
         let segs = Array(orchestrator.transcript.segments.suffix(recentCount.rawValue))
-        if segs.isEmpty {
+        // The in-progress line, so the overlay fills in as you speak instead of
+        // only jumping a whole sentence at a time once one is committed.
+        let draft = orchestrator.transcript.draftText
+        let draftTranslated = orchestrator.transcript.draftTranslated
+        if segs.isEmpty && draft.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 Text(L10n.t("overlay.empty.title"))
                     .foregroundStyle(.white.opacity(0.85))
                     .font(.system(size: textSize.primaryPointSize, weight: .medium))
-                Text(L10n.t("overlay.empty.tip"))
-                    .foregroundStyle(.white.opacity(0.5))
-                    .font(.caption)
+                // A local engine takes ~30s to load its models (longer on a
+                // first run that installs them), so say what it is doing rather
+                // than leaving the overlay looking dead.
+                if !appState.localEngineStatus.isEmpty {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text(appState.localEngineStatus)
+                            .foregroundStyle(.white.opacity(0.7))
+                            .font(.caption)
+                    }
+                } else {
+                    Text(L10n.t("overlay.empty.tip"))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .font(.caption)
+                }
             }
             .padding(.vertical, 8)
         } else {
@@ -174,6 +190,15 @@ private struct InnerOverlayView: View {
                             .id(seg.rowId)
                             .transition(.opacity)
                         }
+                        if !draft.isEmpty {
+                            OverlayDraftCaptionView(text: draft,
+                                                    translated: draftTranslated,
+                                                    displayMode: displayMode,
+                                                    textSize: textSize,
+                                                    lineLimit: lineLimit)
+                                .id("overlay-draft")
+                                .transition(.opacity)
+                        }
                         Color.clear.frame(height: 1).id("overlay-bottom")
                     }
                 }
@@ -181,6 +206,11 @@ private struct InnerOverlayView: View {
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo("overlay-bottom", anchor: .bottom)
                     }
+                }
+                // Keep the newest text visible while the draft grows, not just
+                // when a sentence is committed.
+                .onChange(of: draft) { _, _ in
+                    proxy.scrollTo("overlay-bottom", anchor: .bottom)
                 }
             }
         }
@@ -228,6 +258,43 @@ private struct InnerOverlayView: View {
             get: { recentCount },
             set: { recentCountRaw = $0.rawValue }
         )
+    }
+}
+
+/// The sentence currently being spoken. Rendered dimmer than committed
+/// segments, since a local engine's second pass may still rewrite it.
+private struct OverlayDraftCaptionView: View {
+    let text: String
+    let translated: String
+    let displayMode: OverlayCaptionDisplayMode
+    let textSize: OverlayCaptionTextSize
+    let lineLimit: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if displayMode != .translation {
+                draftText(text,
+                          pointSize: displayMode == .original
+                              ? textSize.primaryPointSize : textSize.secondaryPointSize,
+                          color: .white.opacity(0.55))
+            }
+            if displayMode != .original, !translated.isEmpty {
+                draftText(translated,
+                          pointSize: textSize.primaryPointSize,
+                          color: Theme.translation.opacity(0.6))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func draftText(_ value: String, pointSize: CGFloat, color: Color) -> some View {
+        Text(value.overlayCaptionTail(maxLines: lineLimit))
+            .font(.system(size: pointSize, weight: .medium))
+            .foregroundStyle(color)
+            .lineSpacing(3)
+            .lineLimit(lineLimit)
+            .truncationMode(.head)
+            .shadow(color: .black.opacity(0.55), radius: 2, x: 0, y: 1)
     }
 }
 

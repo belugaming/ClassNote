@@ -292,6 +292,13 @@ final class SessionOrchestrator: ObservableObject {
             let ttStream = stt.transcribe(audio: stream, language: config.sourceLanguage.isEmpty ? nil : config.sourceLanguage)
             do {
                 for try await event in ttStream {
+                    // The engine produced something, so any local-engine setup
+                    // progress is done and its status line can go away.
+                    await MainActor.run {
+                        if !AppState.shared.localEngineStatus.isEmpty {
+                            AppState.shared.localEngineStatus = ""
+                        }
+                    }
                     // 2-pass correction from a local streaming engine (FunASR):
                     // replaces the text of a segment we already committed as
                     // final. Must be checked before the isFinal guard below,

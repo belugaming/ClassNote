@@ -98,6 +98,17 @@ enum EngineError: Error, LocalizedError {
 }
 
 struct EngineFactory {
+    /// Routes local-engine setup stages into the app's status line. The sidecar
+    /// spends ~30s loading models (much longer on a first run that installs
+    /// dependencies and downloads them), so without this the app looks hung.
+    private static func localEngineProgressSink() -> @Sendable (String) -> Void {
+        { stage in
+            Task { @MainActor in
+                AppState.shared.localEngineStatus = stage
+            }
+        }
+    }
+
     @MainActor
     static func makeSTT(config: ApiConfig, backend: SttBackend) -> STTProvider {
         switch backend {
@@ -108,9 +119,13 @@ struct EngineFactory {
         case .appleSpeech:
             return AppleSpeechSTT()
         case .funasr:
-            return LocalWebSocketSTT(engine: .funasr)
+            return LocalWebSocketSTT(engine: .funasr,
+                                     language: config.sourceLanguage,
+                                     onProgress: Self.localEngineProgressSink())
         case .nemotronStreaming:
-            return LocalWebSocketSTT(engine: .nemotron)
+            return LocalWebSocketSTT(engine: .nemotron,
+                                     language: config.sourceLanguage,
+                                     onProgress: Self.localEngineProgressSink())
         }
     }
 

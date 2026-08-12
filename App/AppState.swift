@@ -17,6 +17,11 @@ final class AppState: ObservableObject {
     /// `.default` before that, so saving during this window would overwrite the
     /// user's real settings with defaults.
     private(set) var hasLoadedConfig = false
+
+    /// Setup progress of a local ASR sidecar (dependency install, then model
+    /// loading). Non-empty while the engine is still coming up; views show it so
+    /// the ~30s startup doesn't look like a hang. Cleared once audio flows.
+    @Published var localEngineStatus: String = ""
     @Published var lastError: String? = nil
     @Published var translationEnabled: Bool = true
     @Published var sttBackend: SttBackend = .openAICompatible

@@ -8,10 +8,16 @@ import Foundation
 final class LocalWebSocketSTT: STTProvider, Sendable {
     private let engine: LocalASREngineKind
     private let language: String?
+    /// Reports setup stages (dependency install, model loading) so the UI can
+    /// show why the first start takes a while instead of appearing frozen.
+    private let onProgress: (@Sendable (String) -> Void)?
 
-    init(engine: LocalASREngineKind, language: String? = nil) {
+    init(engine: LocalASREngineKind,
+         language: String? = nil,
+         onProgress: (@Sendable (String) -> Void)? = nil) {
         self.engine = engine
         self.language = language
+        self.onProgress = onProgress
     }
 
     func transcribe(audio: AsyncStream<AudioChunk>,
@@ -23,7 +29,8 @@ final class LocalWebSocketSTT: STTProvider, Sendable {
             let task = Task {
                 do {
                     let connection = try await LocalASRConnection.connect(manager: manager,
-                                                                         language: lang)
+                                                                         language: lang,
+                                                                         onProgress: self.onProgress)
                     // Pump audio and receive events concurrently: the sidecar
                     // emits partials while we are still sending, so these must
                     // not be serialized.
@@ -66,7 +73,8 @@ final class LocalWebSocketSTT: STTProvider, Sendable {
             let task = Task {
                 do {
                     let connection = try await LocalASRConnection.connect(manager: manager,
-                                                                         language: lang)
+                                                                         language: lang,
+                                                                         onProgress: self.onProgress)
                     try await connection.sendFile(path: url.path)
                     try await connection.receiveLoop { event in
                         switch event.type {

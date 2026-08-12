@@ -2,9 +2,10 @@ import SwiftUI
 
 struct LiveSubtitleView: View {
     @ObservedObject var buffer: TranscriptBuffer
+    @ObservedObject private var appState = AppState.shared
 
     var body: some View {
-        if buffer.segments.isEmpty {
+        if buffer.segments.isEmpty && buffer.draftText.isEmpty {
             VStack(spacing: 14) {
                 Spacer()
                 Image(systemName: "waveform")
@@ -13,9 +14,21 @@ struct LiveSubtitleView: View {
                 Text(L10n.t("live.empty.title"))
                     .font(.title3.weight(.medium))
                     .foregroundStyle(.secondary)
-                Text(L10n.t("live.empty.subtitle"))
-                    .font(.callout)
-                    .foregroundStyle(.tertiary)
+                // Local engines spend ~30s loading models before any audio is
+                // processed (and much longer on a first run that installs them),
+                // so report the stage rather than looking unresponsive.
+                if !appState.localEngineStatus.isEmpty {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text(appState.localEngineStatus)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text(L10n.t("live.empty.subtitle"))
+                        .font(.callout)
+                        .foregroundStyle(.tertiary)
+                }
                 Spacer()
             }
             .frame(maxWidth: .infinity)

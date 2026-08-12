@@ -578,3 +578,33 @@ final class ApiConfigBackupTests: XCTestCase {
         XCTAssertEqual(loaded.apiKey, "sk-restore-me")
     }
 }
+
+/// The local-engine installer streams pip's output so a multi-minute torch
+/// download shows progress instead of looking frozen.
+final class PipProgressParsingTests: XCTestCase {
+    func testExtractsPlainPackageName() {
+        XCTAssertEqual(LocalASREnvironment.installingPackageName(from: "Collecting funasr"), "funasr")
+    }
+
+    func testStripsVersionSpecifier() {
+        XCTAssertEqual(LocalASREnvironment.installingPackageName(from: "Collecting torch>=1.13"), "torch")
+    }
+
+    func testTrimsWheelFilenameToDistributionName() {
+        XCTAssertEqual(
+            LocalASREnvironment.installingPackageName(from: "Downloading torch-2.13.0-cp314.whl (67 MB)"),
+            "torch")
+    }
+
+    func testReportsTheInstallingList() {
+        XCTAssertEqual(
+            LocalASREnvironment.installingPackageName(from: "Installing collected packages: funasr, torch"),
+            "funasr, torch")
+    }
+
+    func testIgnoresUninterestingLines() {
+        XCTAssertNil(LocalASREnvironment.installingPackageName(from: "  Using cached x.whl"))
+        XCTAssertNil(LocalASREnvironment.installingPackageName(from: "Requirement already satisfied: numpy"))
+        XCTAssertNil(LocalASREnvironment.installingPackageName(from: ""))
+    }
+}

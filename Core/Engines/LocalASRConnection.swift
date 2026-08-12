@@ -18,9 +18,17 @@ struct SidecarEvent: Decodable {
     /// control frames (status/progress/eof/error), which callers handle
     /// themselves.
     func asTranscriptEvent() -> TranscriptEvent? {
-        guard let text, !text.isEmpty else { return nil }
         let start = startMs ?? 0
         let end = endMs ?? start
+        // The sidecar sends `listening` when it is capturing speech but cannot
+        // produce partials — FunASR has no English streaming model, so English
+        // would otherwise show nothing at all until the sentence completes.
+        if type == "listening" {
+            return TranscriptEvent(startMs: start, endMs: end,
+                                   text: L10n.t("localASR.recognizing"), isFinal: false,
+                                   engineSegmentId: segmentId, isRevision: false)
+        }
+        guard let text, !text.isEmpty else { return nil }
         switch type {
         case "final":
             return TranscriptEvent(startMs: start, endMs: end, text: text, isFinal: true,
@@ -59,8 +67,9 @@ actor LocalASRConnection {
     }
 
     static func connect(manager: LocalASRProcessManager,
-                        language: String?) async throws -> LocalASRConnection {
-        let url = try await manager.start()
+                        language: String?,
+                        onProgress: (@Sendable (String) -> Void)? = nil) async throws -> LocalASRConnection {
+        let url = try await manager.start(language: language, onProgress: onProgress)
         let configuration = URLSessionConfiguration.default
         // The sidecar can be quiet for a while during a long silence; don't let
         // URLSession time the socket out underneath us.
