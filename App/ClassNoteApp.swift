@@ -1,8 +1,31 @@
 import SwiftUI
 
+#if os(macOS)
+/// Shuts the warm ASR sidecar down on quit.
+///
+/// The sidecar now outlives individual recordings so its models stay in memory,
+/// which means nothing else would reap it: an orphan would keep several GB
+/// resident and hold its port.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillTerminate(_ notification: Notification) {
+        // Terminating is synchronous, so block briefly rather than leaving the
+        // teardown to a task that never gets scheduled.
+        let done = DispatchSemaphore(value: 0)
+        Task {
+            await LocalASRWarmPool.shared.retire()
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + 5)
+    }
+}
+#endif
+
 @main
 struct ClassNoteApp: App {
     @StateObject private var appState = AppState.shared
+    #if os(macOS)
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    #endif
 
     init() {
         AppBootstrap.run()

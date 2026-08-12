@@ -95,6 +95,12 @@ actor LocalASRProcessManager {
             NSLog("[asr_server stderr] \(text)")
         }
 
+        // The sidecar now outlives a single recording, so a crash or force-quit
+        // of the app would otherwise leave it running with several GB of models
+        // resident. Have it watch for its parent disappearing and exit, which
+        // covers the paths applicationWillTerminate cannot.
+        process.arguments = arguments + ["--exit-with-parent", "\(getpid())"]
+
         NSLog("[LocalASRProcessManager] launching process...")
         do {
             try process.run()
@@ -110,6 +116,12 @@ actor LocalASRProcessManager {
         let url = URL(string: "ws://127.0.0.1:\(port)")!
         NSLog("[LocalASRProcessManager] sidecar ready at \(url)")
         return url
+    }
+
+    /// Whether the sidecar is still alive. The warm pool checks this before
+    /// handing out its URL, since the process can die between recordings.
+    var isRunning: Bool {
+        process?.isRunning ?? false
     }
 
     func shutdown() async {

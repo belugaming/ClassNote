@@ -22,6 +22,14 @@ final class AppState: ObservableObject {
     /// loading). Non-empty while the engine is still coming up; views show it so
     /// the ~30s startup doesn't look like a hang. Cleared once audio flows.
     @Published var localEngineStatus: String = ""
+
+    /// True while the selected local engine's models are being loaded into
+    /// memory, so Settings can show progress and the record button can explain
+    /// the wait instead of appearing to do nothing.
+    @Published var isLocalEnginePreloading = false
+    /// True once a sidecar for the current engine + language is warm and a
+    /// recording can start immediately.
+    @Published var isLocalEngineReady = false
     @Published var lastError: String? = nil
     @Published var translationEnabled: Bool = true
     @Published var sttBackend: SttBackend = .openAICompatible
@@ -48,6 +56,9 @@ final class AppState: ObservableObject {
         await cleanupOrphanedRecordings()
         refreshMicrophoneDevices()
         await refreshInterruptedSessions()
+        // Warm the local engine last, and without awaiting it: loading models
+        // takes ~30s and must not delay the rest of startup.
+        Task { await preloadLocalEngine() }
     }
 
     func loadConfig() async {
@@ -61,6 +72,48 @@ final class AppState: ObservableObject {
             self.translationBackend = TranslationBackend(rawValue: cfg.translationBackend) ?? .openAICompatible
         }
         hasLoadedConfig = true
+    }
+
+    /// Loads the selected local engine's models into memory ahead of recording.
+    ///
+    /// Only warms an already-installed environment: a first-run install
+    /// downloads ~1 GB, which should be an explicit choice in Settings rather
+    /// than something the app starts on its own at launch.
+    func preloadLocalEngine() async {
+        guard sttBackend.isLocalSidecar else {
+            isLocalEngineReady = false
+            return
+        }
+        let engine: LocalASREngineKind = sttBackend == .funasr ? .funasr : .nemotron
+        guard LocalASREnvironment.shared.isReady(engine: engine) else {
+            isLocalEngineReady = false
+            return
+        }
+        let language = apiConfig.sourceLanguage
+        if await LocalASRWarmPool.shared.isReady(engine: engine, language: language) {
+            isLocalEngineReady = true
+            return
+        }
+
+        isLocalEnginePreloading = true
+        isLocalEngineReady = false
+        await LocalASRWarmPool.shared.preload(engine: engine, language: language) { stage in
+            Task { @MainActor in AppState.shared.localEngineStatus = stage }
+        }
+        isLocalEnginePreloading = false
+        isLocalEngineReady = await LocalASRWarmPool.shared.isReady(engine: engine,
+                                                                  language: language)
+        if isLocalEngineReady {
+            localEngineStatus = ""
+        }
+    }
+
+    /// Retires a warm sidecar whose models no longer match the settings, then
+    /// warms the new configuration.
+    func reloadLocalEngine() async {
+        await LocalASRWarmPool.shared.retire()
+        isLocalEngineReady = false
+        await preloadLocalEngine()
     }
 
     func cleanupOrphanedRecordings() async {

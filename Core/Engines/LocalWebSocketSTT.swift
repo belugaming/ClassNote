@@ -25,10 +25,9 @@ final class LocalWebSocketSTT: STTProvider, Sendable {
         let engine = self.engine
         let lang = language ?? self.language
         return AsyncThrowingStream { continuation in
-            let manager = LocalASRProcessManager(engine: engine)
             let task = Task {
                 do {
-                    let connection = try await LocalASRConnection.connect(manager: manager,
+                    let connection = try await LocalASRConnection.connect(engine: engine,
                                                                          language: lang,
                                                                          onProgress: self.onProgress)
                     // Pump audio and receive events concurrently: the sidecar
@@ -58,8 +57,9 @@ final class LocalWebSocketSTT: STTProvider, Sendable {
                 }
             }
             continuation.onTermination = { _ in
+                // Only the connection ends here. The sidecar stays warm so the
+                // next recording does not pay for model loading again.
                 task.cancel()
-                Task { await manager.shutdown() }
             }
         }
     }
@@ -69,13 +69,19 @@ final class LocalWebSocketSTT: STTProvider, Sendable {
         let engine = self.engine
         let lang = language ?? self.language
         return AsyncThrowingStream { continuation in
-            let manager = LocalASRProcessManager(engine: engine)
             let task = Task {
                 do {
-                    let connection = try await LocalASRConnection.connect(manager: manager,
+                    let connection = try await LocalASRConnection.connect(engine: engine,
                                                                          language: lang,
                                                                          onProgress: self.onProgress)
-                    try await connection.sendFile(path: url.path)
+                    // Release the sidecar hold even if sending the request fails,
+                    // otherwise its idle timer would never resume.
+                    do {
+                        try await connection.sendFile(path: url.path)
+                    } catch {
+                        await LocalASRWarmPool.shared.endUse()
+                        throw error
+                    }
                     try await connection.receiveLoop { event in
                         switch event.type {
                         case "progress":
@@ -96,7 +102,7 @@ final class LocalWebSocketSTT: STTProvider, Sendable {
             }
             continuation.onTermination = { _ in
                 task.cancel()
-                Task { await manager.shutdown() }
+                // The sidecar is shared and stays warm; only this connection ends.
             }
         }
     }

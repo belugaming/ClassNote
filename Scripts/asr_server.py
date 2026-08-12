@@ -46,6 +46,7 @@ import os
 import sys
 import time
 import traceback
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 import websockets
@@ -363,7 +364,9 @@ class Session:
         self._offline_lock = asyncio.Lock()
 
         self._stream_calls = 0
-        self._stream_time = 0.0
+        # Bounded window of recent inference times, so this cannot grow over a
+        # multi-hour session and still reflects current speed.
+        self._recent_times: deque[float] = deque(maxlen=100)
         self._skipped_ms = 0
         # Whether a "listening" hint was already sent for the current segment.
         # Only used when no streaming model is available for this language.
@@ -612,11 +615,14 @@ class Session:
             # fall behind; surfacing it makes that diagnosable from the app log.
             elapsed = time.monotonic() - started
             self._stream_calls += 1
-            self._stream_time += elapsed
+            # Report a moving average, not a cumulative one: over a long lecture
+            # a lifetime mean stops responding to change, so a real slowdown
+            # would stay hidden behind hours of healthy samples.
+            self._recent_times.append(elapsed)
             if self._stream_calls % 25 == 0:
-                mean = self._stream_time / self._stream_calls
+                mean = sum(self._recent_times) / len(self._recent_times)
                 log(f"[streaming] {self._stream_calls} chunks, "
-                    f"mean {mean * 1000:.0f}ms/{step_ms}ms audio "
+                    f"recent mean {mean * 1000:.0f}ms/{step_ms}ms audio "
                     f"(RTF {mean / (step_ms / 1000):.2f})")
             if text:
                 self.partial_text = (
@@ -859,6 +865,24 @@ class Session:
         await self._send({"type": "eof"})
 
 
+async def _exit_when_parent_gone(parent_pid: int, interval: float = 5.0):
+    """Exit once the app that spawned us is gone.
+
+    The sidecar is kept warm across recordings, so nothing else would reap it if
+    the app crashed or was force-quit -- it would sit there holding several GB of
+    models and its port. signal 0 only checks whether the pid is still alive.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            os.kill(parent_pid, 0)
+        except (ProcessLookupError, PermissionError):
+            log(f"[parent] pid {parent_pid} is gone, exiting")
+            os._exit(0)
+        except Exception:
+            return
+
+
 async def handle_connection(ws, models: Models, executor: ThreadPoolExecutor,
                             default_language: str | None):
     session = Session(ws, models, executor, default_language)
@@ -922,6 +946,8 @@ async def main():
     parser.add_argument("--language", default="zh",
                         help="source language; picks the model set (zh vs en)")
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--exit-with-parent", type=int, default=0,
+                        help="pid to watch; exit when it goes away")
     args = parser.parse_args()
 
     # Keep BLAS from oversubscribing cores; FunASR on CPU is already threaded
@@ -967,6 +993,9 @@ async def main():
 
     async def handler(ws):
         await handle_connection(ws, models, executor, args.language)
+
+    if args.exit_with_parent:
+        asyncio.create_task(_exit_when_parent_gone(args.exit_with_parent))
 
     server = await websockets.serve(
         handler, "127.0.0.1", args.port,

@@ -1,6 +1,6 @@
 import Foundation
 
-enum LocalASREngineKind: String {
+enum LocalASREngineKind: String, Equatable {
     case funasr, nemotron
 }
 

@@ -66,10 +66,17 @@ actor LocalASRConnection {
         self.session = session
     }
 
-    static func connect(manager: LocalASRProcessManager,
+    /// Connects to the shared warm sidecar, starting it if it is not up yet.
+    /// The process outlives this connection so the next recording reuses it.
+    static func connect(engine: LocalASREngineKind,
                         language: String?,
                         onProgress: (@Sendable (String) -> Void)? = nil) async throws -> LocalASRConnection {
-        let url = try await manager.start(language: language, onProgress: onProgress)
+        let url = try await LocalASRWarmPool.shared.url(engine: engine,
+                                                       language: language,
+                                                       onProgress: onProgress)
+        // Hold the sidecar for the life of this connection so its idle timer
+        // cannot free the models mid-recording.
+        await LocalASRWarmPool.shared.beginUse()
         let configuration = URLSessionConfiguration.default
         // The sidecar can be quiet for a while during a long silence; don't let
         // URLSession time the socket out underneath us.
@@ -114,6 +121,9 @@ actor LocalASRConnection {
         defer {
             socket.cancel(with: .goingAway, reason: nil)
             session.invalidateAndCancel()
+            // Release the warm sidecar so its idle countdown can resume. Paired
+            // with the beginUse() in connect().
+            Task { await LocalASRWarmPool.shared.endUse() }
         }
         while true {
             try Task.checkCancellation()

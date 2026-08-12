@@ -21,7 +21,7 @@ macOS-native lecture recorder for US-bound study-abroad students. Records classr
 - Xcode 26+ / Swift 5.10+
 - `xcodegen` (`brew install xcodegen`)
 - An OpenAI-compatible API endpoint (OpenAI official, DeepSeek, Groq, SiliconFlow, Ollama, LM Studio, etc.) — not needed if you only use the local FunASR engine
-- For the local FunASR engine: `python3` on the system (Homebrew or the Xcode command-line tools). The first time you select the engine, the app creates its own venv under `~/Library/Application Support/ClassNote/pyenv/` and downloads ~1 GB of models to `~/.cache/modelscope/`. This takes several minutes and reports progress in the transcript pane; later launches only pay ~30s of model loading.
+- For the local ASR engines: `python3` on the system (Homebrew or the Xcode command-line tools). Install them from **Settings → Engines**, which creates a venv under `~/Library/Application Support/ClassNote/pyenv/` and downloads the models (~1 GB for Chinese, ~600 MB more for English) with progress. The engine then loads into memory automatically at launch and stays warm, so recordings start instantly instead of paying ~30s of model loading each time.
 
 ## Build
 

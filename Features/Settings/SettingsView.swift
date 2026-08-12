@@ -259,7 +259,9 @@ struct ApiSettingsView: View {
                                 footer: L10n.t("settings.api.langHelp")) {
                     HStack(spacing: 8) {
                         LabeledRow(label: L10n.t("settings.api.source")) {
-                            TextField("en", text: sourceLanguageBinding).textFieldStyle(.roundedBorder)
+                            TextField("en", text: sourceLanguageBinding)
+                                .textFieldStyle(.roundedBorder)
+                                .onSubmit { reloadEngineForLanguageChange() }
                         }
                         LabeledRow(label: L10n.t("settings.api.target")) {
                             TextField("zh-Hans", text: targetLanguageBinding).textFieldStyle(.roundedBorder)
@@ -415,6 +417,16 @@ struct ApiSettingsView: View {
                 })
     }
 
+    /// Reloads a warm local sidecar after the source language settles.
+    ///
+    /// The language decides which models are loaded, so a change invalidates a
+    /// warm process. This runs on commit rather than per keystroke, since typing
+    /// "en" would otherwise restart the sidecar on the intermediate "e".
+    private func reloadEngineForLanguageChange() {
+        guard appState.sttBackend.isLocalSidecar else { return }
+        Task { await appState.reloadLocalEngine() }
+    }
+
     private var targetLanguageBinding: Binding<String> {
         Binding(get: { appState.apiConfig.targetLanguage },
                 set: { newValue in
@@ -470,6 +482,9 @@ struct EngineSettingsView: View {
                         Label(L10n.t("settings.engines.nemotronNote"), systemImage: "arrow.down.circle")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                    }
+                    if appState.sttBackend.isLocalSidecar {
+                        LocalEngineStatusRow()
                     }
                 }
 
@@ -539,7 +554,12 @@ struct EngineSettingsView: View {
             guard appState.apiConfig.sttBackend != backend.rawValue else { return }
             var config = appState.apiConfig
             config.sttBackend = backend.rawValue
-            Task { await appState.saveConfig(config) }
+            Task {
+                await appState.saveConfig(config)
+                // A warm sidecar holds models for the previous engine, so swap
+                // it for one matching the new selection.
+                await appState.reloadLocalEngine()
+            }
         }
         .onChange(of: appState.translationBackend) { _, backend in
             guard appState.apiConfig.translationBackend != backend.rawValue else { return }
@@ -633,5 +653,119 @@ struct AboutView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.surfaceElevated.opacity(0.35))
+    }
+}
+
+/// Install/download and warm-up control for a local ASR sidecar.
+///
+/// Both are surfaced here on purpose: a first run downloads ~1 GB of models and
+/// loading them costs ~30s, and neither should first happen when the user hits
+/// record. Once warm, the sidecar stays in memory so recording starts instantly.
+private struct LocalEngineStatusRow: View {
+    @ObservedObject private var appState = AppState.shared
+    @State private var installStage: String = ""
+    @State private var installError: String = ""
+    @State private var isInstalling = false
+
+    private var engine: LocalASREngineKind {
+        appState.sttBackend == .funasr ? .funasr : .nemotron
+    }
+
+    private var isInstalled: Bool {
+        LocalASREnvironment.shared.isReady(engine: engine)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            statusLine
+            if !installError.isEmpty {
+                Text(installError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
+            actionButton
+        }
+        .padding(.top, 4)
+        // Re-check when the picker or language changes, since each language
+        // loads a different model set.
+        .onChange(of: appState.sttBackend) { _, _ in installError = "" }
+    }
+}
+
+extension LocalEngineStatusRow {
+    @ViewBuilder
+    private var statusLine: some View {
+        if isInstalling {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text(installStage.isEmpty ? L10n.t("localASR.installing") : installStage)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        } else if !isInstalled {
+            Label(L10n.t("settings.engines.notInstalled"), systemImage: "arrow.down.circle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        } else if appState.isLocalEnginePreloading {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text(appState.localEngineStatus.isEmpty
+                     ? L10n.t("settings.engines.loading") : appState.localEngineStatus)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        } else if appState.isLocalEngineReady {
+            Label(L10n.t("settings.engines.ready"), systemImage: "checkmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.green)
+        } else {
+            Label(L10n.t("settings.engines.installedNotLoaded"), systemImage: "circle.dashed")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var actionButton: some View {
+        HStack(spacing: 10) {
+            if !isInstalled {
+                Button(L10n.t("settings.engines.installNow")) { install() }
+                    .disabled(isInstalling)
+            } else if !appState.isLocalEngineReady {
+                Button(L10n.t("settings.engines.loadNow")) {
+                    Task { await appState.preloadLocalEngine() }
+                }
+                .disabled(appState.isLocalEnginePreloading)
+            } else {
+                Button(L10n.t("settings.engines.unload")) {
+                    Task {
+                        await LocalASRWarmPool.shared.retire()
+                        appState.isLocalEngineReady = false
+                    }
+                }
+            }
+        }
+    }
+
+    /// Installs the venv and its dependencies, then downloads the models by
+    /// warming the sidecar once -- the same path recording uses, so a success
+    /// here means recording will work.
+    private func install() {
+        isInstalling = true
+        installError = ""
+        let engine = self.engine
+        Task {
+            do {
+                for try await progress in LocalASREnvironment.shared.install(engine: engine) {
+                    installStage = progress.stage
+                }
+                isInstalling = false
+                await appState.preloadLocalEngine()
+            } catch {
+                isInstalling = false
+                installError = error.localizedDescription
+            }
+        }
     }
 }

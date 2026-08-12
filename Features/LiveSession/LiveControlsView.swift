@@ -56,6 +56,20 @@ struct LiveControlsView: View {
                     Label(L10n.t("live.start"), systemImage: "record.circle")
                 }
                 .prominentAccentButton()
+
+                // Recording still works while models load -- audio is buffered
+                // and transcribed once they are ready -- but say so, otherwise
+                // the first ~30s looks like nothing is happening.
+                if appState.isLocalEnginePreloading {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text(appState.localEngineStatus.isEmpty
+                             ? L10n.t("settings.engines.loading")
+                             : appState.localEngineStatus)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
             }
         }
     }

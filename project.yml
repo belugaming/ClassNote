@@ -11,8 +11,8 @@ settings:
   base:
     SWIFT_VERSION: "5.10"
     ENABLE_USER_SCRIPT_SANDBOXING: NO
-    MARKETING_VERSION: "0.7.0"
-    CURRENT_PROJECT_VERSION: "9"
+    MARKETING_VERSION: "0.8.0"
+    CURRENT_PROJECT_VERSION: "10"
     DEAD_CODE_STRIPPING: YES
 
 packages:
@@ -50,7 +50,7 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: ClassNote
-        CFBundleShortVersionString: "0.7.0"
+        CFBundleShortVersionString: "0.8.0"
         CFBundleIconName: AppIcon
         CFBundleLocalizations:
           - en
@@ -119,7 +119,7 @@ targets:
       path: App/Info-iOS.plist
       properties:
         CFBundleDisplayName: ClassNote
-        CFBundleShortVersionString: "0.7.0"
+        CFBundleShortVersionString: "0.8.0"
         CFBundleIconName: AppIcon
         CFBundleLocalizations:
           - en
