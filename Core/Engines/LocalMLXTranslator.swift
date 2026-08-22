@@ -39,6 +39,29 @@ actor LocalMLXTranslatorProcess {
 
     var isRunning: Bool { process?.isRunning ?? false }
 
+    /// Repo id kept in sync with `translate_server.py`'s DEFAULT_MODEL.
+    static let modelRepo = "mlx-community/Hy-MT2-1.8B-4bit"
+
+    /// Whether the weights are already in the Hugging Face cache, so Settings can
+    /// offer a download instead of silently stalling on first use while ~1 GB
+    /// comes down. `huggingface_hub` maps `a/b` onto `models--a--b`.
+    static var isModelDownloaded: Bool {
+        let dir = "models--" + modelRepo.replacingOccurrences(of: "/", with: "--")
+        let url = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".cache/huggingface/hub/\(dir)/snapshots", isDirectory: true)
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: url.path) else {
+            return false
+        }
+        // A snapshot dir exists only once a revision has been fully materialized.
+        return !entries.isEmpty
+    }
+
+    /// Starts the sidecar purely to download and load the model, so the user can
+    /// do it deliberately from Settings rather than on their first sentence.
+    func prewarm(onProgress: @escaping @Sendable (String) -> Void) async throws {
+        try await ensureStarted(onProgress: onProgress)
+    }
+
     /// Starts the sidecar if it isn't already up. Concurrent callers share one
     /// start attempt rather than racing to spawn several processes.
     func ensureStarted(onProgress: (@Sendable (String) -> Void)? = nil) async throws {

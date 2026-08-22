@@ -608,3 +608,31 @@ final class PipProgressParsingTests: XCTestCase {
         XCTAssertNil(LocalASREnvironment.installingPackageName(from: ""))
     }
 }
+
+/// The gate that decides whether a system interpreter can run the sidecar.
+///
+/// Regression cover for a constant written as `(major: 10, minor: 0)` — "Python
+/// 10.0" — which made every Python 3 interpreter fail the comparison, so the
+/// local engine could not be installed on any machine.
+final class PythonVersionGateTests: XCTestCase {
+    func test_accepts_the_minimum_supported_version() {
+        XCTAssertTrue(LocalASREnvironment.isVersionSupported((major: 3, minor: 10)))
+    }
+
+    func test_accepts_newer_python_3() {
+        XCTAssertTrue(LocalASREnvironment.isVersionSupported((major: 3, minor: 12)))
+        XCTAssertTrue(LocalASREnvironment.isVersionSupported((major: 3, minor: 14)))
+    }
+
+    func test_rejects_the_system_python_that_ships_with_macos() {
+        // /usr/bin/python3 is 3.9 and cannot install mlx-audio.
+        XCTAssertFalse(LocalASREnvironment.isVersionSupported((major: 3, minor: 9)))
+        XCTAssertFalse(LocalASREnvironment.isVersionSupported((major: 2, minor: 7)))
+    }
+
+    func test_minimum_is_a_python_3_version() {
+        // Guards the shape of the constant itself, not just the comparison.
+        XCTAssertEqual(LocalASREnvironment.minimumPythonVersion.major, 3)
+        XCTAssertEqual(LocalASREnvironment.minimumPythonVersion.minor, 10)
+    }
+}
