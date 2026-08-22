@@ -465,7 +465,7 @@ struct EngineSettingsView: View {
             VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
                 SettingsSection(title: L10n.t("settings.engines.stt")) {
                     Picker(L10n.t("settings.engines.sttPicker"), selection: $appState.sttBackend) {
-                        ForEach(SttBackend.allCases) { backend in
+                        ForEach(SttBackend.selectableCases) { backend in
                             Text(backend.displayName).tag(backend)
                         }
                     }
@@ -508,10 +508,18 @@ struct EngineSettingsView: View {
                             }
                         }
                         .pickerStyle(.segmented)
-                        if appState.translationBackend == .appleTranslation {
+                        switch appState.translationBackend {
+                        case .appleTranslation:
                             Label(L10n.t("settings.engines.appleTranslationNote"), systemImage: "info.circle")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                        case .localMLX:
+                            Label(L10n.t("settings.engines.translationBackend.mlxNote"), systemImage: "info.circle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        case .openAICompatible:
+                            EmptyView()
                         }
                     }
                 }

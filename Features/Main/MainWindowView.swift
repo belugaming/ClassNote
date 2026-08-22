@@ -92,11 +92,9 @@ struct MainWindowView: View {
                 // the seven fixed mode entries this toolbar used to duplicate
                 // from the menu bar.
                 Menu {
-                    RecordingOptionsView(source: sourceBinding,
-                                         intent: intentBinding,
-                                         translationEnabled: $appState.translationEnabled)
-                        .padding(8)
-                        .frame(width: 240)
+                    RecordingOptionsMenuContent(source: sourceBinding,
+                                                intent: intentBinding,
+                                                translationEnabled: $appState.translationEnabled)
                 } label: {
                     Label(appState.isRecording ? L10n.t("record.stop") : L10n.t("record.start"),
                           systemImage: appState.isRecording ? "stop.circle.fill" : "record.circle")

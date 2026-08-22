@@ -12,6 +12,8 @@
 # It also requires Python >= 3.10, which LocalASREnvironment already enforces.
 mlx
 mlx-audio @ git+https://github.com/Blaizzy/mlx-audio.git
+# Drives translate_server.py (Hy-MT2); shares this venv with the ASR sidecar.
+mlx-lm
 numpy
 soundfile
 websockets
