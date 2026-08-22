@@ -2,6 +2,8 @@
 # Both engine rawValues now install the same all-MLX sidecar dependencies.
 mlx
 mlx-audio @ git+https://github.com/Blaizzy/mlx-audio.git
+# Drives translate_server.py (Hy-MT2); shares this venv with the ASR sidecar.
+mlx-lm
 numpy
 soundfile
 websockets

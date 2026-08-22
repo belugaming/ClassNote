@@ -13,9 +13,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let done = DispatchSemaphore(value: 0)
         Task {
             await LocalASRWarmPool.shared.retire()
+            // The translation sidecar is warm too, and holds its own weights.
+            await LocalMLXTranslatorProcess.shared.shutdown()
             done.signal()
         }
-        _ = done.wait(timeout: .now() + 5)
+        _ = done.wait(timeout: .now() + 8)
     }
 }
 #endif

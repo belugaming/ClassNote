@@ -465,7 +465,7 @@ struct EngineSettingsView: View {
             VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
                 SettingsSection(title: L10n.t("settings.engines.stt")) {
                     Picker(L10n.t("settings.engines.sttPicker"), selection: $appState.sttBackend) {
-                        ForEach(SttBackend.allCases) { backend in
+                        ForEach(SttBackend.selectableCases) { backend in
                             Text(backend.displayName).tag(backend)
                         }
                     }
@@ -508,10 +508,25 @@ struct EngineSettingsView: View {
                             }
                         }
                         .pickerStyle(.segmented)
-                        if appState.translationBackend == .appleTranslation {
+                        switch appState.translationBackend {
+                        case .appleTranslation:
                             Label(L10n.t("settings.engines.appleTranslationNote"), systemImage: "info.circle")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                        case .localMLX:
+                            Label(L10n.t("settings.engines.translationBackend.mlxNote"), systemImage: "info.circle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Label(L10n.t("settings.translation.modelList"), systemImage: "shippingbox")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            #if os(macOS)
+                            LocalTranslationStatusRow()
+                            #endif
+                        case .openAICompatible:
+                            EmptyView()
                         }
                     }
                 }
@@ -720,9 +735,16 @@ extension LocalEngineStatusRow {
             .font(.caption)
             .foregroundStyle(.secondary)
         } else if !isInstalled {
-            Label(L10n.t("settings.engines.notInstalled"), systemImage: "arrow.down.circle")
-                .font(.caption)
-                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 4) {
+                Label(L10n.t("settings.engines.notInstalled"), systemImage: "arrow.down.circle")
+                    .foregroundStyle(.orange)
+                // Name the weights rather than only their total size: "about
+                // 2 GB" says nothing about what is being fetched or from where.
+                Label(L10n.t("settings.engines.modelList"), systemImage: "shippingbox")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.caption)
         } else if appState.isLocalEnginePreloading {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
@@ -785,3 +807,67 @@ extension LocalEngineStatusRow {
         }
     }
 }
+
+#if os(macOS)
+/// Download / status control for the local translation model.
+///
+/// The ASR engine already had one of these; translation shipped without it, so
+/// the ~1 GB download only happened implicitly on the first translated sentence
+/// — which looked like the app had hung.
+struct LocalTranslationStatusRow: View {
+    @State private var isPreparing = false
+    @State private var stage = ""
+    @State private var errorText = ""
+    @State private var isReady = LocalMLXTranslatorProcess.isModelDownloaded
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if isPreparing {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(stage.isEmpty ? L10n.t("settings.translation.downloading") : stage)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            } else if isReady {
+                Label(L10n.t("settings.translation.ready"), systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            } else {
+                Label(L10n.t("settings.translation.notInstalled"), systemImage: "arrow.down.circle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            if !errorText.isEmpty {
+                Text(errorText)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !isReady {
+                Button(L10n.t("settings.translation.install")) { prepare() }
+                    .disabled(isPreparing)
+            }
+        }
+    }
+
+    private func prepare() {
+        isPreparing = true
+        errorText = ""
+        Task {
+            do {
+                try await LocalMLXTranslatorProcess.shared.prewarm { text in
+                    Task { @MainActor in stage = text }
+                }
+                isReady = true
+            } catch {
+                errorText = error.localizedDescription
+            }
+            isPreparing = false
+        }
+    }
+}
+#endif

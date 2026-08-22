@@ -139,6 +139,14 @@ struct EngineFactory {
                 return AppleTranslationEngine()
             }
             return OpenAICompatibleTranslator(config: config)
+        #if os(macOS)
+        case .localMLX:
+            return LocalMLXTranslator()
+        #else
+        case .localMLX:
+            // The sidecar is a Python process, so there is nothing to run on iOS.
+            return OpenAICompatibleTranslator(config: config)
+        #endif
         }
     }
 

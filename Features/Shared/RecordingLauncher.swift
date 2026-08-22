@@ -125,3 +125,36 @@ struct RecordingOptionsView: View {
         }
     }
 }
+
+/// The same three choices, rendered for a `Menu`.
+///
+/// `RecordingOptionsView` cannot be reused inside a menu: AppKit renders menu
+/// content itself, so a `.segmented` picker collapses into a bare row of icons
+/// and `.labelsHidden()` strips the title that would otherwise become the
+/// section header — which is exactly what a menu needs. Inline pickers are the
+/// native idiom here: each renders as a titled group of checkmarked items.
+struct RecordingOptionsMenuContent: View {
+    @Binding var source: AudioSourceKind
+    @Binding var intent: RecordingIntent
+    @Binding var translationEnabled: Bool
+
+    var body: some View {
+        Picker(L10n.t("record.source"), selection: $source) {
+            ForEach(AudioSourceKind.liveCases) { kind in
+                Label(kind.shortTitle, systemImage: kind.icon).tag(kind)
+            }
+        }
+        .pickerStyle(.inline)
+
+        Picker(L10n.t("record.intent"), selection: $intent) {
+            ForEach(RecordingIntent.allCases) { option in
+                Label(option.title, systemImage: option.icon).tag(option)
+            }
+        }
+        .pickerStyle(.inline)
+
+        Divider()
+
+        Toggle(L10n.t("record.translation"), isOn: $translationEnabled)
+    }
+}

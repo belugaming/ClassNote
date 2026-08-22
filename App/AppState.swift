@@ -68,7 +68,12 @@ final class AppState: ObservableObject {
             // while hasLoadedConfig is still false keeps those handlers from
             // saving a half-applied state.
             self.apiConfig = cfg
-            self.sttBackend = SttBackend(rawValue: cfg.sttBackend) ?? .openAICompatible
+            var backend = SttBackend(rawValue: cfg.sttBackend) ?? .openAICompatible
+            // Fold the retired second local entry onto the canonical one, so a
+            // setting saved before the two engines merged doesn't leave the
+            // picker showing a value it no longer offers.
+            if backend == .nemotronStreaming { backend = .funasr }
+            self.sttBackend = backend
             self.translationBackend = TranslationBackend(rawValue: cfg.translationBackend) ?? .openAICompatible
         }
         hasLoadedConfig = true
@@ -498,9 +503,18 @@ enum SttBackend: String, CaseIterable, Identifiable {
         case .openAICompatible: return "OpenAI Compatible (Cloud)"
         case .whisperKitLocal: return "WhisperKit (Local, macOS Apple Silicon)"
         case .appleSpeech: return L10n.t("settings.engines.sttBackend.apple")
-        case .funasr: return "Local MLX (2-Pass, Apple Silicon)"
-        case .nemotronStreaming: return "Local MLX (2-Pass, legacy entry)"
+        case .funasr, .nemotronStreaming: return "Local MLX (2-Pass, Apple Silicon)"
         }
+    }
+
+    /// What the settings picker offers.
+    ///
+    /// `.nemotronStreaming` still exists so a stored setting from an earlier
+    /// build decodes, but both cases now drive the same sidecar, so listing both
+    /// just showed the user two identical "Local MLX" rows. It is decoded, never
+    /// offered — `AppState.loadConfig` folds it into `.funasr`.
+    static var selectableCases: [SttBackend] {
+        allCases.filter { $0 != .nemotronStreaming }
     }
 
     /// True for backends backed by a local Python WebSocket sidecar process
@@ -516,11 +530,17 @@ enum SttBackend: String, CaseIterable, Identifiable {
 enum TranslationBackend: String, CaseIterable, Identifiable {
     case openAICompatible = "openai"
     case appleTranslation = "apple"
+    case localMLX = "mlx"
     var id: String { rawValue }
     var displayName: String {
         switch self {
         case .openAICompatible: return L10n.t("settings.engines.translationBackend.openai")
         case .appleTranslation: return L10n.t("settings.engines.translationBackend.apple")
+        case .localMLX: return L10n.t("settings.engines.translationBackend.mlx")
         }
     }
+
+    /// True for backends backed by the local Python sidecar, which may need a
+    /// first-run install before it can be used.
+    var isLocalSidecar: Bool { self == .localMLX }
 }

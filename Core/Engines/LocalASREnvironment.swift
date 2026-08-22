@@ -15,10 +15,12 @@ enum LocalASREnvironmentError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        // nemotron-asr-mlx requires >= 3.10; macOS's built-in /usr/bin/python3
-        // is 3.9 and shows up as "No matching distribution" otherwise.
-        case .pythonNotFound: return "需要 Python 3.10 或更高版本。请先安装（推荐：brew install python）后重试。"
-        case .pipInstallFailed(let msg): return "依赖安装失败: \(msg)"
+        // No longer reachable from install(): PythonProvisioner downloads a
+        // runtime when the machine has none, so the user is never asked to go
+        // install Python themselves. Kept as a distinct case for the paths that
+        // only probe for an interpreter.
+        case .pythonNotFound: return L10n.t("localASR.python.notFound")
+        case .pipInstallFailed(let msg): return "\(L10n.t("localASR.installFailed")): \(msg)"
         }
     }
 }
@@ -46,8 +48,17 @@ struct LocalASREnvironment {
         AsyncThrowingStream { continuation in
             Task {
                 do {
-                    guard let systemPython = Self.findSystemPython() else {
-                        throw LocalASREnvironmentError.pythonNotFound
+                    // Prefer whatever the machine already has; only download a
+                    // runtime when there is nothing usable. Telling the user to
+                    // go install Python themselves is not an option for a
+                    // distributed build.
+                    let systemPython: String
+                    if let found = Self.findSystemPython() {
+                        systemPython = found
+                    } else {
+                        systemPython = try await PythonProvisioner.shared.provision { stage, fraction in
+                            continuation.yield(InstallProgress(stage: stage, fraction: fraction))
+                        }
                     }
                     if !FileManager.default.fileExists(atPath: pythonBinURL.path) {
                         try createVenv(systemPython, continuation)
@@ -94,9 +105,21 @@ struct LocalASREnvironment {
         try Self.run(systemPython, ["-m", "venv", venvURL.path])
     }
 
-    /// Minimum interpreter version the dependency set supports: nemotron-asr-mlx
-    /// requires Python >= 3.10, funasr/torch are fine with 3.10 too.
-    private static let minimumPythonVersion = (major: 10, minor: 0)
+    /// Minimum interpreter version the dependency set supports: `mlx-audio`
+    /// requires Python >= 3.10.
+    ///
+    /// This read `(major: 10, minor: 0)` — i.e. "Python 10.0" — while
+    /// `pythonVersion(of:)` returns `(3, 14)` for Python 3.14. Tuple comparison
+    /// made `(3, anything) >= (10, 0)` false, so *every* Python 3 interpreter was
+    /// rejected and the local engine could not be installed on any machine. See
+    /// `PythonVersionGateTests`.
+    static let minimumPythonVersion = (major: 3, minor: 10)
+
+    /// Whether an interpreter reporting `version` can run the dependency set.
+    /// Split out so the gate is testable without a real interpreter on disk.
+    static func isVersionSupported(_ version: (major: Int, minor: Int)) -> Bool {
+        version >= minimumPythonVersion
+    }
 
     /// Locates the newest usable Python 3.10+ interpreter. Searches way beyond
     /// the obvious locations: macOS's built-in /usr/bin/python3 is 3.9 and must
@@ -129,7 +152,7 @@ struct LocalASREnvironment {
         for path in candidates {
             guard FileManager.default.isExecutableFile(atPath: path) else { continue }
             guard let version = pythonVersion(of: path) else { continue }
-            guard version >= minimumPythonVersion else { continue }
+            guard isVersionSupported(version) else { continue }
             if best == nil || version > best!.version {
                 best = (version, path)
             }
@@ -141,7 +164,7 @@ struct LocalASREnvironment {
     private static func pythonIsUsable(_ path: String) -> Bool {
         guard FileManager.default.isExecutableFile(atPath: path),
               let version = pythonVersion(of: path) else { return false }
-        return version >= minimumPythonVersion
+        return isVersionSupported(version)
     }
 
     /// Runs `<python> --version` and parses the major/minor pair, or nil if the
