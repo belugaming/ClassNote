@@ -45,20 +45,7 @@ private struct InnerOverlayView: View {
                 .stroke(Color.white.opacity(0.15), lineWidth: 1)
         )
         .background(
-            WindowAccessor { win in
-                win.level = alwaysOnTop ? .floating : .normal
-                win.isMovableByWindowBackground = true
-                win.hasShadow = true
-                win.isOpaque = false
-                win.backgroundColor = .clear
-                win.titleVisibility = .hidden
-                win.titlebarAppearsTransparent = true
-                win.styleMask.insert(.fullSizeContentView)
-                win.standardWindowButton(.miniaturizeButton)?.isHidden = true
-                win.standardWindowButton(.zoomButton)?.isHidden = true
-                win.standardWindowButton(.closeButton)?.isHidden = true
-                win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            }
+            OverlayWindowConfigurator(level: alwaysOnTop ? .floating : .normal)
         )
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
@@ -355,20 +342,65 @@ private struct OverlayCaptionSegmentView: View {
     }
 }
 
-/// Lets us reach into the containing NSWindow from SwiftUI.
-struct WindowAccessor: NSViewRepresentable {
-    let onResolve: (NSWindow) -> Void
+/// Applies the overlay's window chrome, and keeps its level in sync.
+///
+/// This used to be a general-purpose `WindowAccessor` that re-ran a caller
+/// closure from `updateNSView` on a `DispatchQueue.main.async` hop. That closure
+/// reassigned `level` and re-inserted into `styleMask` on *every* SwiftUI update,
+/// and mutating either one re-orders the window with the window server, which
+/// cancels any menu that is currently tracking.
+///
+/// The visible symptom was that the caption text-size menu could be opened but
+/// never used: clicking the button re-rendered the view, the deferred write
+/// landed a moment later, and the popup closed before an item could be picked.
+///
+/// So: static chrome is applied exactly once per window, `level` is written only
+/// when it actually changes, and nothing is deferred.
+struct OverlayWindowConfigurator: NSViewRepresentable {
+    let level: NSWindow.Level
+
+    final class Coordinator {
+        weak var configured: NSWindow?
+        var appliedLevel: NSWindow.Level?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSView {
-        let v = NSView()
-        DispatchQueue.main.async {
-            if let w = v.window { onResolve(w) }
-        }
-        return v
+        let view = NSView(frame: .zero)
+        // The view has no window yet at make time, so this first resolve has to
+        // wait a turn. Subsequent updates run synchronously.
+        DispatchQueue.main.async { apply(to: view, context.coordinator) }
+        return view
     }
+
     func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async {
-            if let w = nsView.window { onResolve(w) }
+        apply(to: nsView, context.coordinator)
+    }
+
+    private func apply(to view: NSView, _ coordinator: Coordinator) {
+        guard let window = view.window else { return }
+
+        // Keyed on the window itself rather than a Bool, so a rebuilt window
+        // (SwiftUI can recreate one) still gets configured.
+        if coordinator.configured !== window {
+            coordinator.configured = window
+            window.isMovableByWindowBackground = true
+            window.hasShadow = true
+            window.isOpaque = false
+            window.backgroundColor = .clear
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.styleMask.insert(.fullSizeContentView)
+            window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            window.standardWindowButton(.zoomButton)?.isHidden = true
+            window.standardWindowButton(.closeButton)?.isHidden = true
+            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        }
+
+        if coordinator.appliedLevel != level {
+            coordinator.appliedLevel = level
+            window.level = level
         }
     }
 }

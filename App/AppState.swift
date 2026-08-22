@@ -191,13 +191,22 @@ final class AppState: ObservableObject {
                 let sessionId = try await orchestrator.startNewSession(courseId: nil, source: source)
                 self.currentSessionId = sessionId
                 self.isRecording = true
-                NotificationCenter.default.post(name: .openLiveSession, object: sessionId)
+                NotificationCenter.default.post(name: .openLiveSession, object: Self.liveWindowId)
             } catch {
                 self.setError(error.localizedDescription)
                 self.isRecording = false
             }
         }
     }
+
+    /// Window id every live recording reuses.
+    ///
+    /// Recordings all share `self.orchestrator`, so opening one window per
+    /// session id gained nothing and cost a lot: `openWindow(id:value:)` only
+    /// reuses a window when the value matches, so each new recording stacked
+    /// another identical window on screen. Imports keep their own per-session id
+    /// because each one really does get its own orchestrator.
+    static let liveWindowId = "live"
 
     func orchestrator(for windowId: String) -> SessionOrchestrator {
         importOrchestrators[windowId] ?? orchestrator
@@ -213,7 +222,7 @@ final class AppState: ObservableObject {
             let sessionId = try await orchestrator.startNewSession(courseId: courseId, source: source)
             self.currentSessionId = sessionId
             self.isRecording = true
-            NotificationCenter.default.post(name: .openLiveSession, object: sessionId)
+            NotificationCenter.default.post(name: .openLiveSession, object: Self.liveWindowId)
             return sessionId
         } catch {
             self.setError(error.localizedDescription)
@@ -229,7 +238,7 @@ final class AppState: ObservableObject {
                 let windowId = try await orchestrator.startEphemeralTranslation(source: source)
                 self.currentSessionId = nil
                 self.isRecording = true
-                NotificationCenter.default.post(name: .openLiveSession, object: windowId)
+                NotificationCenter.default.post(name: .openLiveSession, object: Self.liveWindowId)
             } catch {
                 self.setError(error.localizedDescription)
                 self.isRecording = false
@@ -243,7 +252,7 @@ final class AppState: ObservableObject {
             let windowId = try await orchestrator.startEphemeralTranslation(source: source)
             self.currentSessionId = nil
             self.isRecording = true
-            NotificationCenter.default.post(name: .openLiveSession, object: windowId)
+            NotificationCenter.default.post(name: .openLiveSession, object: Self.liveWindowId)
             return true
         } catch {
             self.setError(error.localizedDescription)
@@ -292,6 +301,8 @@ final class AppState: ObservableObject {
                                             self?.taskCenter.cancel(id: taskId, detail: L10n.t("task.import.cancelled"))
                                         })
             importOrchestrators[sessionId] = worker
+            // Imports keep a per-session window id: each has its own orchestrator,
+            // and several can run at once. Only live recordings share one window.
             NotificationCenter.default.post(name: .openLiveSession, object: sessionId)
             while worker.isImporting {
                 taskCenter.update(id: taskId,
@@ -476,6 +487,9 @@ enum SttBackend: String, CaseIterable, Identifiable {
     case openAICompatible = "openai"
     case whisperKitLocal = "whisperkit"
     case appleSpeech = "apple"
+    // Both rawValues now drive the same all-MLX sidecar. They are kept as two
+    // cases only so a stored setting from an earlier build still decodes; the
+    // language-specific engine split they used to mean is gone.
     case funasr = "funasr"
     case nemotronStreaming = "nemotron"
     var id: String { rawValue }
@@ -484,8 +498,8 @@ enum SttBackend: String, CaseIterable, Identifiable {
         case .openAICompatible: return "OpenAI Compatible (Cloud)"
         case .whisperKitLocal: return "WhisperKit (Local, macOS Apple Silicon)"
         case .appleSpeech: return L10n.t("settings.engines.sttBackend.apple")
-        case .funasr: return "FunASR (Local, 2-Pass)"
-        case .nemotronStreaming: return "Nemotron Streaming (Local, English)"
+        case .funasr: return "Local MLX (2-Pass, Apple Silicon)"
+        case .nemotronStreaming: return "Local MLX (2-Pass, legacy entry)"
         }
     }
 

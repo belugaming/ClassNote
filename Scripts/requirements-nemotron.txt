@@ -1,11 +1,7 @@
-# Both local backends now share one sidecar code path (the language setting
-# selects the models), so this must install the same set as requirements-funasr:
-# the offline/VAD/punctuation models are FunASR's even when English streams
-# through Nemotron.
-funasr
-torch
-torchaudio
+# Identical to requirements-funasr.txt on purpose -- see the comment there.
+# Both engine rawValues now install the same all-MLX sidecar dependencies.
+mlx
+mlx-audio @ git+https://github.com/Blaizzy/mlx-audio.git
+numpy
 soundfile
 websockets
-nemotron-asr-mlx
-mlx

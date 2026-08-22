@@ -27,12 +27,10 @@ private struct InnerView: View {
             Divider().opacity(0.4)
             LiveSubtitleView(buffer: orchestrator.transcript)
         }
-        .background(
-            LinearGradient(colors: [
-                Color.black.opacity(0.02),
-                Color.primary.opacity(0.04)
-            ], startPoint: .top, endPoint: .bottom)
-        )
+        // A flat surface rather than the old near-invisible black/primary
+        // gradient, which rendered as a dirty smear in light mode and did
+        // nothing at all in dark mode.
+        .background(Theme.surface)
     }
 
     private var header: some View {
