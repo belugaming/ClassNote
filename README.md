@@ -8,9 +8,10 @@ macOS-native lecture recorder for US-bound study-abroad students. Records classr
 - **Real-time bilingual subtitles**: chunked transcription + streaming chat-completion translation, with the transcript rolling in as you speak.
 - **Local-first storage**: GRDB + SQLite FTS5, everything stays in `~/Library/Application Support/ClassNote/` — audio, transcripts, notes.
 - **Pluggable engines**: one global OpenAI-compatible `base_url` / `key`, independent model IDs for STT / translation / notes / QA. One-click presets for OpenAI, DeepSeek, Groq, SiliconFlow, Ollama, LM Studio.
-- **Offline ASR, streaming in both languages**: fully local transcription with no API calls, installed automatically on first use. Set the source language in Settings → Languages; the engine follows it, since no single model covers both well:
-  - **Chinese** — FunASR `paraformer-zh-streaming` fills text in every 600 ms (RTF 0.17 on the Apple GPU), then FSMN-VAD closes each sentence and `paraformer-zh` + `ct-punc` re-transcribe it offline, replacing the live text with a punctuated, more accurate version.
-  - **English** — Nemotron's MLX transducer streams every 160 ms (RTF 0.28) and already emits punctuation and capitalization, so it runs as a single pass. FunASR has no English streaming model, and its offline `paraformer-en` measured far worse than Nemotron on the same audio, so it is only a fallback when MLX is unavailable.
+- **Offline ASR, two-pass in every language**: fully local transcription with no API calls, installed automatically on first use. Everything runs on MLX — no PyTorch — and one model set covers all languages, so there is no engine to pick per language:
+  - **Pass 1 (live)** — NVIDIA `nemotron-3.5-asr-streaming-0.6b`, a cache-aware FastConformer-RNNT covering 40 languages, fills text in every 320 ms at RTF ≈ 0.17. Its output is only ever a draft.
+  - **Pass 2 (authoritative)** — when a sentence closes, `Qwen3-ASR` re-transcribes the whole utterance and replaces the live text. It covers 52 languages including Chinese, English and Cantonese, and emits its own punctuation and casing. In measurements it corrects errors the streaming pass makes — `县立体` → `线粒体`, `Mitchandria` → `mitochondria`.
+  - Because pass 2 always sees the complete utterance, a dropped streaming chunk can never corrupt the transcript — it only costs a partial.
 - **AI-generated structured notes**: one-shot Markdown summary from the lecture transcript, course-level organization, retranslate with a bigger model when you have time.
 - **MenuBar mini + global shortcuts**: ⌘⇧R to start/stop, ⌘⇧M to bookmark a moment, ⌘⇧T to toggle translation — works even when the main window is hidden.
 - **Full-text search** across every lecture you've ever recorded.
@@ -20,8 +21,8 @@ macOS-native lecture recorder for US-bound study-abroad students. Records classr
 - macOS 14+ (Apple Silicon recommended)
 - Xcode 26+ / Swift 5.10+
 - `xcodegen` (`brew install xcodegen`)
-- An OpenAI-compatible API endpoint (OpenAI official, DeepSeek, Groq, SiliconFlow, Ollama, LM Studio, etc.) — not needed if you only use the local FunASR engine
-- For the local ASR engines: `python3` on the system (Homebrew or the Xcode command-line tools). Install them from **Settings → Engines**, which creates a venv under `~/Library/Application Support/ClassNote/pyenv/` and downloads the models (~1 GB for Chinese, ~600 MB more for English) with progress. The engine then loads into memory automatically at launch and stays warm, so recordings start instantly instead of paying ~30s of model loading each time.
+- An OpenAI-compatible API endpoint (OpenAI official, DeepSeek, Groq, SiliconFlow, Ollama, LM Studio, etc.) — not needed if you only use the local MLX engine
+- For the local ASR engine: Apple Silicon, and `python3` **3.10 or newer** on the system (Homebrew; macOS's built-in `/usr/bin/python3` is 3.9 and cannot run `mlx-audio`). Install from **Settings → Engines**, which creates a venv under `~/Library/Application Support/ClassNote/pyenv/` and downloads ~2 GB of weights with progress. The engine then loads into memory automatically at launch and stays warm, so recordings start instantly instead of paying model-loading time on every session.
 
 ## Build
 

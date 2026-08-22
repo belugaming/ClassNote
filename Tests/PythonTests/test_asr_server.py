@@ -4,6 +4,10 @@
 Lives outside Scripts/ because that whole directory is a resources build phase,
 so anything in it ships inside ClassNote.app.
 
+Only model-free logic is covered here: loading nemotron/Qwen3-ASR pulls GBs of
+weights, so the streaming and offline passes are exercised by the end-to-end
+harness instead, not by unit tests.
+
 Run: python3 -m unittest discover -s Tests/PythonTests
 """
 import os
@@ -12,89 +16,95 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Scripts"))
 
-from asr_server import _is_cjk, _is_silent, _join_partial
+import numpy as np
+
+from asr_server import (
+    DEFAULT_ATT_CONTEXT,
+    MIN_SENTENCE_CHARS,
+    Session,
+    _is_cjk,
+    _parse_att_context,
+    pcm_to_float,
+)
 
 
-class JoinPartialTests(unittest.TestCase):
-    """The streaming model emits each chunk without leading whitespace, so
-    naive concatenation fused English words ("the" + "cell" -> "thecell")."""
-
-    def test_inserts_space_between_latin_words(self):
-        self.assertEqual(_join_partial("the", "cell"), "the cell")
-        self.assertEqual(_join_partial("mitochondria is", "the"), "mitochondria is the")
-
-    def test_never_spaces_cjk(self):
-        self.assertEqual(_join_partial("试错的", "过程"), "试错的过程")
-        self.assertEqual(_join_partial("过程很简单", "，而今"), "过程很简单，而今")
-
-    def test_no_space_at_script_boundary(self):
-        self.assertEqual(_join_partial("cell", "的"), "cell的")
-        self.assertEqual(_join_partial("的", "cell"), "的cell")
-
-    def test_punctuation_stays_attached(self):
-        self.assertEqual(_join_partial("the", "."), "the.")
-        self.assertEqual(_join_partial("word", ","), "word,")
-
-    def test_hyphen_and_apostrophe_bind_forward(self):
-        self.assertEqual(_join_partial("multi-", "word"), "multi-word")
-        self.assertEqual(_join_partial("it", "'s"), "it's")
-
-    def test_existing_whitespace_is_not_doubled(self):
-        self.assertEqual(_join_partial("the ", "cell"), "the cell")
-        self.assertEqual(_join_partial("the", " cell"), "the cell")
-
-    def test_first_chunk_is_left_stripped(self):
-        self.assertEqual(_join_partial("", "  the"), "the")
-
-    def test_empty_addition_is_a_noop(self):
-        self.assertEqual(_join_partial("the", ""), "the")
-
-
-class CJKDetectionTests(unittest.TestCase):
+class IsCjkTests(unittest.TestCase):
     def test_detects_scripts_that_need_no_spacing(self):
-        for ch in "试错的过程，。「」ひらカタ한글":
-            self.assertTrue(_is_cjk(ch), ch)
+        self.assertTrue(_is_cjk("过"))
+        self.assertTrue(_is_cjk("，"))
+        self.assertTrue(_is_cjk("。"))
 
     def test_latin_is_not_cjk(self):
-        for ch in "abcXYZ019 .,":
-            self.assertFalse(_is_cjk(ch), ch)
+        self.assertFalse(_is_cjk("a"))
+        self.assertFalse(_is_cjk(" "))
+        self.assertFalse(_is_cjk("."))
 
 
-class SilenceTests(unittest.TestCase):
-    def test_digital_silence_is_silent(self):
-        self.assertTrue(_is_silent(b"\x00" * 3200))
+class PcmToFloatTests(unittest.TestCase):
+    def test_converts_int16_to_unit_range(self):
+        pcm = np.array([0, 32767, -32768], dtype="<i2").tobytes()
+        out = pcm_to_float(pcm)
+        self.assertAlmostEqual(out[0], 0.0)
+        self.assertAlmostEqual(out[1], 32767 / 32768, places=5)
+        self.assertAlmostEqual(out[2], -1.0)
 
-    def test_empty_buffer_is_silent(self):
-        self.assertTrue(_is_silent(b""))
+    def test_empty_input_yields_empty_array(self):
+        self.assertEqual(pcm_to_float(b"").size, 0)
 
-    def test_loud_tone_is_not_silent(self):
-        import struct
-        loud = b"".join(struct.pack("<h", 12000 if i % 2 else -12000) for i in range(1600))
-        self.assertFalse(_is_silent(loud))
+
+class ParseAttContextTests(unittest.TestCase):
+    def test_parses_a_pair(self):
+        self.assertEqual(_parse_att_context("56,3"), [56, 3])
+
+    def test_falls_back_on_garbage(self):
+        # A bad value must not take the sidecar down; [56,13] is both the most
+        # accurate and the fastest setting, so it is the safe default.
+        self.assertEqual(_parse_att_context("nonsense"), list(DEFAULT_ATT_CONTEXT))
+        self.assertEqual(_parse_att_context("56"), list(DEFAULT_ATT_CONTEXT))
+
+
+class _StubSession(Session):
+    """Session with the socket and models stubbed out.
+
+    ``_should_cut_on_sentence`` reads only ``partial_text`` and ``utt_buf``, so it
+    can be exercised without loading any weights.
+    """
+
+    def __init__(self, partial_text: str, held_ms: int):
+        self.partial_text = partial_text
+        self.utt_buf = bytearray(held_ms * 32)  # 32 bytes per ms of Int16 @16k
+
+
+class SentenceCutTests(unittest.TestCase):
+    def cut(self, text: str, held_ms: int = 1000) -> bool:
+        return _StubSession(text, held_ms)._should_cut_on_sentence()
+
+    def test_cuts_on_a_finished_sentence(self):
+        self.assertTrue(self.cut("This is a complete thought."))
+        self.assertTrue(self.cut("今天我们来讲细胞呼吸的过程。"))
+
+    def test_does_not_cut_mid_sentence(self):
+        self.assertFalse(self.cut("This is only half of"))
+
+    def test_does_not_cut_on_a_fragment(self):
+        # Too short to read as its own line even though it ends in a period.
+        self.assertLess(len("Yes."), MIN_SENTENCE_CHARS)
+        self.assertFalse(self.cut("Yes."))
+
+    def test_does_not_split_a_decimal(self):
+        self.assertFalse(self.cut("the value is about 3.5"))
+
+    def test_does_not_split_an_abbreviation(self):
+        self.assertFalse(self.cut("we asked Dr."))
+
+    def test_soft_cut_fires_without_punctuation(self):
+        # A speaker who never pauses would otherwise produce one wall of text
+        # until the 20s force-cut.
+        self.assertTrue(self.cut("still going on and on and on", held_ms=6_000))
+
+    def test_soft_cut_needs_some_text(self):
+        self.assertFalse(self.cut("", held_ms=6_000))
 
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class PrespacedDeltaTests(unittest.TestCase):
-    """Nemotron emits subword deltas that already carry their own leading space.
-
-    Running them through _join_partial split words apart ("mito chond ri a"), so
-    the streaming path concatenates them verbatim instead. These cases document
-    why _join_partial must NOT be applied to that engine's output.
-    """
-
-    def test_join_partial_would_split_subwords(self):
-        # Nemotron's actual deltas for "mitochondria".
-        text = ""
-        for delta in ["The", " mito", "chond", "ri", "a"]:
-            text = _join_partial(text, delta)
-        self.assertEqual(text, "The mito chond ri a",
-                         "documents the wrong behavior _join_partial produces here")
-
-    def test_plain_concatenation_keeps_subwords_intact(self):
-        text = ""
-        for delta in ["The", " mito", "chond", "ri", "a", " is"]:
-            text += delta
-        self.assertEqual(text, "The mitochondria is")

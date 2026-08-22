@@ -1,16 +1,17 @@
-# funasr lazily imports AutoModel, so a missing dependency here does not fail
-# until the first transcription attempt. torchaudio in particular is imported at
-# module scope by funasr.utils.load_utils — without it the sidecar dies on
-# startup while the venv still looks correctly installed.
-funasr
-torch
-torchaudio
+# Both local backends now run the same all-MLX sidecar (asr_server.py), so this
+# file and requirements-nemotron.txt are intentionally identical. The engine
+# rawValue only selects which requirements file LocalASREnvironment installs;
+# the models themselves are multilingual and chosen at runtime.
+#
+# FunASR / PyTorch are deliberately gone: they pulled ~3-4 GB of wheels for a
+# Chinese-only streaming model and a punctuation model that Qwen3-ASR makes
+# redundant.
+#
+# mlx-audio must come from git: the PyPI release ships only four STT backends
+# (glmasr/parakeet/voxtral/whisper) and has neither qwen3_asr nor nemotron_asr.
+# It also requires Python >= 3.10, which LocalASREnvironment already enforces.
+mlx
+mlx-audio @ git+https://github.com/Blaizzy/mlx-audio.git
+numpy
 soundfile
 websockets
-
-# English streaming. FunASR's only streaming model is Chinese-only, so English
-# partials come from Nemotron's MLX transducer instead. Optional at runtime: if
-# these are missing the sidecar logs it and English falls back to
-# sentence-at-a-time, so keep them last.
-nemotron-asr-mlx
-mlx

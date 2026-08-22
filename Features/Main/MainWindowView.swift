@@ -13,6 +13,7 @@ struct MainWindowView: View {
     @State private var showingSettings = false
     #endif
     @AppStorage("hasCompletedFirstLaunchTutorial.v1") private var hasCompletedFirstLaunchTutorial = false
+    private let launcher = RecordingLauncher()
 
     var body: some View {
         NavigationSplitView {
@@ -87,34 +88,27 @@ struct MainWindowView: View {
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                if appState.isRecording {
-                    Button(role: .destructive) {
-                        appState.stopRecording()
-                    } label: {
-                        Label(L10n.t("toolbar.stop"), systemImage: "stop.circle.fill")
-                    }
-                    .tint(Theme.recording)
-                } else {
-                    Menu {
-                        classroomModeButton(.recordMicrophone)
-                        classroomModeButton(.recordSystem)
-                        classroomModeButton(.recordMixed)
-                        Divider()
-                        classroomModeButton(.transcribeOnlyMicrophone)
-                        Divider()
-                        classroomModeButton(.temporaryMicrophone)
-                        classroomModeButton(.temporarySystem)
-                        classroomModeButton(.temporaryMixed)
-                    } label: {
-                        Label(L10n.t("toolbar.classroomMode"), systemImage: "rectangle.grid.1x2")
-                    } primaryAction: {
-                        Task { await vm.startSession(courseId: nil, source: .microphone, translationEnabled: true) }
-                    }
-                    .disabled(appState.apiConfig.apiKey.isEmpty && appState.sttBackend == .openAICompatible)
-                    .help(appState.apiConfig.apiKey.isEmpty
-                          ? L10n.t("toolbar.help.configureKey")
-                          : L10n.t("toolbar.classroomMode.help"))
+                // One start/stop control with a menu for the options, rather than
+                // the seven fixed mode entries this toolbar used to duplicate
+                // from the menu bar.
+                Menu {
+                    RecordingOptionsView(source: sourceBinding,
+                                         intent: intentBinding,
+                                         translationEnabled: $appState.translationEnabled)
+                        .padding(8)
+                        .frame(width: 240)
+                } label: {
+                    Label(appState.isRecording ? L10n.t("record.stop") : L10n.t("record.start"),
+                          systemImage: appState.isRecording ? "stop.circle.fill" : "record.circle")
+                } primaryAction: {
+                    launcher.toggle(appState)
+                    Task { await vm.refresh() }
                 }
+                .tint(appState.isRecording ? Theme.recording : Theme.accent)
+                .disabled(isEngineUnconfigured)
+                .help(isEngineUnconfigured
+                      ? L10n.t("toolbar.help.configureKey")
+                      : L10n.t("toolbar.classroomMode.help"))
 
                 Button {
                     NotificationCenter.default.post(name: .toggleOverlay, object: nil)
@@ -127,26 +121,29 @@ struct MainWindowView: View {
                     showingTaskCenter = true
                 }
 
-                Button {
-                    showingDiagnostics = true
+                // Diagnostics and the tutorial are rare, so they move out of the
+                // always-visible row and into an overflow menu.
+                Menu {
+                    Button {
+                        showingDiagnostics = true
+                    } label: {
+                        Label(L10n.t("diagnostics.title"), systemImage: "stethoscope")
+                    }
+                    Button {
+                        showingFirstLaunchGuide = true
+                    } label: {
+                        Label(L10n.t("onboarding.replay"), systemImage: "questionmark.circle")
+                    }
+                    #if os(iOS)
+                    Button {
+                        showingSettings = true
+                    } label: {
+                        Label(L10n.t("settings.title"), systemImage: "gearshape")
+                    }
+                    #endif
                 } label: {
-                    Label(L10n.t("diagnostics.title"), systemImage: "stethoscope")
+                    Label(L10n.t("record.more"), systemImage: "ellipsis.circle")
                 }
-
-                Button {
-                    showingFirstLaunchGuide = true
-                } label: {
-                    Label(L10n.t("onboarding.replay"), systemImage: "questionmark.circle")
-                }
-                .help(L10n.t("onboarding.replay.help"))
-
-                #if os(iOS)
-                Button {
-                    showingSettings = true
-                } label: {
-                    Label(L10n.t("settings.title"), systemImage: "gearshape")
-                }
-                #endif
             }
         }
         .task { await vm.refresh() }
@@ -196,76 +193,16 @@ struct MainWindowView: View {
         #endif
     }
 
-    @ViewBuilder
-    private func classroomModeButton(_ mode: ClassroomMode) -> some View {
-        Button {
-            Task {
-                switch mode {
-                case .recordMicrophone, .recordSystem, .recordMixed, .transcribeOnlyMicrophone:
-                    await vm.startSession(courseId: nil,
-                                          source: mode.source,
-                                          translationEnabled: mode.translationEnabled)
-                case .temporaryMicrophone, .temporarySystem, .temporaryMixed:
-                    await vm.startEphemeralTranslation(source: mode.source)
-                }
-            }
-        } label: {
-            Label(mode.title, systemImage: mode.icon)
-        }
-    }
-}
-
-private enum ClassroomMode: CaseIterable {
-    case recordMicrophone
-    case recordSystem
-    case recordMixed
-    case transcribeOnlyMicrophone
-    case temporaryMicrophone
-    case temporarySystem
-    case temporaryMixed
-
-    var source: AudioSourceKind {
-        switch self {
-        case .recordMicrophone, .transcribeOnlyMicrophone, .temporaryMicrophone:
-            return .microphone
-        case .recordSystem, .temporarySystem:
-            return .system
-        case .recordMixed, .temporaryMixed:
-            return .mixed
-        }
+    private var isEngineUnconfigured: Bool {
+        appState.apiConfig.apiKey.isEmpty && appState.sttBackend == .openAICompatible
     }
 
-    var translationEnabled: Bool {
-        switch self {
-        case .transcribeOnlyMicrophone:
-            return false
-        default:
-            return true
-        }
+    private var sourceBinding: Binding<AudioSourceKind> {
+        Binding(get: { launcher.source }, set: { launcher.source = $0 })
     }
 
-    var title: String {
-        switch self {
-        case .recordMicrophone: return L10n.t("toolbar.mode.recordMic")
-        case .recordSystem: return L10n.t("toolbar.mode.recordSystem")
-        case .recordMixed: return L10n.t("toolbar.mode.recordMixed")
-        case .transcribeOnlyMicrophone: return L10n.t("toolbar.mode.transcribeOnly")
-        case .temporaryMicrophone: return L10n.t("toolbar.mode.temporaryMic")
-        case .temporarySystem: return L10n.t("toolbar.mode.temporarySystem")
-        case .temporaryMixed: return L10n.t("toolbar.mode.temporaryMixed")
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .recordMicrophone: return "mic.fill"
-        case .recordSystem: return "speaker.wave.3.fill"
-        case .recordMixed: return "person.wave.2.fill"
-        case .transcribeOnlyMicrophone: return "text.badge.checkmark"
-        case .temporaryMicrophone: return "character.bubble"
-        case .temporarySystem: return "speaker.wave.2"
-        case .temporaryMixed: return "bubble.left.and.text.bubble.right"
-        }
+    private var intentBinding: Binding<RecordingIntent> {
+        Binding(get: { launcher.intent }, set: { launcher.intent = $0 })
     }
 }
 
@@ -276,7 +213,7 @@ private struct FirstLaunchGuideSheet: View {
     private var steps: [FirstLaunchGuideStep] {
         [
             .init(icon: "key.fill",
-                  tint: Theme.warning,
+                  tint: Theme.accent,
                   titleKey: "onboarding.step.setup.title",
                   bodyKey: "onboarding.step.setup.body",
                   points: [
@@ -294,7 +231,7 @@ private struct FirstLaunchGuideSheet: View {
                       "onboarding.step.capture.point.translateOnly"
                   ]),
             .init(icon: "sparkles",
-                  tint: Theme.success,
+                  tint: Theme.accent,
                   titleKey: "onboarding.step.study.title",
                   bodyKey: "onboarding.step.study.body",
                   points: [
@@ -303,7 +240,7 @@ private struct FirstLaunchGuideSheet: View {
                       "onboarding.step.study.point.flashcards"
                   ]),
             .init(icon: "checklist",
-                  tint: Theme.translation,
+                  tint: Theme.accent,
                   titleKey: "onboarding.step.control.title",
                   bodyKey: "onboarding.step.control.body",
                   points: [
@@ -496,7 +433,7 @@ struct MainEmptyStateView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.surfaceElevated.opacity(0.35))
+        .background(Theme.surface)
     }
 }
 

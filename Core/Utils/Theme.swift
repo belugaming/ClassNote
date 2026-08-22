@@ -38,11 +38,16 @@ enum Theme {
     // MARK: - Metrics
 
     static let cornerSmall: CGFloat = 6
-    static let cornerMedium: CGFloat = 8
-    static let cornerLarge: CGFloat = 10
+    static let cornerMedium: CGFloat = 10
+    static let cornerLarge: CGFloat = 14
 
-    static let cardPadding: CGFloat = 12
+    static let cardPadding: CGFloat = 14
     static let gridSpacing: CGFloat = 12
+
+    /// Gap between sections on a settings-style page.
+    static let sectionSpacing: CGFloat = 24
+    /// Outer padding for a scrollable settings page.
+    static let pagePadding: CGFloat = 22
 }
 
 enum OverlayCaptionDisplayMode: String, CaseIterable, Identifiable {
@@ -164,13 +169,21 @@ extension String {
 }
 
 /// Card chrome used everywhere (settings sections, session rows, transcript bubbles).
-/// Editorial style: content + hairline border, no filled background block.
+///
+/// `filled` used to be accepted and then ignored -- every card rendered as a bare
+/// hairline rectangle over the window background, which is what made dense
+/// screens like Settings read as unfinished. Cards now actually get a surface,
+/// and `filled: false` opts back out for places that sit on their own background.
 struct CardBackground: ViewModifier {
     var radius: CGFloat = Theme.cornerMedium
     var filled: Bool = true
 
     func body(content: Content) -> some View {
         content
+            .background(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(filled ? AnyShapeStyle(Theme.surfaceElevated) : AnyShapeStyle(Color.clear))
+            )
             .overlay(
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
                     .stroke(Theme.hairline, lineWidth: 1)
@@ -209,25 +222,31 @@ extension View {
 }
 
 /// Standard section container with a title — replaces Form's default ugly frame.
+///
+/// The title was previously uppercased at `.subheadline` weight, which at that
+/// size turns CJK into loose, hard-to-scan runs (uppercasing does nothing to
+/// Chinese but the tracking still reads as shouty). It is now a normal-case
+/// headline, which works in both scripts.
 struct SettingsSection<Content: View>: View {
     let title: String
     var footer: String? = nil
     @ViewBuilder let content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             Text(title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
-            VStack(alignment: .leading, spacing: 10) { content }
+                .font(.headline)
+                .foregroundStyle(.primary)
+            VStack(alignment: .leading, spacing: 12) { content }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(Theme.cardPadding)
-                .cardBackground()
+                .cardBackground(radius: Theme.cornerLarge)
             if let footer {
                 Text(footer)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 2)
             }
         }
     }

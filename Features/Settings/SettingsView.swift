@@ -61,7 +61,7 @@ struct SettingsView: View {
         #if os(macOS)
         .frame(minWidth: 640, minHeight: 540)
         #endif
-        .background(Theme.surface.opacity(0.26))
+        .background(Theme.surface)
         .id(appState.languageRefreshToken)   // force full re-render on language switch
     }
 }
@@ -76,7 +76,7 @@ struct AppearanceSettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
                 SettingsSection(title: L10n.t("settings.appearance.language"),
                                 footer: L10n.t("settings.appearance.languageNote")) {
                     Picker("", selection: $selection) {
@@ -124,9 +124,9 @@ struct AppearanceSettingsView: View {
                         .tint(Theme.accent)
                 }
             }
-            .padding(20)
+            .padding(Theme.pagePadding)
         }
-        .background(Theme.surface.opacity(0.22))
+        .background(Theme.surface)
     }
 
     private var displayMode: OverlayCaptionDisplayMode {
@@ -172,21 +172,26 @@ struct ApiSettingsView: View {
     @State private var autosaveTask: Task<Void, Never>?
     @State private var localNetworkDenied: Bool = false
 
-    private let providerPresets: [(label: String, base: String, stt: String, llm: String, color: Color)] = [
-        ("OpenAI", "https://api.openai.com/v1", "whisper-1", "gpt-4o-mini", .green),
-        ("DeepSeek", "https://api.deepseek.com/v1", "whisper-1", "deepseek-chat", .blue),
-        ("Groq", "https://api.groq.com/openai/v1", "whisper-large-v3", "llama-3.1-70b-versatile", .orange),
-        ("硅基流动", "https://api.siliconflow.cn/v1", "FunAudioLLM/SenseVoiceSmall", "Qwen/Qwen2.5-7B-Instruct", .purple),
-        ("Ollama", "http://localhost:11434/v1", "whisper-1", "llama3.1", .pink),
-        ("LM Studio", "http://localhost:1234/v1", "whisper-1", "local-model", .cyan),
+    /// Presets carry no per-provider colour: `Theme` documents a monochrome
+    /// design language, and six arbitrary hues here made the first thing you see
+    /// in Settings look like a swatch test. Which preset is active is shown by
+    /// selection state instead, which is information the colours never conveyed.
+    private let providerPresets: [(label: String, base: String, stt: String, llm: String)] = [
+        ("OpenAI", "https://api.openai.com/v1", "whisper-1", "gpt-4o-mini"),
+        ("DeepSeek", "https://api.deepseek.com/v1", "whisper-1", "deepseek-chat"),
+        ("Groq", "https://api.groq.com/openai/v1", "whisper-large-v3", "llama-3.1-70b-versatile"),
+        ("硅基流动", "https://api.siliconflow.cn/v1", "FunAudioLLM/SenseVoiceSmall", "Qwen/Qwen2.5-7B-Instruct"),
+        ("Ollama", "http://localhost:11434/v1", "whisper-1", "llama3.1"),
+        ("LM Studio", "http://localhost:1234/v1", "whisper-1", "local-model"),
     ]
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
                 SettingsSection(title: L10n.t("settings.api.presets")) {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8)], spacing: 8) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 8)], spacing: 8) {
                         ForEach(providerPresets, id: \.label) { preset in
+                            let isActive = appState.apiConfig.baseUrl == preset.base
                             Button {
                                 updateConfig(immediate: true) { config in
                                     config.baseUrl = preset.base
@@ -196,21 +201,24 @@ struct ApiSettingsView: View {
                                 }
                             } label: {
                                 HStack(spacing: 6) {
-                                    Circle().fill(preset.color).frame(width: 7, height: 7)
+                                    Image(systemName: isActive ? "checkmark.circle.fill" : "circle")
+                                        .font(.caption)
+                                        .foregroundStyle(isActive ? Theme.accent : Color.secondary.opacity(0.5))
                                     Text(preset.label)
-                                        .font(.callout.weight(.medium))
+                                        .font(.callout.weight(isActive ? .semibold : .regular))
                                         .lineLimit(1)
+                                    Spacer(minLength: 0)
                                 }
-                                .frame(maxWidth: .infinity)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.vertical, 8)
                                 .padding(.horizontal, 10)
                                 .background(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .fill(preset.color.opacity(0.08))
+                                    RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous)
+                                        .fill(isActive ? Theme.accentSoft : Theme.chrome)
                                 )
                                 .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(preset.color.opacity(0.25), lineWidth: 1)
+                                    RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous)
+                                        .stroke(isActive ? Theme.accent.opacity(0.35) : Color.clear, lineWidth: 1)
                                 )
                             }
                             .buttonStyle(.plain)
@@ -298,9 +306,9 @@ struct ApiSettingsView: View {
                     Spacer()
                 }
             }
-            .padding(20)
+            .padding(Theme.pagePadding)
         }
-        .background(Theme.surface.opacity(0.22))
+        .background(Theme.surface)
         .onDisappear {
             autosaveTask?.cancel()
             Task { await appState.saveConfig(appState.apiConfig) }
@@ -454,7 +462,7 @@ struct EngineSettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
                 SettingsSection(title: L10n.t("settings.engines.stt")) {
                     Picker(L10n.t("settings.engines.sttPicker"), selection: $appState.sttBackend) {
                         ForEach(SttBackend.allCases) { backend in
@@ -541,9 +549,9 @@ struct EngineSettingsView: View {
                     #endif
                 }
             }
-            .padding(20)
+            .padding(Theme.pagePadding)
         }
-        .background(Theme.surface.opacity(0.22))
+        .background(Theme.surface)
         .onAppear {
             appState.refreshMicrophoneDevices()
         }
@@ -593,7 +601,7 @@ private struct PathRow: View {
 struct ShortcutsSettingsView: View {
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
                 SettingsSection(title: L10n.t("settings.shortcuts.global"),
                                 footer: L10n.t("settings.shortcuts.note")) {
                     ShortcutRow(label: L10n.t("settings.shortcuts.toggleRecording"), name: .toggleRecording, icon: "record.circle")
@@ -602,9 +610,9 @@ struct ShortcutsSettingsView: View {
                     ShortcutRow(label: L10n.t("settings.shortcuts.toggleOverlay"), name: .toggleOverlay, icon: "rectangle.on.rectangle")
                 }
             }
-            .padding(20)
+            .padding(Theme.pagePadding)
         }
-        .background(Theme.surface.opacity(0.22))
+        .background(Theme.surface)
     }
 }
 
@@ -626,6 +634,10 @@ private struct ShortcutRow: View {
 // MARK: - About
 
 struct AboutView: View {
+    static var bundleVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+    }
+
     var body: some View {
         VStack(spacing: 18) {
             Spacer()
@@ -639,7 +651,11 @@ struct AboutView: View {
             }
             Text(L10n.t("app.name"))
                 .font(.system(size: 30, weight: .semibold, design: .rounded))
-            Text(L10n.t("settings.about.version"))
+            // Read from the bundle rather than a localized literal. The string
+            // used to hardcode "v0.3.0" in both locales, so it kept claiming
+            // 0.3.0 long after the project moved on — About is the one screen
+            // where a stale version is actively misleading.
+            Text(verbatim: "v\(Self.bundleVersion) · \(L10n.t("settings.about.buildKind"))")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             Text(L10n.t("settings.about.tagline"))
