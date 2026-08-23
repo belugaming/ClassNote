@@ -16,6 +16,9 @@ actor LocalASRWarmPool {
         let engine: LocalASREngineKind
         /// Normalized source language; nil means the sidecar's own default.
         let language: String?
+        /// Which models are loaded. Part of the identity: changing it swaps the
+        /// weights a running sidecar holds, so the warm one cannot serve it.
+        let quality: LocalEngineQuality
     }
 
     /// A loaded sidecar holds ~4.6 GB resident (measured), which is a lot to keep
@@ -38,7 +41,8 @@ actor LocalASRWarmPool {
     func url(engine: LocalASREngineKind,
              language: String?,
              onProgress: (@Sendable (String) -> Void)? = nil) async throws -> URL {
-        let wanted = Key(engine: engine, language: Self.normalize(language))
+        let wanted = Key(engine: engine, language: Self.normalize(language),
+                         quality: LocalEngineQuality.current)
 
         if let key, key != wanted {
             // Different language or engine: the loaded models cannot serve it.
@@ -81,7 +85,8 @@ actor LocalASRWarmPool {
 
     /// True when a sidecar for exactly this configuration is up.
     func isReady(engine: LocalASREngineKind, language: String?) async -> Bool {
-        guard let key, key == Key(engine: engine, language: Self.normalize(language)),
+        guard let key, key == Key(engine: engine, language: Self.normalize(language),
+                                  quality: LocalEngineQuality.current),
               let manager else { return false }
         return await manager.isRunning
     }

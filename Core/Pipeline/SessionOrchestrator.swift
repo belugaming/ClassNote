@@ -307,15 +307,37 @@ final class SessionOrchestrator: ObservableObject {
                         let maybeRowId = await MainActor.run { self.engineSegmentToRowId[segId] }
                         if let rowId = maybeRowId {
                             let polishedText = TranscriptTextPolisher.polish(event.text)
-                            let existingTranslation = await MainActor.run {
+                            let shouldRetranslate = AppState.shared.translationEnabled
+                            let existingTranslation = await MainActor.run { () -> String in
                                 transcript.reviseFinal(rowId: rowId, newText: polishedText)
-                                return transcript.translatedText(rowId: rowId)
+                                guard shouldRetranslate else {
+                                    return transcript.translatedText(rowId: rowId)
+                                }
+                                // The existing translation was produced from the
+                                // streaming draft — which is exactly the text
+                                // pass 2 just corrected. Keeping it would pair a
+                                // fixed transcript with a translation of the
+                                // broken one, and the errors pass 2 fixes
+                                // (homophones, technical terms) are the ones that
+                                // most distort a translation.
+                                self.translateTasks[rowId]?.cancel()
+                                // appendTranslationDelta appends, so the stale
+                                // text has to go before the new stream starts.
+                                transcript.updateTranslation(rowId: rowId, translated: "")
+                                return ""
                             }
                             if persistSegments {
                                 try? await SegmentRepository.shared.updateText(id: rowId,
                                                                                 textOriginal: polishedText,
                                                                                 textTranslated: existingTranslation,
                                                                                 isFinal: true)
+                            }
+                            if shouldRetranslate {
+                                self.translate(rowId: rowId,
+                                               text: polishedText,
+                                               translator: translator,
+                                               config: config,
+                                               persistTranslation: persistSegments)
                             }
                         }
                         continue

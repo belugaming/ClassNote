@@ -100,11 +100,19 @@ SOFT_CUT_MS = 6_000
 PREROLL_MS = 300
 
 STREAMING_REPO = "mlx-community/nemotron-3.5-asr-streaming-0.6b"
+# Second-pass model, keyed by quality. "streaming" is the odd one out: it loads
+# no second pass at all, leaving only the streaming model resident. That halves
+# the footprint, which is what makes the engine usable on an 8 GB machine, at the
+# cost of the corrections pass 2 provides ("Mitchandria" -> "mitochondria").
 OFFLINE_REPOS = {
     "light": "mlx-community/Qwen3-ASR-0.6B-8bit",
     "standard": "mlx-community/Qwen3-ASR-1.7B-8bit",
 }
+QUALITY_CHOICES = ["streaming"] + sorted(OFFLINE_REPOS)
 VAD_REPO = "mlx-community/silero-vad"
+
+# Surfaced to the user when they import a file in single-pass mode.
+L10N_FILE_NEEDS_SECOND_PASS = "单模型模式不支持文件导入，请在设置中关闭它。"
 
 
 def log(*a):
@@ -244,12 +252,17 @@ class Models:
         # FunASR/paraformer setup there is no zh-vs-en model set to choose. The
         # language is only a decoding hint.
         self.language = (language or "zh").strip() or "zh"
-        self.quality = quality if quality in OFFLINE_REPOS else "standard"
+        self.quality = quality if quality in QUALITY_CHOICES else "standard"
         self.att_context_size = att_context_size or DEFAULT_ATT_CONTEXT
         self.on_stage = on_stage
         self.streaming = None
         self.offline = None
         self._vad_model = None
+
+    @property
+    def single_pass(self) -> bool:
+        """True when only the streaming model is loaded, so nothing revises."""
+        return self.quality == "streaming"
 
     @property
     def stream_language(self) -> str:
@@ -270,7 +283,7 @@ class Models:
     def _load(self):
         from mlx_audio.stt.utils import load as load_stt
 
-        total = 3
+        total = 2 if self.quality == "streaming" else 3
         step = 0
 
         def stage(key: str):
@@ -285,8 +298,12 @@ class Models:
         stage("streaming")
         self.streaming = load_stt(STREAMING_REPO)
 
-        stage("offline")
-        self.offline = load_stt(OFFLINE_REPOS[self.quality])
+        if self.quality == "streaming":
+            log("[models] single-pass mode: no second pass will run")
+            self.offline = None
+        else:
+            stage("offline")
+            self.offline = load_stt(OFFLINE_REPOS[self.quality])
 
         # The VAD weights are fetched here so a first run pays the download cost
         # before READY, but the StreamingVad wrapper itself is built later, on the
@@ -306,12 +323,13 @@ class Models:
             warm.push(silence, final=True)
         except Exception as exc:
             log(f"[models] streaming warmup failed (non-fatal): {exc}")
-        try:
-            import mlx.core as mx
+        if self.offline is not None:
+            try:
+                import mlx.core as mx
 
-            self.offline.generate(mx.array(np.zeros(SAMPLE_RATE, dtype=np.float32)))
-        except Exception as exc:
-            log(f"[models] offline warmup failed (non-fatal): {exc}")
+                self.offline.generate(mx.array(np.zeros(SAMPLE_RATE, dtype=np.float32)))
+            except Exception as exc:
+                log(f"[models] offline warmup failed (non-fatal): {exc}")
         log("[models] ready")
 
     def _load_vad_model(self):
@@ -679,6 +697,11 @@ class Session:
         self.segment_id += 1
         self.segment_start_ms = end
 
+        # Single-pass mode has nothing to revise with, so the streaming text is
+        # already this segment's final answer.
+        if self.models.single_pass:
+            return
+
         # Pass 2 is slower than a single streaming stride. Run it in the
         # background so reading audio never blocks on it; the revision arrives out
         # of band and the client matches it by segmentId.
@@ -744,6 +767,10 @@ class Session:
     # ---- file import ----------------------------------------------------
 
     def _file_sync(self, path: str):
+        # File import needs the offline model: there is no live audio to stream.
+        if self.models.offline is None:
+            raise RuntimeError(L10N_FILE_NEEDS_SECOND_PASS)
+
         """Transcribe a whole file, one entry per recognized sentence.
 
         Qwen3-ASR carries its own segmentation and timestamps, so unlike the old
@@ -871,7 +898,7 @@ async def main():
     parser.add_argument("--language", default="zh",
                         help="source language hint for the decoder")
     parser.add_argument("--quality", default="standard",
-                        choices=sorted(OFFLINE_REPOS),
+                        choices=QUALITY_CHOICES,
                         help="picks the second-pass model size")
     parser.add_argument("--att-context", default=None,
                         help="streaming look-ahead as 'left,right'; "

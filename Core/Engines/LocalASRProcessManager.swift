@@ -61,8 +61,12 @@ actor LocalASRProcessManager {
         // --device auto lets the sidecar pick MPS for the streaming pass when
         // the GPU is available; it keeps the offline pass on CPU, which measured
         // faster for short utterances.
+        // --quality picks how much stays resident. Without it the sidecar
+        // defaults to the 1.7B second pass, which does not fit on a small Mac
+        // alongside the streaming model and the translator.
         var arguments = [scriptPath, "--engine", engine.rawValue, "--port", "\(port)",
-                         "--device", "auto"]
+                         "--device", "auto",
+                         "--quality", LocalEngineQuality.current.rawValue]
         // The sidecar picks its model set from this at startup (FunASR's only
         // streaming model is Chinese-only), so it must be passed on the command
         // line, not just in the later `config` frame.
