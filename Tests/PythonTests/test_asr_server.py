@@ -25,12 +25,14 @@ from asr_server import (
     MIN_SENTENCE_CHARS,
     PAUSE_CLOSE_MS,
     SOFT_CUT_MS,
+    TOKEN_TAIL_MS,
     Transcriber,
     ends_sentence,
     find_cut,
     parse_chunk_ms,
     pcm_to_float,
     resolve_language,
+    text_width,
     tokens_to_text,
 )
 
@@ -101,6 +103,12 @@ class EndsSentenceTests(unittest.TestCase):
     def test_fragment_is_too_short(self):
         self.assertLess(len("Yes."), MIN_SENTENCE_CHARS)
         self.assertFalse(ends_sentence("Yes."))
+        self.assertFalse(ends_sentence("好的。"))
+
+    def test_cjk_counts_double_so_a_short_chinese_sentence_passes(self):
+        # Ten characters, but a complete sentence; twelve Latin letters are not.
+        self.assertGreaterEqual(text_width("他分为三个主要阶段。"), MIN_SENTENCE_CHARS)
+        self.assertTrue(ends_sentence("他分为三个主要阶段。"))
 
     def test_decimal_and_abbreviation(self):
         self.assertFalse(ends_sentence("the value is about 3.5"))
@@ -125,6 +133,12 @@ class FindCutTests(unittest.TestCase):
         # token back from the end when we see it.
         toks = words("fifty pieces of gold.") + [" The"]
         self.assertEqual(find_cut(toks, 1000), len(toks) - 1)
+
+    def test_cuts_after_a_sentence_end_buried_in_a_token_burst(self):
+        # One decode step can deliver a whole burst of tokens, so the period
+        # may be many tokens back by the time we look.
+        toks = words("fifty pieces of gold.") + words("It happens in three main")
+        self.assertEqual(find_cut(toks, 1000), 4)
 
     def test_soft_cut_prefers_a_clause_mark(self):
         toks = words("first part of it, second part going on and on")
@@ -246,6 +260,23 @@ class TranscriberTests(unittest.TestCase):
         self.assertEqual(events[0]["text"], "hello world")
         self.assertEqual(events[0]["segmentId"], 0)
         self.assertEqual(events[0]["startMs"], 20)
+        # Ends shortly after its last token, not at "now".
+        self.assertEqual(events[0]["endMs"], 60 + TOKEN_TAIL_MS)
+
+    def test_voice_energy_holds_the_segment_open_through_a_token_gap(self):
+        # The model sometimes withholds a word for close to a second while the
+        # speaker is still talking; audible speech must veto the pause rule.
+        t = self.make()
+        self.feed(t, new=[(" hello", 0.02)])
+        loud = (np.full(100 * 16, 8000, dtype="<i2")).tobytes()  # 100 ms, rms ~0.24
+        events = []
+        for _ in range(PAUSE_CLOSE_MS // 100 + 3):
+            events += t.feed(loud)
+        self.assertEqual(events, [])
+        # Once it goes quiet, the pause closes the line.
+        for _ in range(PAUSE_CLOSE_MS // 100 + 1):
+            events += self.feed(t)
+        self.assertEqual([e["type"] for e in events], ["final"])
 
     def test_sentence_punctuation_cuts_and_the_rest_starts_the_next_segment(self):
         t = self.make()
@@ -265,10 +296,11 @@ class TranscriberTests(unittest.TestCase):
         for _ in range(PAUSE_CLOSE_MS // 100 + 1):
             self.feed(t)
         # The period for "gold" only arrives with the next sentence.
-        events = self.feed(t, new=[(".", 1.15), (" ", 1.16), (" The", 1.2)])
+        # Onsets lie inside the audio fed so far (0.9 s by now).
+        events = self.feed(t, new=[(".", 0.82), (" ", 0.83), (" The", 0.85)])
         self.assertEqual([e["type"] for e in events], ["partial"])
         self.assertEqual(events[0]["text"], "The")
-        self.assertEqual(events[0]["startMs"], 1200)
+        self.assertEqual(events[0]["startMs"], 850)
 
     def test_committed_text_is_never_re_emitted(self):
         t = self.make()

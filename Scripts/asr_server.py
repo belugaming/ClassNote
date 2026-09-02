@@ -52,6 +52,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -71,10 +72,20 @@ CHUNK_CHOICES = (80, 160, 320, 560, 1120)
 DEFAULT_CHUNK_MS = 160
 MODEL_REPO = "csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-{chunk}ms-int8-2026-06-11"
 
-# A segment closes once this much audio has passed since the last decoded
-# token. Token timestamps mark a token's onset and the encoder emits it a chunk
-# or so later, so this corresponds to a real pause of roughly 0.6 s.
-PAUSE_CLOSE_MS = 900
+# A segment closes once the audio has been quiet -- no voice energy and no new
+# token -- for this long. Both are required: the transducer sometimes holds a
+# word back for close to a second while the speaker is still talking (measured
+# on "丙酮酸": 0.9 s between "丙" and the next token), and a token-gap rule alone
+# cut lines mid-word there.
+PAUSE_CLOSE_MS = 600
+# RMS of a 16-bit frame (normalised to [-1, 1]) above which it counts as voice.
+# Same scale and neighbourhood as the app's own VADGate (0.008) and the cloud
+# chunker (0.01).
+VOICE_RMS_THRESHOLD = 0.01
+# A token's timestamp is its onset; a closed line ends roughly this long after
+# the onset of its last token. Used for the final's endMs so consecutive lines
+# do not overlap in time.
+TOKEN_TAIL_MS = 350
 
 # Sentence-ending punctuation. A lecturer rarely pauses long enough mid-flow, so
 # without this a segment would grow until the soft cut. Cutting on punctuation
@@ -84,7 +95,9 @@ PAUSE_CLOSE_MS = 900
 SENTENCE_END_CHARS = ".!?。！？…"
 CLAUSE_END_CHARS = ",;，；:："
 # Don't cut on a period that is probably an abbreviation or decimal ("Dr.",
-# "3.5"), and don't emit a fragment so short it reads as noise.
+# "3.5"), and don't emit a fragment so short it reads as noise. Measured in
+# display width, where a CJK character counts double: "他分为三个主要阶段。" is
+# a complete sentence at ten characters, which twelve Latin letters are not.
 MIN_SENTENCE_CHARS = 12
 # Once a segment reaches this, cut at the nearest clause or word boundary even
 # mid-thought, so a run-on speaker still gets broken into readable lines.
@@ -159,14 +172,33 @@ def pcm_to_float(pcm: bytes) -> np.ndarray:
 
 
 def tokens_to_text(tokens) -> str:
-    """How sherpa-onnx builds `result.text` from BPE pieces (verified equal)."""
-    return "".join(tokens).replace("▁", " ").strip()
+    """How sherpa-onnx builds `result.text` from BPE pieces, with runs of
+    whitespace collapsed (nemotron emits stray space tokens after punctuation)."""
+    return re.sub(r"\s+", " ", "".join(tokens).replace("▁", " ")).strip()
+
+
+def frame_rms(pcm: bytes) -> float:
+    if len(pcm) < 2:
+        return 0.0
+    samples = pcm_to_float(pcm)
+    return float(np.sqrt(np.mean(samples * samples)))
+
+
+def _is_cjk(ch: str) -> bool:
+    o = ord(ch)
+    return 0x3000 <= o <= 0x9FFF or 0xF900 <= o <= 0xFAFF or 0xFF00 <= o <= 0xFFEF
+
+
+def text_width(text: str) -> int:
+    """Display width: CJK characters count double, since one carries as much as
+    a short Latin word."""
+    return sum(2 if _is_cjk(ch) else 1 for ch in text)
 
 
 def ends_sentence(text: str) -> bool:
     """Whether `text` reads as a finished sentence a reader can take as one line."""
     text = text.rstrip()
-    if len(text) < MIN_SENTENCE_CHARS or text[-1] not in SENTENCE_END_CHARS:
+    if not text or text_width(text) < MIN_SENTENCE_CHARS or text[-1] not in SENTENCE_END_CHARS:
         return False
     if text[-1] == "." and len(text) >= 2:
         # "3.5" -- a period between digits is a decimal, not a sentence end.
@@ -188,18 +220,18 @@ def find_cut(tokens, held_ms: int) -> int | None:
     """Where to close the segment made of `tokens`, as a count of tokens to
     commit, or None to keep it open.
 
-    Checks, in order: a finished sentence anywhere in the last few tokens (the
-    punctuation usually arrives glued to the next sentence's first word), then a
-    soft cut once the segment has run `SOFT_CUT_MS` -- at the last clause mark if
-    there is one, else at the last word boundary, else everything.
+    Checks, in order: the last finished sentence anywhere in the segment (the
+    punctuation usually arrives glued to the next sentence's first word, and a
+    single decode step can deliver a whole burst of tokens, so only the tail is
+    not enough), then a soft cut once the segment has run `SOFT_CUT_MS` -- at the
+    last clause mark if there is one, else at the last word boundary, else
+    everything.
     """
     n = len(tokens)
     if n == 0:
         return None
 
-    # Sentence end: look back a handful of tokens so ". The" still cuts after
-    # the period rather than waiting for the next mark.
-    for i in range(n - 1, max(-1, n - 5), -1):
+    for i in range(n - 1, -1, -1):
         piece = tokens[i].rstrip()
         if piece and piece[-1] in SENTENCE_END_CHARS and ends_sentence(tokens_to_text(tokens[: i + 1])):
             return i + 1
@@ -358,6 +390,8 @@ class Transcriber:
         # Of the open segment: onset of its first token, and of the newest token.
         self.first_token_ms: int | None = None
         self.last_token_ms: int | None = None
+        # End of the most recent frame whose energy read as voice.
+        self.last_voiced_ms: int | None = None
 
         self._decode_calls = 0
         # (seconds spent decoding, ms of audio fed) per frame, bounded so the
@@ -384,6 +418,8 @@ class Transcriber:
             return []
         frame_ms = len(pcm) // BYTES_PER_MS
         self.stream_ms += frame_ms
+        if frame_rms(pcm) >= VOICE_RMS_THRESHOLD:
+            self.last_voiced_ms = self.stream_ms
         self.stream.accept_waveform(SAMPLE_RATE, pcm_to_float(pcm))
         return self._decode(frame_ms=frame_ms)
 
@@ -394,9 +430,10 @@ class Transcriber:
         self.stream.accept_waveform(SAMPLE_RATE, np.zeros(SAMPLE_RATE // 2, dtype=np.float32))
         self.stream.input_finished()
         events = self._decode(closing=True)
-        tokens, _ = self._segment_tokens(self.recognizer.get_result_all(self.stream))
+        result = self.recognizer.get_result_all(self.stream)
+        tokens, timestamps = self._segment_tokens(result)
         if tokens:
-            events += self._commit(tokens, len(tokens))
+            events += self._commit(tokens, len(tokens), result, timestamps)
         return events
 
     # ---- internals ------------------------------------------------------
@@ -430,11 +467,10 @@ class Transcriber:
             return events
 
         cut = find_cut(tokens, self.held_ms)
-        if cut is None and self.last_token_ms is not None \
-                and self.stream_ms - self.last_token_ms >= PAUSE_CLOSE_MS:
+        if cut is None and self._in_pause():
             cut = len(tokens)
         if cut:
-            events += self._commit(tokens, cut)
+            events += self._commit(tokens, cut, result, timestamps)
             # Whatever remains after the cut is the start of the next segment;
             # report it right away so the screen never goes blank mid-word.
             rest, rest_ts = self._segment_tokens(result)
@@ -458,13 +494,25 @@ class Transcriber:
             self.offset = start
         return list(tokens[start:]), list(timestamps[start:])
 
-    def _commit(self, tokens, count: int) -> list[dict]:
+    def _in_pause(self) -> bool:
+        """Quiet for PAUSE_CLOSE_MS: no voice energy and no new token."""
+        if self.last_token_ms is None:
+            return False
+        quiet_since = self.last_token_ms
+        if self.last_voiced_ms is not None:
+            quiet_since = max(quiet_since, self.last_voiced_ms)
+        return self.stream_ms - quiet_since >= PAUSE_CLOSE_MS
+
+    def _commit(self, tokens, count: int, result, timestamps) -> list[dict]:
         """Closes the segment made of the first `count` open tokens."""
         text = tokens_to_text(tokens[:count])
         events: list[dict] = []
         if text:
             self.partial_text = text
-            events.append(self._event("final", text))
+            end = self.stream_ms
+            if count <= len(timestamps):
+                end = min(end, self._ms(result, timestamps[count - 1]) + TOKEN_TAIL_MS)
+            events.append(self._event("final", text, end_ms=end))
             self.segment_id += 1
         self.offset += count
         self.partial_text = ""
@@ -476,11 +524,11 @@ class Transcriber:
     def _ms(result, timestamp: float) -> int:
         return int((result.start_time + timestamp) * 1000)
 
-    def _event(self, kind: str, text: str) -> dict:
+    def _event(self, kind: str, text: str, end_ms: int | None = None) -> dict:
         start = self.first_token_ms if self.first_token_ms is not None else self.stream_ms
-        # The newest token's onset plus a little is a better end than "now" for
-        # a closed line, but partials are still growing, so they run to now.
-        end = self.stream_ms
+        # A closed line ends shortly after its last token; a partial is still
+        # growing, so it runs to now.
+        end = self.stream_ms if end_ms is None else end_ms
         return {
             "type": kind,
             "segmentId": self.segment_id,
