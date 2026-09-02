@@ -10,7 +10,8 @@ macOS-native lecture recorder for US-bound study-abroad students. Records classr
 - **Pluggable engines**: one global OpenAI-compatible `base_url` / `key`, independent model IDs for STT / translation / notes / QA. One-click presets for OpenAI, DeepSeek, Groq, SiliconFlow, Ollama, LM Studio.
 - **Offline ASR, word by word in every language**: fully local transcription with no API calls, installed automatically on first use. One model covers all languages, so there is no engine to pick per language:
   - NVIDIA `nemotron-3.5-asr-streaming-0.6b`, a cache-aware FastConformer transducer covering 40 languages with its own punctuation and casing, runs through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) on the CPU. At the default 160 ms chunk a word reaches the screen about 200 ms after it is spoken (measured RTF ≈ 0.15–0.19 on an M-series Mac), and the chunk size is a setting (80 ms – 1120 ms).
-  - Segmentation never resets the decoder: a line closes on a pause, on sentence punctuation, or on a 6 s soft cut at a clause or word boundary, so nothing is lost at the seams.
+  - A CT-Transformer punctuation model (Chinese + English, 300 MB, a few milliseconds per call) restores punctuation and decides where sentences end. Streaming ASR models place sentence marks late or not at all in continuous speech; this one reads the text instead, so lines break at real sentence boundaries and carry punctuation and capitalisation.
+  - Segmentation never resets the decoder: a line closes at a punctuation-model sentence end, on a pause (no voice energy for 0.8 s), or on a 6 s soft cut at a clause or word boundary, so nothing is lost at the seams.
   - The earlier two-pass design (MLX streaming draft + Qwen3-ASR re-transcription) is gone: the ONNX runtime is fast enough at small chunks that the correction pass no longer paid for its delay and 2–4 GB of memory.
 - **AI-generated structured notes**: one-shot Markdown summary from the lecture transcript, course-level organization, retranslate with a bigger model when you have time.
 - **MenuBar mini + global shortcuts**: ⌘⇧R to start/stop, ⌘⇧M to bookmark a moment, ⌘⇧T to toggle translation — works even when the main window is hidden.
@@ -29,9 +30,10 @@ macOS-native lecture recorder for US-bound study-abroad students. Records classr
   | model | role | size |
   |---|---|---|
   | `nemotron-3.5-asr-streaming-0.6b` (sherpa-onnx int8) | streaming ASR, one file per chunk size | 650 MB |
+  | `sherpa-onnx-punct-ct-transformer-zh-en` | punctuation and sentence boundaries | 300 MB |
   | `Hy-MT2-1.8B-4bit` | local translation (optional) | 1.0 GB |
 
-  Weights live in `~/.cache/huggingface`. The engine loads into memory at launch (about 2 GB resident) and stays warm, so recordings start instantly.
+  Weights live in `~/.cache/huggingface`. The engine loads into memory at launch (about 3 GB resident) and stays warm, so recordings start instantly.
 
 ## Build
 

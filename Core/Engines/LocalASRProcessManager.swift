@@ -129,13 +129,20 @@ actor LocalASRProcessManager {
             return
         }
         self.process = nil
+        await Self.terminateQuickly(process, name: "asr_server")
+    }
+
+    /// SIGTERM, a short grace period, then SIGKILL. The sidecar holds nothing
+    /// that needs flushing, so there is no reason to wait for it: this used to
+    /// sleep a fixed two seconds, and with the translator doing the same, ⌘Q
+    /// blocked the app for four seconds and people force-quit it.
+    static func terminateQuickly(_ process: Process, name: String) async {
         process.terminate()
-        // SIGTERM can be swallowed while Python sits inside a blocking torch
-        // call, leaving an orphan holding a port and several GB of weights.
-        // Give it a moment, then make sure it is gone.
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        for _ in 0..<6 where process.isRunning {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
         if process.isRunning {
-            NSLog("[LocalASRProcessManager] sidecar ignored SIGTERM, sending SIGKILL")
+            NSLog("[\(name)] did not exit on SIGTERM within 300ms, sending SIGKILL")
             kill(process.processIdentifier, SIGKILL)
         }
     }

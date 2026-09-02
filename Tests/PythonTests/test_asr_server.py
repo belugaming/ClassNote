@@ -26,12 +26,18 @@ from asr_server import (
     PAUSE_CLOSE_MS,
     SOFT_CUT_MS,
     TOKEN_TAIL_MS,
+    SENT_MARK_KINDS,
     Transcriber,
+    apply_marks,
+    content_ends,
+    cut_from_marks,
     ends_sentence,
     find_cut,
     parse_chunk_ms,
     pcm_to_float,
+    punctuator_applies,
     resolve_language,
+    strip_marks,
     text_width,
     tokens_to_text,
 )
@@ -159,6 +165,62 @@ class FindCutTests(unittest.TestCase):
         self.assertIsNone(find_cut(words("still going on and on and on"), SOFT_CUT_MS - 1))
 
 
+class PunctuationHelperTests(unittest.TestCase):
+    def test_strip_marks_keeps_decimals_and_acronyms(self):
+        self.assertEqual(strip_marks("gold. The value, is 3.5 in the U.S. now"),
+                         "gold The value is 3.5 in the U.S now")
+
+    def test_punctuator_only_for_chinese_and_english(self):
+        self.assertTrue(punctuator_applies("today we talk about 细胞呼吸 and ATP"))
+        self.assertFalse(punctuator_applies("私は学生です"))
+        self.assertFalse(punctuator_applies("Привет мир"))
+
+    def test_apply_marks_english_uses_ascii_marks_and_capitalizes(self):
+        raw = "three years ago for oppenheimer uh we had a talk"
+        marks = [(27, "。"), (29, "，"), (39, "。")]  # after "oppenheimer", "uh", the end
+        self.assertEqual(apply_marks(raw, marks, drop_trailing=True),
+                         "Three years ago for oppenheimer. Uh, we had a talk")
+        self.assertEqual(apply_marks(raw, marks, drop_trailing=False),
+                         "Three years ago for oppenheimer. Uh, we had a talk.")
+
+    def test_apply_marks_chinese_keeps_fullwidth_marks(self):
+        raw = "今天我们来讲细胞呼吸也就是能量的过程"
+        marks = [(10, "，"), (18, "。")]
+        self.assertEqual(apply_marks(raw, marks, drop_trailing=False), "今天我们来讲细胞呼吸，也就是能量的过程。")
+
+    def test_apply_marks_preserves_spacing_between_scripts(self):
+        # The punctuator's own output glues "讲cellular"; the transcript keeps
+        # the ASR spacing and only gains the marks.
+        raw = "今天讲 cellular respiration 也就是细胞呼吸"
+        marks = _FakePunctuator({strip_marks(raw): "今天讲cellular respiration，也就是细胞呼吸。"}).marks(raw)
+        self.assertEqual(apply_marks(raw, marks, False), "今天讲 cellular respiration，也就是细胞呼吸。")
+
+    def test_apply_marks_removes_the_space_left_by_a_dropped_chinese_comma(self):
+        raw = "第一个阶段是糖酵解, 发生在细胞质里"
+        marks = _FakePunctuator({strip_marks(raw): "第一个阶段是糖酵解，发生在细胞质里。"}).marks(raw)
+        self.assertEqual(apply_marks(raw, marks, False), "第一个阶段是糖酵解，发生在细胞质里。")
+
+    def test_apply_marks_drops_the_asr_models_own_marks_but_not_decimals(self):
+        raw = "what, about 3.5 percent. of it"
+        marks = _FakePunctuator({strip_marks(raw): "what about 3 . 5 percent？of it。"}).marks(raw)
+        self.assertEqual(apply_marks(raw, marks, True), "What about 3.5 percent? Of it")
+
+    def test_cut_from_marks_lands_on_a_token_boundary_and_skips_the_artifact(self):
+        toks = words("fifty pieces of gold the tribal chief")
+        ends = content_ends(toks)
+        # A sentence end after "gold" (content 17) and the artifact at the end.
+        marks = [(17, "。"), (ends[-1], "。")]
+        self.assertEqual(cut_from_marks(toks, marks, SENT_MARK_KINDS), 4)
+
+    def test_cut_from_marks_ignores_a_mark_inside_a_token(self):
+        toks = words("fifty pieces of gold")
+        self.assertIsNone(cut_from_marks(toks, [(3, "。")], SENT_MARK_KINDS))
+
+    def test_cut_from_marks_respects_minimum_sentence_length(self):
+        toks = words("yes the tribal chief then called")
+        self.assertIsNone(cut_from_marks(toks, [(3, "。")], SENT_MARK_KINDS))
+
+
 # ---------------------------------------------------------------------------
 # Transcriber against a scripted recogniser
 # ---------------------------------------------------------------------------
@@ -209,8 +271,31 @@ class _FakeRecognizer:
 
 
 class _FakeEngine:
-    def __init__(self, recognizer):
+    def __init__(self, recognizer, punctuator=None):
         self.recognizer = recognizer
+        self.punctuator = punctuator
+
+
+class _FakePunctuator:
+    """Places marks by content position, the way the real one reports them:
+    tests give it the punctuated form of the text it will be asked about."""
+
+    def __init__(self, punctuated_by_raw):
+        self.table = punctuated_by_raw
+        self.calls = 0
+
+    def marks(self, raw):
+        self.calls += 1
+        out = self.table.get(strip_marks(raw))
+        if out is None:
+            return []
+        marks, k = [], 0
+        for ch in out:
+            if ch in "。！？，、；：,;:!?.":
+                marks.append((k, ch))
+            elif not ch.isspace():
+                k += 1
+        return marks
 
 
 class TranscriberTests(unittest.TestCase):
@@ -257,7 +342,7 @@ class TranscriberTests(unittest.TestCase):
             events += self.feed(t)
             elapsed += 100
         self.assertEqual([e["type"] for e in events], ["final"])
-        self.assertEqual(events[0]["text"], "hello world")
+        self.assertEqual(events[0]["text"], "Hello world")
         self.assertEqual(events[0]["segmentId"], 0)
         self.assertEqual(events[0]["startMs"], 20)
         # Ends shortly after its last token, not at "now".
@@ -309,7 +394,7 @@ class TranscriberTests(unittest.TestCase):
         events = self.feed(t, new=[(" seven", 0.12)])
         texts = [e["text"] for e in events]
         self.assertNotIn("one", texts[-1])
-        self.assertEqual(texts[-1], "seven")
+        self.assertEqual(texts[-1], "Seven")
 
     def test_finish_flushes_the_open_segment(self):
         t = self.make()
@@ -317,12 +402,46 @@ class TranscriberTests(unittest.TestCase):
         self.rec.tokens.append((" here", 0.06))
         events = t.finish()
         self.assertEqual([e["type"] for e in events], ["partial", "final"])
-        self.assertEqual(events[-1]["text"], "last words here")
+        self.assertEqual(events[-1]["text"], "Last words here")
         self.assertTrue(t.stream.finished)
 
     def test_finish_with_nothing_open_emits_nothing(self):
         t = self.make()
         self.assertEqual(t.finish(), [])
+
+    def test_punctuator_drives_the_cut_and_the_line_text(self):
+        # The ASR model emits no marks at all; the punctuator's sentence end
+        # after "years" both closes the line and punctuates it.
+        punct = _FakePunctuator({
+            "we sat here three years ago for oppenheimer":
+                "we sat here three years。ago for oppenheimer。",
+        })
+        t = Transcriber(_FakeEngine(self.rec, punct), None)
+        toks = [(" we", 0.01), (" sat", 0.02), (" here", 0.03), (" three", 0.04),
+                (" years", 0.05), (" ago", 0.06), (" for", 0.07), (" oppenheimer", 0.08)]
+        events = self.feed(t, new=toks)
+        kinds = [e["type"] for e in events]
+        self.assertEqual(kinds, ["partial", "final", "partial"])
+        self.assertEqual(events[1]["text"], "We sat here three years.")
+        self.assertEqual(events[2]["text"], "Ago for oppenheimer")  # no artifact mark
+        self.assertEqual(events[2]["startMs"], 60)
+
+    def test_punctuator_is_skipped_for_other_languages(self):
+        punct = _FakePunctuator({})
+        t = Transcriber(_FakeEngine(self.rec, punct), "ja")
+        self.assertIsNone(t.punctuator)
+        t.set_language("en")
+        self.assertIs(t.punctuator, punct)
+
+    def test_pause_closed_line_keeps_the_trailing_mark(self):
+        punct = _FakePunctuator({"how are you doing": "how are you doing？"})
+        t = Transcriber(_FakeEngine(self.rec, punct), "en")
+        self.feed(t, new=[(" how", 0.01), (" are", 0.02), (" you", 0.03), (" doing", 0.04)])
+        events = []
+        for _ in range(PAUSE_CLOSE_MS // 100 + 1):
+            events += self.feed(t)
+        self.assertEqual([e["type"] for e in events], ["final"])
+        self.assertEqual(events[0]["text"], "How are you doing?")
 
     def test_odd_byte_frame_is_realigned(self):
         t = self.make()

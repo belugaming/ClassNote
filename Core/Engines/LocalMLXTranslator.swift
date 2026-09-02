@@ -221,11 +221,7 @@ actor LocalMLXTranslatorProcess {
         }
         self.process = nil
         self.stdinPipe = nil
-        process.terminate()
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
-        if process.isRunning {
-            kill(process.processIdentifier, SIGKILL)
-        }
+        await LocalASRProcessManager.terminateQuickly(process, name: "translate_server")
     }
 }
 

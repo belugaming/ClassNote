@@ -9,15 +9,18 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Terminating is synchronous, so block briefly rather than leaving the
-        // teardown to a task that never gets scheduled.
+        // teardown to a task that never gets scheduled. Both sidecars are torn
+        // down concurrently and each gives up after ~300ms, so quitting takes
+        // well under a second. They also watch for this pid and exit on their
+        // own, so the cap below is a backstop, not something we expect to hit.
         let done = DispatchSemaphore(value: 0)
         Task {
-            await LocalASRWarmPool.shared.retire()
-            // The translation sidecar is warm too, and holds its own weights.
-            await LocalMLXTranslatorProcess.shared.shutdown()
+            async let asr: Void = LocalASRWarmPool.shared.retire()
+            async let translator: Void = LocalMLXTranslatorProcess.shared.shutdown()
+            _ = await (asr, translator)
             done.signal()
         }
-        _ = done.wait(timeout: .now() + 8)
+        _ = done.wait(timeout: .now() + 1)
     }
 }
 #endif

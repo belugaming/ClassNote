@@ -72,12 +72,24 @@ CHUNK_CHOICES = (80, 160, 320, 560, 1120)
 DEFAULT_CHUNK_MS = 160
 MODEL_REPO = "csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-{chunk}ms-int8-2026-06-11"
 
+# Punctuation restoration (CT-Transformer, Chinese + English, ~300 MB). Nemotron
+# punctuates its own output only sporadically in continuous speech -- measured
+# on a real interview it produced no marks at all for a minute -- and a
+# streaming model cannot do better, because a sentence end is only certain
+# once the next sentence has begun. This model reads the text instead and
+# decides in a few milliseconds where the sentences are; those positions drive
+# the line breaks and the marks are inserted into the transcript.
+PUNCT_MODEL_REPO = "csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12"
+PUNCT_MODEL_FILES = ("model.onnx", "tokens.json", "config.yaml")
+
 # A segment closes once the audio has been quiet -- no voice energy and no new
 # token -- for this long. Both are required: the transducer sometimes holds a
 # word back for close to a second while the speaker is still talking (measured
 # on "丙酮酸": 0.9 s between "丙" and the next token), and a token-gap rule alone
-# cut lines mid-word there.
-PAUSE_CLOSE_MS = 600
+# cut lines mid-word there. 800 ms is long enough that a breath at a comma
+# does not break the sentence, while the punctuation model handles sentence
+# ends without needing a pause at all.
+PAUSE_CLOSE_MS = 800
 # RMS of a 16-bit frame (normalised to [-1, 1]) above which it counts as voice.
 # Same scale and neighbourhood as the app's own VADGate (0.008) and the cloud
 # chunker (0.01).
@@ -185,8 +197,15 @@ def frame_rms(pcm: bytes) -> float:
 
 
 def _is_cjk(ch: str) -> bool:
+    """Wide characters for layout purposes: Han, kana, CJK punctuation."""
     o = ord(ch)
     return 0x3000 <= o <= 0x9FFF or 0xF900 <= o <= 0xFAFF or 0xFF00 <= o <= 0xFFEF
+
+
+def _is_han(ch: str) -> bool:
+    """Chinese ideographs only -- kana and hangul are not Chinese."""
+    o = ord(ch)
+    return 0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF or 0xF900 <= o <= 0xFAFF
 
 
 def text_width(text: str) -> int:
@@ -253,6 +272,204 @@ def find_cut(tokens, held_ms: int) -> int | None:
     return n
 
 
+# ---------------------------------------------------------------------------
+# Punctuation
+# ---------------------------------------------------------------------------
+
+# Every mark either model can produce. A character that is neither one of
+# these nor whitespace is "content", and content characters are what the raw
+# transcript and the punctuator's output have in common -- the punctuator only
+# inserts marks and reflows spaces, so aligning on content is exact.
+ALL_MARKS = set("。！？，、；：,;:!?…") | {"."}
+_SENT_ASCII = {"。": ".", "！": "!", "？": "?"}
+_CLAUSE_ASCII = {"，": ",", "、": ",", "；": ";", "：": ":"}
+_TO_ASCII = {**_SENT_ASCII, **_CLAUSE_ASCII}
+# Removes the marks the ASR model already placed before the text goes to the
+# punctuator, which expects unpunctuated input (fed "gold. The" it produced
+# "gold .，The"). A period is only removed when it ends a word: "3.5" and
+# "U.S." keep theirs.
+_STRIP_RE = re.compile(r"[。！？，、；：,;:!?…]|\.(?=\s|$)")
+
+
+def strip_marks(text: str) -> str:
+    return re.sub(r"\s+", " ", _STRIP_RE.sub("", text)).strip()
+
+
+def punctuator_applies(text: str) -> bool:
+    """The CT-Transformer was trained on Chinese and English. For any other
+    script it only appends a mark at the end, so it is skipped there."""
+    for ch in text:
+        if ch.isalpha() and not (ch.isascii() or _is_han(ch)):
+            return False
+    return True
+
+
+def content_ends(tokens) -> list[int]:
+    """Cumulative count of content characters through each token."""
+    ends, n = [], 0
+    for tok in tokens:
+        n += sum(1 for ch in tok if not ch.isspace() and ch not in ALL_MARKS)
+        ends.append(n)
+    return ends
+
+
+class Punctuator:
+    """Wraps sherpa-onnx's offline punctuation model.
+
+    `marks(raw)` returns where the model would put marks, as (k, mark) pairs
+    where k is the number of content characters before the mark. Positions
+    rather than text, because the model's output drops the spaces between
+    Chinese and English ("讲cellular") and re-splits decimals ("3 . 5"); the
+    transcript keeps the ASR text verbatim and only gains the marks.
+    """
+
+    def __init__(self, model_dir: str, threads: int = 2):
+        import sherpa_onnx
+
+        self._punct = sherpa_onnx.OfflinePunctuation(
+            sherpa_onnx.OfflinePunctuationConfig(
+                model=sherpa_onnx.OfflinePunctuationModelConfig(
+                    ct_transformer=os.path.join(model_dir, "model.onnx"),
+                    num_threads=threads,
+                )
+            )
+        )
+
+    def marks(self, raw: str) -> list[tuple[int, str]]:
+        cleaned = strip_marks(raw)
+        if not cleaned or not punctuator_applies(cleaned):
+            return []
+        out = self._punct.add_punctuation(cleaned)
+        marks: list[tuple[int, str]] = []
+        k = 0
+        for ch in out:
+            if ch in ALL_MARKS:
+                # The model can emit a mark next to a kept one ("U.S." + "。").
+                # Only the first mark at a position counts.
+                if not marks or marks[-1][0] != k:
+                    marks.append((k, ch))
+            elif not ch.isspace():
+                k += 1
+        expected = sum(1 for ch in cleaned if not ch.isspace() and ch not in ALL_MARKS)
+        if k != expected:
+            log(f"[punct] alignment failed ({k} vs {expected} content chars), skipping")
+            return []
+        return marks
+
+
+def apply_marks(raw: str, marks, drop_trailing: bool) -> str:
+    """Rebuilds `raw` with the punctuator's marks inserted at content positions.
+
+    The ASR model's own marks are dropped (the punctuator has the final say),
+    decimals and in-word periods are kept. After an ASCII letter or digit a mark
+    is written in its ASCII form and followed by a space, and the next sentence
+    starts with a capital. `drop_trailing` skips a mark after the very last
+    character: the model always closes its input with one, which is right for a
+    finished line and wrong for a sentence still being spoken.
+    """
+    positions = [i for i, ch in enumerate(raw) if not ch.isspace() and ch not in ALL_MARKS]
+    total = len(positions)
+    inserts: dict[int, str] = {}
+    for k, mark in marks:
+        if k <= 0 or k > total or (k == total and drop_trailing):
+            continue
+        inserts.setdefault(k, mark)
+
+    def kept_mark(j: int) -> bool:
+        """A period glued to content on both sides ("3.5", "U.S.") stays."""
+        return raw[j] == "." and 0 < j < len(raw) - 1 \
+            and not raw[j - 1].isspace() and not raw[j + 1].isspace() \
+            and raw[j + 1] not in ALL_MARKS
+
+    def next_content(j: int) -> str:
+        for ch in raw[j:]:
+            if not ch.isspace() and ch not in ALL_MARKS:
+                return ch
+        return ""
+
+    out: list[str] = []
+    count = 0
+    capitalize_next = False
+    for i, ch in enumerate(raw):
+        if ch.isspace():
+            out.append(ch)
+            continue
+        if ch in ALL_MARKS:
+            if kept_mark(i):
+                out.append(ch)
+            continue
+        if capitalize_next and ch.isascii() and ch.isalpha():
+            ch = ch.upper()
+        capitalize_next = False
+        out.append(ch)
+        count += 1
+        mark = inserts.get(count)
+        if mark is None:
+            continue
+        # The punctuator re-splits "3.5" into "3 . 5"; that "." is the one we
+        # already keep, not a new mark.
+        if i + 1 < len(raw) and raw[i + 1] in ALL_MARKS and kept_mark(i + 1):
+            continue
+        following = next_content(i + 1)
+        if raw[i].isascii() and raw[i].isalnum() and not (following and _is_cjk(following)):
+            mark = _TO_ASCII.get(mark, mark)
+            out.append(mark)
+            if i + 1 < len(raw) and not raw[i + 1].isspace():
+                out.append(" ")
+            capitalize_next = mark in ".!?"
+        else:
+            out.append(mark)
+    return polish_text("".join(out))
+
+
+_CJK_SPACE_RE = re.compile(r"(?<=[㐀-鿿＀-￯　-〿])\s+(?=[㐀-鿿])")
+
+
+def polish_text(text: str) -> str:
+    """Display clean-up shared by punctuated and raw lines.
+
+    Dropping the ASR model's own comma can leave "唐酵解 发生" behind, and a
+    fullwidth mark before a space token gives "呼吸， 也": Chinese takes no
+    spaces between its own characters or after its own marks. And every line
+    starts a sentence now, so it opens with a capital.
+    """
+    text = re.sub(r"\s+", " ", text).strip()
+    text = _CJK_SPACE_RE.sub("", text)
+    if text and text[0].isascii() and text[0].islower():
+        text = text[0].upper() + text[1:]
+    return text
+
+
+def cut_from_marks(tokens, marks, kinds, ends=None) -> int | None:
+    """Tokens to commit so the segment closes right after the last mark of one
+    of `kinds` that (a) is not the artifact after the final character and
+    (b) falls on a token boundary; None if there is no such mark."""
+    ends = ends if ends is not None else content_ends(tokens)
+    total = ends[-1] if ends else 0
+    for k, mark in reversed(marks):
+        if mark not in kinds or k <= 0 or k >= total:
+            continue
+        # The last token whose content ends exactly here; pure-mark tokens
+        # right after it (a comma the ASR model placed) travel with it.
+        idx = None
+        for i, end in enumerate(ends):
+            if end == k:
+                idx = i
+            elif end > k:
+                break
+        if idx is None:
+            continue
+        if mark in _SENT_ASCII or mark in ".!?":
+            if not ends_sentence(apply_marks(tokens_to_text(tokens[: idx + 1]), [(k, mark)], False)):
+                continue
+        return idx + 1
+    return None
+
+
+SENT_MARK_KINDS = set("。！？.!?")
+CLAUSE_MARK_KINDS = set("，、；：,;:")
+
+
 def parse_chunk_ms(value) -> int:
     try:
         chunk = int(value)
@@ -279,6 +496,7 @@ class Engine:
         self.threads = threads
         self.on_stage = on_stage
         self.recognizer = None
+        self.punctuator: Punctuator | None = None
         self.model_dir = None
 
     @property
@@ -294,8 +512,10 @@ class Engine:
     def _load(self):
         from huggingface_hub import snapshot_download
 
-        cached = self._cached_snapshot()
-        total = 2 if cached else 3
+        cached = self._cached_snapshot(self.repo, ("encoder.int8.onnx", "decoder.int8.onnx",
+                                                   "joiner.int8.onnx", "tokens.txt"))
+        punct_cached = self._cached_snapshot(PUNCT_MODEL_REPO, PUNCT_MODEL_FILES)
+        total = 3 + (0 if cached and punct_cached else 1)
         step = 0
 
         def stage(key: str):
@@ -307,14 +527,23 @@ class Engine:
             if self.on_stage:
                 self.on_stage(key, step, total)
 
-        if cached:
-            self.model_dir = cached
-        else:
+        if not (cached and punct_cached):
             stage("download")
-            self.model_dir = snapshot_download(self.repo)
+        self.model_dir = cached or snapshot_download(self.repo)
+        punct_dir = punct_cached or snapshot_download(PUNCT_MODEL_REPO,
+                                                      allow_patterns=list(PUNCT_MODEL_FILES))
 
         stage("streaming")
         self.recognizer = self._build_recognizer(self.model_dir)
+
+        stage("punct")
+        try:
+            self.punctuator = Punctuator(punct_dir)
+        except Exception as exc:
+            # Degraded but usable: line breaks fall back to the ASR model's own
+            # sparse marks and the timed cuts.
+            log(f"[engine] punctuation model unavailable, continuing without: {exc}")
+            self.punctuator = None
 
         # First inference pays for onnxruntime session setup. Burn that on
         # silence now, before the user's first words.
@@ -327,16 +556,16 @@ class Engine:
             log(f"[engine] warmup failed (non-fatal): {exc}")
         log(f"[engine] ready: {self.repo} on {self.threads} threads")
 
-    def _cached_snapshot(self) -> str | None:
+    @staticmethod
+    def _cached_snapshot(repo: str, required) -> str | None:
         """Path of an already-downloaded model, or None. Avoids reporting a
         download stage (and touching the network) when nothing is needed."""
         from huggingface_hub import snapshot_download
 
         try:
-            path = snapshot_download(self.repo, local_files_only=True)
+            path = snapshot_download(repo, local_files_only=True)
         except Exception:
             return None
-        required = ("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt")
         if all(os.path.exists(os.path.join(path, name)) for name in required):
             return path
         return None
@@ -382,6 +611,10 @@ class Transcriber:
         self.stream = self.recognizer.create_stream()
         if self.language:
             self.stream.set_option("language", self.language)
+        self.punctuator = engine.punctuator if self._punctuator_fits(self.language) else None
+        # Marks for the current raw segment text, recomputed only when it changes.
+        self._marks_for: str | None = None
+        self._marks: list[tuple[int, str]] = []
 
         self.stream_ms = 0          # audio fed so far
         self.offset = 0             # tokens already committed to closed segments
@@ -403,6 +636,26 @@ class Transcriber:
         takes effect from the next chunk without touching the encoder cache."""
         self.language = resolve_language(language)
         self.stream.set_option("language", self.language or "")
+        self.punctuator = self.engine.punctuator if self._punctuator_fits(self.language) else None
+        self._marks_for = None
+
+    @staticmethod
+    def _punctuator_fits(language: str | None) -> bool:
+        """The punctuation model covers Chinese and English; with auto-detect
+        the text itself is checked per call (see punctuator_applies)."""
+        return language is None or language.split("-")[0].lower() in ("en", "zh")
+
+    def _marks_for_text(self, raw: str) -> list[tuple[int, str]]:
+        if self.punctuator is None or not raw:
+            return []
+        if raw != self._marks_for:
+            self._marks_for = raw
+            try:
+                self._marks = self.punctuator.marks(raw)
+            except Exception as exc:
+                log(f"[punct] {exc}")
+                self._marks = []
+        return self._marks
 
     @property
     def held_ms(self) -> int:
@@ -433,7 +686,8 @@ class Transcriber:
         result = self.recognizer.get_result_all(self.stream)
         tokens, timestamps = self._segment_tokens(result)
         if tokens:
-            events += self._commit(tokens, len(tokens), result, timestamps)
+            events += self._commit(tokens, len(tokens), result, timestamps,
+                                   self._marks_for_text(tokens_to_text(tokens)))
         return events
 
     # ---- internals ------------------------------------------------------
@@ -457,7 +711,11 @@ class Transcriber:
                 self.first_token_ms = self._ms(result, timestamps[0])
             self.last_token_ms = self._ms(result, timestamps[-1])
 
-        text = tokens_to_text(tokens)
+        raw = tokens_to_text(tokens)
+        marks = self._marks_for_text(raw)
+        # A partial is a sentence still being spoken, so the mark the
+        # punctuator always puts after the last word is left off.
+        text = apply_marks(raw, marks, drop_trailing=True) if marks else polish_text(raw)
         if text != self.partial_text:
             self.partial_text = text
             if text:
@@ -466,21 +724,39 @@ class Transcriber:
         if closing or not tokens:
             return events
 
-        cut = find_cut(tokens, self.held_ms)
+        cut = self._find_cut(tokens, marks)
         if cut is None and self._in_pause():
             cut = len(tokens)
         if cut:
-            events += self._commit(tokens, cut, result, timestamps)
+            events += self._commit(tokens, cut, result, timestamps, marks)
             # Whatever remains after the cut is the start of the next segment;
             # report it right away so the screen never goes blank mid-word.
             rest, rest_ts = self._segment_tokens(result)
             if rest:
                 self.first_token_ms = self._ms(result, rest_ts[0])
                 self.last_token_ms = self._ms(result, rest_ts[-1])
-                self.partial_text = tokens_to_text(rest)
+                rest_raw = tokens_to_text(rest)
+                rest_marks = self._marks_for_text(rest_raw)
+                self.partial_text = apply_marks(rest_raw, rest_marks, True) if rest_marks \
+                    else polish_text(rest_raw)
                 if self.partial_text:
                     events.append(self._event("partial", self.partial_text))
         return events
+
+    def _find_cut(self, tokens, marks) -> int | None:
+        """Where to close the open segment, preferring the punctuation model's
+        sentence ends, then its clause marks once the soft cut is due, then the
+        ASR model's own marks and word boundaries (`find_cut`)."""
+        if marks:
+            ends = content_ends(tokens)
+            cut = cut_from_marks(tokens, marks, SENT_MARK_KINDS, ends)
+            if cut is not None:
+                return cut
+            if self.held_ms >= SOFT_CUT_MS:
+                cut = cut_from_marks(tokens, marks, CLAUSE_MARK_KINDS, ends)
+                if cut is not None:
+                    return cut
+        return find_cut(tokens, self.held_ms)
 
     def _segment_tokens(self, result):
         """The open segment's tokens and timestamps, skipping any leading
@@ -503,9 +779,16 @@ class Transcriber:
             quiet_since = max(quiet_since, self.last_voiced_ms)
         return self.stream_ms - quiet_since >= PAUSE_CLOSE_MS
 
-    def _commit(self, tokens, count: int, result, timestamps) -> list[dict]:
+    def _commit(self, tokens, count: int, result, timestamps, marks=()) -> list[dict]:
         """Closes the segment made of the first `count` open tokens."""
         text = tokens_to_text(tokens[:count])
+        if marks:
+            # Marks up to and including the one this line ends on. A line closed
+            # by a pause keeps the trailing mark: that is where its sentence ends.
+            limit = content_ends(tokens[:count])[-1] if count else 0
+            text = apply_marks(text, [(k, m) for k, m in marks if k <= limit], drop_trailing=False)
+        else:
+            text = polish_text(text)
         events: list[dict] = []
         if text:
             self.partial_text = text
@@ -518,6 +801,7 @@ class Transcriber:
         self.partial_text = ""
         self.first_token_ms = None
         self.last_token_ms = None
+        self._marks_for = None
         return events
 
     @staticmethod
