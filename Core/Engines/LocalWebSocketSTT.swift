@@ -1,10 +1,12 @@
 import Foundation
 
-/// STTProvider backed by the local FunASR Python WebSocket sidecar.
+/// STTProvider backed by the local sherpa-onnx (Nemotron) Python WebSocket
+/// sidecar.
 ///
-/// The sidecar process is started lazily on the first call and torn down when
-/// the returned stream terminates for any reason. One process per call, so a
-/// live session and a file import never share streaming state.
+/// The sidecar process is shared and kept warm (see `LocalASRWarmPool`); each
+/// call opens its own WebSocket connection, and the sidecar gives every
+/// connection its own stream, so a live session and a file import never share
+/// decoding state.
 final class LocalWebSocketSTT: STTProvider, Sendable {
     private let engine: LocalASREngineKind
     private let language: String?
@@ -74,10 +76,25 @@ final class LocalWebSocketSTT: STTProvider, Sendable {
                     let connection = try await LocalASRConnection.connect(engine: engine,
                                                                          language: lang,
                                                                          onProgress: self.onProgress)
+                    // The sidecar only reads 16 kHz mono WAV; AVFoundation here
+                    // handles every container macOS can play (m4a, mp4, mov,
+                    // mp3…), so the conversion happens on this side.
+                    let wavURL: URL
+                    do {
+                        let pcm = try await AudioConverter.convertToPCM16Mono16k(inputURL: url)
+                        let wav = WavEncoder.encode(pcm16: pcm, sampleRate: 16000, channels: 1)
+                        wavURL = FileManager.default.temporaryDirectory
+                            .appendingPathComponent("classnote-import-\(UUID().uuidString).wav")
+                        try wav.write(to: wavURL)
+                    } catch {
+                        await LocalASRWarmPool.shared.endUse()
+                        throw error
+                    }
+                    defer { try? FileManager.default.removeItem(at: wavURL) }
                     // Release the sidecar hold even if sending the request fails,
                     // otherwise its idle timer would never resume.
                     do {
-                        try await connection.sendFile(path: url.path)
+                        try await connection.sendFile(path: wavURL.path)
                     } catch {
                         await LocalASRWarmPool.shared.endUse()
                         throw error

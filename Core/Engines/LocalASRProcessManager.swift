@@ -27,10 +27,10 @@ actor LocalASRProcessManager {
 
     /// Spawns the sidecar and waits for its READY marker on stdout, returns the ws URL.
     ///
-    /// `onProgress` reports setup stages (dependency install, then per-model
+    /// `onProgress` reports setup stages (dependency install, model download,
     /// loading) so the caller can show progress: a first run installs packages
-    /// and downloads ~1 GB of models, and loading them costs ~30s even when
-    /// cached, which otherwise looks like the app has hung.
+    /// and downloads ~650 MB of weights, which otherwise looks like the app
+    /// has hung.
     func start(language: String? = nil,
                onProgress: (@Sendable (String) -> Void)? = nil) async throws -> URL {
         NSLog("[LocalASRProcessManager] start() called for engine=\(engine.rawValue)")
@@ -58,26 +58,19 @@ actor LocalASRProcessManager {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: LocalASREnvironment.shared.pythonExecutablePath)
-        // --device auto lets the sidecar pick MPS for the streaming pass when
-        // the GPU is available; it keeps the offline pass on CPU, which measured
-        // faster for short utterances.
-        // --quality picks how much stays resident. Without it the sidecar
-        // defaults to the 1.7B second pass, which does not fit on a small Mac
-        // alongside the streaming model and the translator.
-        var arguments = [scriptPath, "--engine", engine.rawValue, "--port", "\(port)",
-                         "--device", "auto",
-                         "--quality", LocalEngineQuality.current.rawValue]
-        // The sidecar picks its model set from this at startup (FunASR's only
-        // streaming model is Chinese-only), so it must be passed on the command
-        // line, not just in the later `config` frame.
+        // --chunk-ms selects which nemotron export the sidecar loads; each
+        // chunk size is a separate ~650 MB model file.
+        var arguments = [scriptPath, "--port", "\(port)",
+                         "--chunk-ms", LocalEngineLatency.current.rawValue]
+        // The model is multilingual, so this is only the default language hint
+        // for connections that do not send their own `config` frame.
         if let language, !language.isEmpty, language != "auto" {
             arguments += ["--language", language]
         }
         process.arguments = arguments
         // Force unbuffered stdout so the READY marker arrives as soon as the
-        // models finish loading rather than sitting in Python's block buffer.
-        // Model weights stay in the default ~/.cache/modelscope location, which
-        // is shared with any other FunASR install the user already has.
+        // model finishes loading rather than sitting in Python's block buffer.
+        // Weights live in the default ~/.cache/huggingface location.
         var environment = ProcessInfo.processInfo.environment
         environment["PYTHONUNBUFFERED"] = "1"
         process.environment = environment
@@ -178,9 +171,9 @@ actor LocalASRProcessManager {
                                      process: Process,
                                      onProgress: (@Sendable (String) -> Void)?) async throws {
         let handle = pipe.fileHandleForReading
-        // Loading four models can exceed 60s on a cold filesystem cache, and the
-        // very first run also downloads them. Progress lines let us distinguish
-        // "still working" from "hung", so the deadline only has to cover a stall.
+        // The very first run downloads ~650 MB, which can take minutes. Progress
+        // lines let us distinguish "still working" from "hung", so the deadline
+        // only has to cover a stall.
         var deadline = Date().addingTimeInterval(180)
         var pending = Data()
 

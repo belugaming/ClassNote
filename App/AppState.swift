@@ -492,9 +492,9 @@ enum SttBackend: String, CaseIterable, Identifiable {
     case openAICompatible = "openai"
     case whisperKitLocal = "whisperkit"
     case appleSpeech = "apple"
-    // Both rawValues now drive the same all-MLX sidecar. They are kept as two
-    // cases only so a stored setting from an earlier build still decodes; the
-    // language-specific engine split they used to mean is gone.
+    // Both rawValues now drive the same sherpa-onnx sidecar. They are kept as
+    // two cases only so a stored setting from an earlier build still decodes;
+    // the language-specific engine split they used to mean is gone.
     case funasr = "funasr"
     case nemotronStreaming = "nemotron"
     var id: String { rawValue }
@@ -503,7 +503,7 @@ enum SttBackend: String, CaseIterable, Identifiable {
         case .openAICompatible: return "OpenAI Compatible (Cloud)"
         case .whisperKitLocal: return "WhisperKit (Local, macOS Apple Silicon)"
         case .appleSpeech: return L10n.t("settings.engines.sttBackend.apple")
-        case .funasr, .nemotronStreaming: return "Local MLX (2-Pass, Apple Silicon)"
+        case .funasr, .nemotronStreaming: return "Local Nemotron (Streaming, Apple Silicon)"
         }
     }
 

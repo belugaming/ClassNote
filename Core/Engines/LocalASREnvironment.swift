@@ -38,10 +38,18 @@ struct LocalASREnvironment {
         venvURL.appendingPathComponent("bin/python3")
     }
 
+    /// Bumped whenever the requirements files change in a way an existing venv
+    /// cannot satisfy, so that install() runs again instead of the sidecar
+    /// failing on an import. 2: sherpa-onnx replaced mlx-audio.
+    static let requirementsGeneration = 2
+
+    private func installMarkerURL(engine: LocalASREngineKind) -> URL {
+        venvURL.appendingPathComponent(".installed-\(engine.rawValue)-v\(Self.requirementsGeneration)")
+    }
+
     func isReady(engine: LocalASREngineKind) -> Bool {
         guard FileManager.default.fileExists(atPath: pythonBinURL.path) else { return false }
-        let marker = venvURL.appendingPathComponent(".installed-\(engine.rawValue)")
-        return FileManager.default.fileExists(atPath: marker.path)
+        return FileManager.default.fileExists(atPath: installMarkerURL(engine: engine).path)
     }
 
     func install(engine: LocalASREngineKind) -> AsyncThrowingStream<InstallProgress, Error> {
@@ -77,17 +85,17 @@ struct LocalASREnvironment {
                     guard let reqPath else {
                         throw LocalASREnvironmentError.pipInstallFailed("缺少 requirements 文件")
                     }
-                    // Installing torch pulls hundreds of MB and can run for
-                    // minutes. Stream pip's progress out so the UI can show
-                    // which package is downloading instead of freezing.
+                    // sherpa-onnx and mlx-lm together pull a few hundred MB and
+                    // can run for minutes. Stream pip's progress out so the UI
+                    // can show which package is downloading instead of freezing.
                     try Self.run(pythonBinURL.path,
                                  ["-m", "pip", "install", "--progress-bar", "off", "-r", reqPath]) { line in
                         guard let package = Self.installingPackageName(from: line) else { return }
                         continuation.yield(InstallProgress(
                             stage: "\(L10n.t("localASR.installDeps")) \(package)", fraction: nil))
                     }
-                    let marker = venvURL.appendingPathComponent(".installed-\(engine.rawValue)")
-                    FileManager.default.createFile(atPath: marker.path, contents: nil)
+                    FileManager.default.createFile(atPath: installMarkerURL(engine: engine).path,
+                                                   contents: nil)
                     continuation.yield(InstallProgress(stage: L10n.t("localASR.installDone"),
                                                       fraction: 1.0))
                     continuation.finish()

@@ -2,13 +2,14 @@ import Foundation
 
 /// Keeps one local ASR sidecar alive across recordings.
 ///
-/// Model loading costs ~30s (plus a multi-minute first-run download), and the
-/// sidecar creates a fresh Session per WebSocket connection while sharing the
-/// loaded models. So the process is worth keeping: starting it once at launch
-/// makes every later recording begin immediately.
+/// Model loading costs a few seconds (plus a ~650 MB first-run download), and
+/// the sidecar creates a fresh Session per WebSocket connection while sharing
+/// the loaded model. So the process is worth keeping: starting it once at
+/// launch makes every later recording begin immediately.
 ///
-/// A sidecar is bound to the language it loaded models for, so a language or
-/// engine change retires the old process and starts a new one.
+/// A sidecar is bound to the chunk size it loaded, so a latency or engine
+/// change retires the old process and starts a new one. The model itself is
+/// multilingual; the language is only a per-connection hint.
 actor LocalASRWarmPool {
     static let shared = LocalASRWarmPool()
 
@@ -16,14 +17,14 @@ actor LocalASRWarmPool {
         let engine: LocalASREngineKind
         /// Normalized source language; nil means the sidecar's own default.
         let language: String?
-        /// Which models are loaded. Part of the identity: changing it swaps the
-        /// weights a running sidecar holds, so the warm one cannot serve it.
-        let quality: LocalEngineQuality
+        /// Which chunk-size export is loaded. Part of the identity: each is a
+        /// different model file, so a warm sidecar cannot serve another one.
+        let latency: LocalEngineLatency
     }
 
-    /// A loaded sidecar holds ~4.6 GB resident (measured), which is a lot to keep
+    /// A loaded sidecar holds ~2 GB resident (measured), which is a lot to keep
     /// for a user who is not recording. Retire it after this long with no
-    /// connection; the next recording reloads it, paying ~30s once.
+    /// connection; the next recording reloads it, paying a few seconds once.
     static let idleTimeout: TimeInterval = 30 * 60
 
     private var key: Key?
@@ -42,7 +43,7 @@ actor LocalASRWarmPool {
              language: String?,
              onProgress: (@Sendable (String) -> Void)? = nil) async throws -> URL {
         let wanted = Key(engine: engine, language: Self.normalize(language),
-                         quality: LocalEngineQuality.current)
+                         latency: LocalEngineLatency.current)
 
         if let key, key != wanted {
             // Different language or engine: the loaded models cannot serve it.
@@ -86,7 +87,7 @@ actor LocalASRWarmPool {
     /// True when a sidecar for exactly this configuration is up.
     func isReady(engine: LocalASREngineKind, language: String?) async -> Bool {
         guard let key, key == Key(engine: engine, language: Self.normalize(language),
-                                  quality: LocalEngineQuality.current),
+                                  latency: LocalEngineLatency.current),
               let manager else { return false }
         return await manager.isRunning
     }

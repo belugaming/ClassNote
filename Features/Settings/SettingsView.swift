@@ -492,7 +492,7 @@ struct EngineSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                     if appState.sttBackend.isLocalSidecar {
-                        LocalEngineQualityRow()
+                        LocalEngineLatencyRow()
                         LocalEngineStatusRow()
                     }
                 }
@@ -874,66 +874,29 @@ struct LocalTranslationStatusRow: View {
 #endif
 
 #if os(macOS)
-/// Picks how much of the local ASR pipeline stays resident.
-///
-/// Defaults from the machine's memory and moves up on its own when the app runs
-/// somewhere with more of it, so this needs no attention on a large Mac.
-struct LocalEngineQualityRow: View {
+/// Picks the streaming model's chunk size, which is the latency of the text
+/// behind the voice. Each option is a separate ~650 MB export of the same
+/// model, so changing it downloads once and reloads the engine.
+struct LocalEngineLatencyRow: View {
     @EnvironmentObject var appState: AppState
-    @AppStorage(LocalEngineQuality.storageKey) private var raw = LocalEngineQuality.recommended.rawValue
-
-    private var quality: LocalEngineQuality {
-        LocalEngineQuality(rawValue: raw) ?? .recommended
-    }
-
-    private var memoryGB: Int {
-        Int((Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824).rounded())
-    }
-
-    /// ASR plus the translation sidecar, when local translation is selected.
-    private var combinedGB: String {
-        let translator = appState.translationBackend == .localMLX ? 1100 : 0
-        return String(format: "%.1f", Double(quality.footprintMB + translator) / 1024)
-    }
-
-    private var isTight: Bool {
-        let translator = appState.translationBackend == .localMLX ? 1100 : 0
-        // Leave macOS and a browser roughly half of a small machine.
-        return Double(quality.footprintMB + translator) / 1024 > Double(memoryGB) * 0.45
-    }
+    @AppStorage(LocalEngineLatency.storageKey) private var raw = LocalEngineLatency.default.rawValue
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Picker(L10n.t("settings.engines.quality"), selection: $raw) {
-                ForEach(LocalEngineQuality.allCases) { option in
+            Picker(L10n.t("settings.engines.latency"), selection: $raw) {
+                ForEach(LocalEngineLatency.allCases) { option in
                     Text(option.title).tag(option.rawValue)
                 }
             }
             .pickerStyle(.segmented)
 
-            Text(quality.detail)
+            Text(L10n.t("settings.engines.latency.note"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-
-            if isTight {
-                Label(String(format: L10n.t("settings.engines.memoryWarning"),
-                             "\(memoryGB)", combinedGB),
-                      systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            if !quality.hasSecondPass {
-                Label(L10n.t("settings.engines.quality.noImport"), systemImage: "info.circle")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
         .onChange(of: raw) { _, _ in
-            // A running sidecar holds the old weights, so it has to be replaced.
+            // A running sidecar holds the old export, so it has to be replaced.
             Task { await appState.reloadLocalEngine() }
         }
     }

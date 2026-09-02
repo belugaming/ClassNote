@@ -8,10 +8,10 @@ macOS-native lecture recorder for US-bound study-abroad students. Records classr
 - **Real-time bilingual subtitles**: chunked transcription + streaming chat-completion translation, with the transcript rolling in as you speak.
 - **Local-first storage**: GRDB + SQLite FTS5, everything stays in `~/Library/Application Support/ClassNote/` — audio, transcripts, notes.
 - **Pluggable engines**: one global OpenAI-compatible `base_url` / `key`, independent model IDs for STT / translation / notes / QA. One-click presets for OpenAI, DeepSeek, Groq, SiliconFlow, Ollama, LM Studio.
-- **Offline ASR, two-pass in every language**: fully local transcription with no API calls, installed automatically on first use. Everything runs on MLX — no PyTorch — and one model set covers all languages, so there is no engine to pick per language:
-  - **Pass 1 (live)** — NVIDIA `nemotron-3.5-asr-streaming-0.6b`, a cache-aware FastConformer-RNNT covering 40 languages, fills text in every 320 ms at RTF ≈ 0.17. Its output is only ever a draft.
-  - **Pass 2 (authoritative)** — when a sentence closes, `Qwen3-ASR` re-transcribes the whole utterance and replaces the live text. It covers 52 languages including Chinese, English and Cantonese, and emits its own punctuation and casing. In measurements it corrects errors the streaming pass makes — `县立体` → `线粒体`, `Mitchandria` → `mitochondria`.
-  - Because pass 2 always sees the complete utterance, a dropped streaming chunk can never corrupt the transcript — it only costs a partial.
+- **Offline ASR, word by word in every language**: fully local transcription with no API calls, installed automatically on first use. One model covers all languages, so there is no engine to pick per language:
+  - NVIDIA `nemotron-3.5-asr-streaming-0.6b`, a cache-aware FastConformer transducer covering 40 languages with its own punctuation and casing, runs through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) on the CPU. At the default 160 ms chunk a word reaches the screen about 200 ms after it is spoken (measured RTF ≈ 0.15–0.19 on an M-series Mac), and the chunk size is a setting (80 ms – 1120 ms).
+  - Segmentation never resets the decoder: a line closes on a pause, on sentence punctuation, or on a 6 s soft cut at a clause or word boundary, so nothing is lost at the seams.
+  - The earlier two-pass design (MLX streaming draft + Qwen3-ASR re-transcription) is gone: the ONNX runtime is fast enough at small chunks that the correction pass no longer paid for its delay and 2–4 GB of memory.
 - **AI-generated structured notes**: one-shot Markdown summary from the lecture transcript, course-level organization, retranslate with a bigger model when you have time.
 - **MenuBar mini + global shortcuts**: ⌘⇧R to start/stop, ⌘⇧M to bookmark a moment, ⌘⇧T to toggle translation — works even when the main window is hidden.
 - **Full-text search** across every lecture you've ever recorded.
@@ -22,18 +22,16 @@ macOS-native lecture recorder for US-bound study-abroad students. Records classr
 - Xcode 26+ / Swift 5.10+
 - `xcodegen` (`brew install xcodegen`)
 - An OpenAI-compatible API endpoint (OpenAI official, DeepSeek, Groq, SiliconFlow, Ollama, LM Studio, etc.) — not needed if you only use the local MLX engine
-- For the local ASR engine: an Apple Silicon Mac. **No Python setup required** — the app uses a system `python3` if one is 3.10 or newer, and otherwise downloads a self-contained CPython (pinned and SHA-256 verified) into Application Support. macOS's built-in `/usr/bin/python3` is 3.9 and cannot run `mlx-audio`, so it is skipped.
+- For the local ASR engine: an Apple Silicon Mac. **No Python setup required** — the app uses a system `python3` if one is 3.10 or newer, and otherwise downloads a self-contained CPython (pinned and SHA-256 verified) into Application Support. macOS's built-in `/usr/bin/python3` is 3.9 and has no `sherpa-onnx` wheel, so it is skipped.
 
   Install from **Settings → Engines**, which creates a venv under `~/Library/Application Support/ClassNote/pyenv/` and downloads the weights with progress:
 
   | model | role | size |
   |---|---|---|
-  | `nemotron-3.5-asr-streaming-0.6b` | streaming pass | 1.2 GB |
-  | `Qwen3-ASR-1.7B` | accuracy pass | 0.9 GB |
-  | `silero-vad` | endpointing | 2 MB |
+  | `nemotron-3.5-asr-streaming-0.6b` (sherpa-onnx int8) | streaming ASR, one file per chunk size | 650 MB |
   | `Hy-MT2-1.8B-4bit` | local translation (optional) | 1.0 GB |
 
-  Weights live in `~/.cache/huggingface`. The engine loads into memory at launch and stays warm, so recordings start instantly instead of paying model-loading time every session.
+  Weights live in `~/.cache/huggingface`. The engine loads into memory at launch (about 2 GB resident) and stays warm, so recordings start instantly.
 
 ## Build
 

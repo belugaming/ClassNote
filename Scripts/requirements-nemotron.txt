@@ -1,9 +1,7 @@
 # Identical to requirements-funasr.txt on purpose -- see the comment there.
-# Both engine rawValues now install the same all-MLX sidecar dependencies.
-mlx
-mlx-audio @ git+https://github.com/Blaizzy/mlx-audio.git
-# Drives translate_server.py (Hy-MT2); shares this venv with the ASR sidecar.
-mlx-lm
+sherpa-onnx>=1.13.7
+huggingface_hub
 numpy
-soundfile
 websockets
+mlx
+mlx-lm

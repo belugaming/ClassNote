@@ -1,19 +1,15 @@
-# Both local backends now run the same all-MLX sidecar (asr_server.py), so this
+# Both local backend rawValues install the same sidecar (asr_server.py), so this
 # file and requirements-nemotron.txt are intentionally identical. The engine
-# rawValue only selects which requirements file LocalASREnvironment installs;
-# the models themselves are multilingual and chosen at runtime.
+# rawValue only selects which requirements file LocalASREnvironment installs.
 #
-# FunASR / PyTorch are deliberately gone: they pulled ~3-4 GB of wheels for a
-# Chinese-only streaming model and a punctuation model that Qwen3-ASR makes
-# redundant.
-#
-# mlx-audio must come from git: the PyPI release ships only four STT backends
-# (glmasr/parakeet/voxtral/whisper) and has neither qwen3_asr nor nemotron_asr.
-# It also requires Python >= 3.10, which LocalASREnvironment already enforces.
-mlx
-mlx-audio @ git+https://github.com/Blaizzy/mlx-audio.git
-# Drives translate_server.py (Hy-MT2); shares this venv with the ASR sidecar.
-mlx-lm
+# ASR runs nemotron-3.5-asr-streaming through sherpa-onnx (ONNX Runtime on the
+# CPU). mlx-audio is gone: its streaming path could not keep up below the 1120 ms
+# chunk, and the Qwen3-ASR second pass it also served has been dropped.
+sherpa-onnx>=1.13.7
+# Fetches the ONNX weights from Hugging Face into ~/.cache/huggingface.
+huggingface_hub
 numpy
-soundfile
 websockets
+# Drives translate_server.py (Hy-MT2); shares this venv with the ASR sidecar.
+mlx
+mlx-lm
