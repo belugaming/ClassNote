@@ -74,13 +74,13 @@ jobs:
                      -skipMacroValidation \
                      -resultBundlePath build/TestResults.xcresult \
                      test-without-building 2>&1 | tee build/xcodebuild-test.log | grep -E "Test Case|Test Suite|error:|failed|passed|\*\* " || true
-          if grep -qE "\*\* TEST FAILED \*\*" build/xcodebuild-test.log; then
+          if grep -qE "\*\* TEST (EXECUTE )?FAILED \*\*" build/xcodebuild-test.log; then
             echo "::group::Failures"
             grep -nE "error:|failed" build/xcodebuild-test.log | head -200
             echo "::endgroup::"
             exit 1
           fi
-          grep -qE "\*\* TEST SUCCEEDED \*\*" build/xcodebuild-test.log
+          grep -qE "\*\* TEST (EXECUTE )?SUCCEEDED \*\*" build/xcodebuild-test.log
 
       - name: Upload logs
         if: always()
