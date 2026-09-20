@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift:
+    name: Swift build + tests (macOS)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.2.app
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: build/SourcePackages
+          key: spm-${{ runner.os }}-${{ hashFiles('project.yml') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      - name: Resolve Swift package dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project ClassNote.xcodeproj \
+            -scheme ClassNote \
+            -clonedSourcePackagesDirPath build/SourcePackages
+
+      - name: Build (Debug, with tests)
+        run: |
+          set -o pipefail
+          xcodebuild -project ClassNote.xcodeproj \
+                     -scheme ClassNote \
+                     -configuration Debug \
+                     -destination 'platform=macOS,arch=arm64' \
+                     -derivedDataPath build/DerivedData \
+                     -clonedSourcePackagesDirPath build/SourcePackages \
+                     -skipMacroValidation \
+                     build-for-testing 2>&1 | tee build/xcodebuild-build.log | grep -E "error:|warning: .*(unused|never|deprecated|Sendable|actor)|BUILD|\*\* " || true
+          # Fail on real compiler errors even if the grep above swallowed the exit code.
+          if grep -qE "(error:|\*\* BUILD FAILED \*\*)" build/xcodebuild-build.log; then
+            echo "::group::Errors"
+            grep -nE "error:" build/xcodebuild-build.log | sort -u | head -200
+            echo "::endgroup::"
+            exit 1
+          fi
+
+      - name: Run unit + integration tests
+        run: |
+          set -o pipefail
+          xcodebuild -project ClassNote.xcodeproj \
+                     -scheme ClassNote \
+                     -configuration Debug \
+                     -destination 'platform=macOS,arch=arm64' \
+                     -derivedDataPath build/DerivedData \
+                     -clonedSourcePackagesDirPath build/SourcePackages \
+                     -skipMacroValidation \
+                     -resultBundlePath build/TestResults.xcresult \
+                     test-without-building 2>&1 | tee build/xcodebuild-test.log | grep -E "Test Case|Test Suite|error:|failed|passed|\*\* " || true
+          if grep -qE "\*\* TEST FAILED \*\*" build/xcodebuild-test.log; then
+            echo "::group::Failures"
+            grep -nE "error:|failed" build/xcodebuild-test.log | head -200
+            echo "::endgroup::"
+            exit 1
+          fi
+          grep -qE "\*\* TEST SUCCEEDED \*\*" build/xcodebuild-test.log
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-logs
+          path: |
+            build/xcodebuild-build.log
+            build/xcodebuild-test.log
+          if-no-files-found: ignore
+
+  python:
+    name: Python sidecar tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: python -m pip install --quiet numpy websockets pyflakes
+
+      - name: Syntax check sidecars
+        run: |
+          python -m py_compile Scripts/asr_server.py Scripts/translate_server.py
+          python -m pyflakes Scripts/asr_server.py Scripts/translate_server.py Tests/PythonTests/*.py
+
+      - name: Run tests
+        run: python -m unittest discover -s Tests/PythonTests -v
