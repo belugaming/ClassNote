@@ -1,29 +1,11 @@
 import Foundation
 
-/// Simple energy-based VAD gate. Suppresses silent chunks to avoid wasting API calls.
-/// Not perfect but pragmatic; replace with Silero/WhisperKit VAD in v1.1.
-actor VADGate {
-    private let rmsThreshold: Double
-    private var lastVoicedAt: Date = .distantPast
-    private let hangoverSeconds: Double = 0.8
-
-    init(rmsThreshold: Double = 0.008) {
-        self.rmsThreshold = rmsThreshold
-    }
-
-    func shouldPass(chunk: AudioChunk) -> Bool {
-        let rms = Self.rms(pcm16: chunk.pcmData)
-        let now = Date()
-        if rms >= rmsThreshold {
-            lastVoicedAt = now
-            return true
-        }
-        if now.timeIntervalSince(lastVoicedAt) <= hangoverSeconds {
-            return true
-        }
-        return false
-    }
-
+/// Energy measurement for audio chunks.
+///
+/// Only `rms` survives: the pipeline deliberately does not pre-filter silence
+/// (the STT engines need the trailing silence to decide a sentence has ended),
+/// so the stateful gate this used to expose had no call sites at all.
+enum VADGate {
     static func rms(pcm16: Data) -> Double {
         guard pcm16.count >= 2 else { return 0 }
         return pcm16.withUnsafeBytes { raw -> Double in

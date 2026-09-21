@@ -47,51 +47,22 @@ final class VADTests: XCTestCase {
         let rms = VADGate.rms(pcm16: data)
         XCTAssertGreaterThan(rms, 0.3)
     }
-
-    func testGatePassesSpeechAndSuppressesSilence() async {
-        let gate = VADGate(rmsThreshold: 0.05)
-        // Loud chunk
-        let n = 1600
-        var loud = Data(capacity: n * 2)
-        for i in 0..<n {
-            let t = Double(i) / 16000.0
-            let v = sin(2 * .pi * 440 * t) * 0.8
-            let s = Int16(v * 32767.0)
-            withUnsafeBytes(of: s.littleEndian) { loud.append(contentsOf: $0) }
-        }
-        let silent = Data(repeating: 0, count: n * 2)
-        let chunkLoud = AudioChunk(pcmData: loud, sampleRate: 16000, timestamp: 0)
-        let chunkSilent = AudioChunk(pcmData: silent, sampleRate: 16000, timestamp: 100)
-        let pass1 = await gate.shouldPass(chunk: chunkLoud)
-        let pass2 = await gate.shouldPass(chunk: chunkSilent)
-        XCTAssertTrue(pass1, "Loud chunk must pass VAD")
-        // Within hangover window so should still pass
-        XCTAssertTrue(pass2, "Silent chunk within hangover should still pass")
-    }
 }
 
 final class FileWriterTests: XCTestCase {
-    func testPCMBufferWriterCreatesM4AWithoutCrashing() async throws {
+    func testMixedPCMWriterCreatesM4AWithoutCrashing() async throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("classnote-filewriter-\(UUID().uuidString).m4a")
         defer { try? FileManager.default.removeItem(at: url) }
 
-        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                         sampleRate: 48000,
-                                         channels: 1,
-                                         interleaved: false),
-              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4800) else {
-            return XCTFail("Could not create audio test buffer")
-        }
-        buffer.frameLength = 4800
-        if let channel = buffer.floatChannelData?[0] {
-            for frame in 0..<Int(buffer.frameLength) {
-                channel[frame] = 0
-            }
-        }
+        // The writer now takes the mix bus's 16 kHz mono Int16 frames directly.
+        let frames = [Int16](repeating: 0, count: 1600)
+        let pcm = frames.withUnsafeBufferPointer { Data(buffer: $0) }
 
         let writer = FileWriter(url: url)
-        writer.appendPCMBuffer(buffer)
+        for block in 0..<10 {
+            writer.append(pcm16: pcm, sampleRate: 16000, ptsFrames: Int64(block * 1600))
+        }
         await writer.finish()
 
         let attrs = try FileManager.default.attributesOfItem(atPath: url.path)

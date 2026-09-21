@@ -129,6 +129,13 @@ enum L10n {
         "session.action.generateNotes": "Generate AI notes",
         "session.action.generatingNotes": "Generating…",
         "session.action.retranslate": "Retranslate",
+        "session.action.retranslateFailed": "Retry failed translations",
+        "session.action.retranslateAll": "Retranslate everything",
+        "session.translation.failed": "Translation failed",
+        "session.translation.retry": "Retry",
+        "session.retranslate.partial": "Some segments still could not be translated. Try again later.",
+        "session.action.pause": "Pause",
+        "search.openHit": "Open in transcript",
         "session.action.retranslating": "Retranslating…",
         "session.action.export": "Export",
         "session.export.transcriptMd": "Transcript (Markdown)",
@@ -462,6 +469,17 @@ enum L10n {
         "menubar.openMain": "Open main window",
         "menubar.settings": "Settings…",
         "menubar.quit": "Quit ClassNote",
+
+        // Pipeline, capture and re-transcription (wave 2)
+        "live.engineReconnecting": "Engine restarting… subtitles resume shortly",
+        "live.engineGaveUp": "The local engine could not be restarted. Audio is still being recorded; you can re-transcribe afterwards.",
+        "session.action.retranscribe": "Re-transcribe from audio",
+        "session.retranscribe.confirm.message": "The existing transcript is replaced. Notes and flashcards made from the old transcript are kept but will be out of date.",
+        "retranscribe.noAudio": "This session has no saved recording.",
+        "retranscribe.recording": "This session is being recorded.",
+        "task.retranscribe.title": "Re-transcribe",
+        "task.retranscribe.done": "Re-transcribe finished",
+        "recovery.action.recoverAndRetranscribe": "Recover and re-transcribe",
     ]
 
     private static let zh: [String: String] = [
@@ -540,6 +558,13 @@ enum L10n {
         "session.action.generateNotes": "生成 AI 笔记",
         "session.action.generatingNotes": "生成中…",
         "session.action.retranslate": "重新翻译",
+        "session.action.retranslateFailed": "重试失败的翻译",
+        "session.action.retranslateAll": "全部重新翻译",
+        "session.translation.failed": "翻译失败",
+        "session.translation.retry": "重试",
+        "session.retranslate.partial": "仍有部分句子翻译失败，可稍后重试。",
+        "session.action.pause": "暂停",
+        "search.openHit": "在逐字稿中打开",
         "session.action.retranslating": "重译中…",
         "session.action.export": "导出",
         "session.export.transcriptMd": "逐字稿(Markdown)",
@@ -872,6 +897,17 @@ enum L10n {
         "menubar.openMain": "打开主窗口",
         "menubar.settings": "设置…",
         "menubar.quit": "退出 ClassNote",
+
+        // 管道、采集与重新转写(第二轮)
+        "live.engineReconnecting": "引擎重启中…字幕稍后恢复",
+        "live.engineGaveUp": "本地引擎无法重启。录音仍在继续,结束后可以重新转写。",
+        "session.action.retranscribe": "用录音重新转写",
+        "session.retranscribe.confirm.message": "现有逐字稿会被替换。基于旧逐字稿生成的笔记和卡片会保留,但内容会过时。",
+        "retranscribe.noAudio": "这场会话没有保存录音。",
+        "retranscribe.recording": "这场会话正在录音。",
+        "task.retranscribe.title": "重新转写",
+        "task.retranscribe.done": "重新转写完成",
+        "recovery.action.recoverAndRetranscribe": "恢复并重新转写",
     ]
 }
 

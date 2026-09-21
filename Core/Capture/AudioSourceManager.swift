@@ -82,8 +82,14 @@ final class AudioSourceManager: NSObject {
         var source: AudioSourceKind = .microphone
     }
 
-    private let chunkContinuation: AsyncStream<AudioChunk>.Continuation
-    let chunks: AsyncStream<AudioChunk>
+    /// Every live chunk stream handed out by `makeChunkStream()`. A registry
+    /// rather than one stored continuation because the STT pipeline has to be
+    /// able to restart — after an engine crash — without restarting capture,
+    /// and a terminated `AsyncStream` can never be revived.
+    private let subscribers = ChunkSubscribers()
+    /// The single producer for both the file and the chunk streams. See
+    /// `AudioMixBus`.
+    private var mixBus: AudioMixBus?
     private(set) var state = State()
 
     private var engine: AVAudioEngine?
@@ -96,17 +102,26 @@ final class AudioSourceManager: NSObject {
     private var targetFormat: AVAudioFormat!
     private var running = false
 
-    // Writer is shared between the SCK audio queue and the mic callback queue.
-    // Access only via `writer.queue.sync` / async.
+    // Only ever touched from the mix bus's own serial queue (and from `stop()`
+    // once the bus has been finished), which is what makes its lock uncontended.
     private var writer: FileWriter?
     private let microphoneDeviceID: String?
 
     init(microphoneDeviceID: String? = nil) {
         self.microphoneDeviceID = microphoneDeviceID
-        var cont: AsyncStream<AudioChunk>.Continuation!
-        self.chunks = AsyncStream(bufferingPolicy: .unbounded) { c in cont = c }
-        self.chunkContinuation = cont
         super.init()
+    }
+
+    /// A fresh chunk stream. Each caller gets its own; the mix bus feeds all of
+    /// them. `bufferingNewest` rather than `.unbounded`: a consumer that dies
+    /// (an STT engine crash) must drop audio, not grow by ~32 KB/s for the rest
+    /// of the lecture. 400 frames ≈ 40 s at the bus's 100 ms cadence.
+    func makeChunkStream() -> AsyncStream<AudioChunk> {
+        let subs = subscribers
+        return AsyncStream<AudioChunk>(bufferingPolicy: .bufferingNewest(400)) { cont in
+            let token = subs.add(cont)
+            cont.onTermination = { _ in subs.remove(token) }
+        }
     }
 
     func start(source: AudioSourceKind, outputURL: URL?) async throws {
@@ -127,13 +142,32 @@ final class AudioSourceManager: NSObject {
 
         writer = outputURL.map { FileWriter(url: $0) }
 
+        // One bus, one timeline: the capture callbacks only submit into it, and
+        // its tick is the only thing that ever reaches the file or the chunk
+        // streams. Mixed mode used to write no file at all because each callback
+        // wrote only when it believed it was the sole source.
+        let fileWriter = self.writer
+        let subs = self.subscribers
+        let bus = AudioMixBus(sampleRate: Int(targetFormat.sampleRate)) { pcm16, ptsFrames, sampleRate in
+            fileWriter?.append(pcm16: pcm16, sampleRate: sampleRate, ptsFrames: ptsFrames)
+            subs.yield(AudioChunk(pcmData: pcm16,
+                                  sampleRate: sampleRate,
+                                  timestamp: ptsFrames * 1000 / Int64(sampleRate)))
+        }
+        self.mixBus = bus
+        bus.start()
+
         switch source {
         case .microphone:
+            bus.activate(.microphone)
             try startMic()
         #if os(macOS)
         case .system:
+            bus.activate(.system)
             try await startSystemAudio()
         case .mixed:
+            bus.activate(.microphone)
+            bus.activate(.system)
             try startMic()
             try await startSystemAudio()
         #else
@@ -161,10 +195,15 @@ final class AudioSourceManager: NSObject {
         scStreamDelegate = nil
         #endif
 
+        // Flush the bus before closing the writer, or the last tick's audio is
+        // captured and then thrown away.
+        mixBus?.finish()
+        mixBus = nil
+
         await writer?.finish()
         writer = nil
 
-        chunkContinuation.finish()
+        subscribers.finishAll()
     }
 
     // MARK: - Mic
@@ -180,22 +219,13 @@ final class AudioSourceManager: NSObject {
         }
         micConverter = AVAudioConverter(from: inputFormat, to: targetFormat)
 
-        let isOnlyMicSource = (state.source == .microphone)
-        let startedAt = state.startedAt
-        let targetSampleRate = Int(targetFormat.sampleRate)
-        let writer = self.writer
-        let cont = self.chunkContinuation
+        let bus = self.mixBus
         let converter = self.micConverter
         let target = self.targetFormat!
 
         input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { buffer, _ in
-            // In mic-only mode, mic drives the recording file. In mixed mode,
-            // system audio is the file source so we skip writing here.
-            if isOnlyMicSource {
-                writer?.appendPCMBuffer(buffer)
-            }
-
-            // Convert to 16k mono Int16 and emit chunk.
+            // Convert to 16k mono Int16 and hand it to the bus, which owns both
+            // the clock and every downstream consumer.
             guard let converter = converter else { return }
             let ratio = target.sampleRate / buffer.format.sampleRate
             let outCapacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 1024)
@@ -211,14 +241,7 @@ final class AudioSourceManager: NSObject {
             if status == .error { return }
 
             guard let data = Self.pcmData(from: outBuffer) else { return }
-            let samples = data.count / 2
-            let sessionMs: Int64
-            if let start = startedAt {
-                sessionMs = Int64(Date().timeIntervalSince(start) * 1000) - Int64(Double(samples) / Double(targetSampleRate) * 1000)
-            } else {
-                sessionMs = 0
-            }
-            cont.yield(AudioChunk(pcmData: data, sampleRate: targetSampleRate, timestamp: max(0, sessionMs)))
+            bus?.submit(data, from: .microphone)
         }
         try engine.start()
     }
@@ -341,29 +364,18 @@ final class AudioSourceManager: NSObject {
         cfg.pixelFormat = kCVPixelFormatType_32BGRA
         cfg.queueDepth = 6
 
-        let targetSampleRate = Int(targetFormat.sampleRate)
-        let startedAt = state.startedAt
-        let isOnlySystemSource = (state.source == .system)
-        let writer = self.writer
-        let cont = self.chunkContinuation
+        let bus = self.mixBus
         let target = self.targetFormat!
         let sampleCounter = SampleCounter()
 
         let handler = SCStreamOutputHandler { sampleBuffer in
             sampleCounter.increment()
-
-            // Path A: write the raw CMSampleBuffer to the .m4a file. This is the
-            // OBS-style path — no PCM conversion, AVAssetWriter handles it.
-            if isOnlySystemSource {
-                writer?.appendSampleBuffer(sampleBuffer)
-            }
-
-            // Path B: also produce 16k mono Int16 PCM for the STT pipeline.
+            // Converted here and submitted to the bus; the bus tick is the only
+            // thing that writes the file, so system and mic audio cannot end up
+            // on two different timelines.
             Self.emitSTTChunk(from: sampleBuffer,
                               target: target,
-                              startedAt: startedAt,
-                              targetSampleRate: targetSampleRate,
-                              continuation: cont)
+                              submit: { data in bus?.submit(data, from: .system) })
         }
         self.scStreamOutputHandler = handler
 
@@ -399,13 +411,11 @@ final class AudioSourceManager: NSObject {
         }
     }
 
-    /// Converts an SCK audio CMSampleBuffer to 16k mono Int16 and yields it as
-    /// an `AudioChunk` for the STT pipeline. Runs on the SCK audio queue.
+    /// Converts an SCK audio CMSampleBuffer to 16k mono Int16 and hands it to
+    /// `submit`. Runs on the SCK audio queue, so it must never touch `self`.
     nonisolated private static func emitSTTChunk(from sampleBuffer: CMSampleBuffer,
                                      target: AVAudioFormat,
-                                     startedAt: Date?,
-                                     targetSampleRate: Int,
-                                     continuation: AsyncStream<AudioChunk>.Continuation) {
+                                     submit: @Sendable (Data) -> Void) {
         guard let desc = CMSampleBufferGetFormatDescription(sampleBuffer),
               let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(desc)
         else { return }
@@ -439,14 +449,7 @@ final class AudioSourceManager: NSObject {
         }
 
         guard let data = pcmData(from: outBuffer) else { return }
-        let samples = data.count / 2
-        let sessionMs: Int64
-        if let start = startedAt {
-            sessionMs = Int64(Date().timeIntervalSince(start) * 1000) - Int64(Double(samples) / Double(targetSampleRate) * 1000)
-        } else {
-            sessionMs = 0
-        }
-        continuation.yield(AudioChunk(pcmData: data, sampleRate: targetSampleRate, timestamp: max(0, sessionMs)))
+        submit(data)
     }
     #endif
 
@@ -468,7 +471,7 @@ final class AudioSourceManager: NSObject {
             let end = min(offset + chunkBytes, pcm.count)
             let slice = Data(pcm[offset..<end])
             let chunk = AudioChunk(pcmData: slice, sampleRate: sampleRate, timestamp: tsMs)
-            chunkContinuation.yield(chunk)
+            subscribers.yield(chunk)
             let ms = Int64(Double(end - offset) / Double(chunkBytes) * 1000)
             tsMs += ms
             offset = end
@@ -477,77 +480,296 @@ final class AudioSourceManager: NSObject {
             }
             if !running { break }
         }
-        chunkContinuation.finish()
+        subscribers.finishAll()
+    }
+}
+
+// MARK: - Chunk fan-out
+
+/// The live `makeChunkStream()` consumers, so the mix bus can feed several at
+/// once. Lock-guarded because it is written from the MainActor (subscribe) and
+/// read from the bus queue (yield).
+final class ChunkSubscribers: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuations: [Int: AsyncStream<AudioChunk>.Continuation] = [:]
+    private var nextToken = 0
+    private var finished = false
+
+    func add(_ continuation: AsyncStream<AudioChunk>.Continuation) -> Int {
+        lock.lock()
+        // Subscribing after capture stopped must not hand out a stream that
+        // never ends; finish it immediately instead.
+        if finished {
+            lock.unlock()
+            continuation.finish()
+            return -1
+        }
+        nextToken += 1
+        let token = nextToken
+        continuations[token] = continuation
+        lock.unlock()
+        return token
+    }
+
+    func remove(_ token: Int) {
+        lock.lock()
+        continuations[token] = nil
+        lock.unlock()
+    }
+
+    func yield(_ chunk: AudioChunk) {
+        lock.lock()
+        let live = Array(continuations.values)
+        lock.unlock()
+        for continuation in live { continuation.yield(chunk) }
+    }
+
+    func finishAll() {
+        lock.lock()
+        let live = Array(continuations.values)
+        continuations.removeAll()
+        finished = true
+        lock.unlock()
+        for continuation in live { continuation.finish() }
+    }
+}
+
+// MARK: - Mix bus
+
+/// Sums the mic and ScreenCaptureKit streams onto one 16 kHz mono Int16
+/// timeline. Both capture callbacks already convert to that format, so mixing
+/// is sample-wise addition with clipping. Each source gets its own jitter
+/// buffer because the two callbacks run on different queues at different
+/// cadences (AVAudioEngine ~85 ms at 4096 frames/48 kHz; SCK variable).
+///
+/// The bus is also the single producer for the recording file and for every
+/// chunk stream, which is what makes the file's timeline and the subtitle
+/// timestamps the same clock — both are derived from the emitted frame count
+/// rather than from `Date()`.
+final class AudioMixBus: @unchecked Sendable {
+    enum Source: Int, CaseIterable, Sendable {
+        case microphone = 0
+        case system = 1
+    }
+
+    /// (pcm16, ptsFrames, sampleRate)
+    typealias Sink = @Sendable (Data, Int64, Int) -> Void
+
+    private let lock = NSLock()
+    private var pending: [[Int16]] = [[], []]
+    private var activeSources: Set<Source> = []
+    private var emittedFrames: Int64 = 0
+    private var didLogBacklogDrop = false
+    private var timer: DispatchSourceTimer?
+    /// Owned by the bus rather than created in `start()`, so `finish()` can
+    /// drain *on it* and thereby wait out a tick that is still in flight.
+    private let queue = DispatchQueue(label: "classnote.mix")
+
+    private let sampleRate: Int
+    private let frameMs: Int
+    /// Frames emitted per tick.
+    let frameChunk: Int
+    /// Per-source jitter-buffer ceiling. A wedged source must not grow memory.
+    private let backlogCap: Int
+    private let sink: Sink
+
+    init(sampleRate: Int = 16000, frameMs: Int = 100, backlogMs: Int = 400, sink: @escaping Sink) {
+        self.sampleRate = max(sampleRate, 1)
+        self.frameMs = max(frameMs, 1)
+        self.frameChunk = max(self.sampleRate * self.frameMs / 1000, 1)
+        self.backlogCap = max(self.sampleRate * max(backlogMs, frameMs) / 1000, self.frameChunk)
+        self.sink = sink
+    }
+
+    func activate(_ source: Source) {
+        lock.lock()
+        activeSources.insert(source)
+        lock.unlock()
+    }
+
+    func submit(_ pcm16: Data, from source: Source) {
+        guard pcm16.count >= 2 else { return }
+        let samples = pcm16.withUnsafeBytes { raw -> [Int16] in
+            Array(raw.bindMemory(to: Int16.self))
+        }
+        lock.lock()
+        pending[source.rawValue].append(contentsOf: samples)
+        lock.unlock()
+    }
+
+    func start() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard timer == nil else { return }
+        let source = DispatchSource.makeTimerSource(queue: queue)
+        source.schedule(deadline: .now() + .milliseconds(frameMs),
+                        repeating: .milliseconds(frameMs),
+                        leeway: .milliseconds(10))
+        source.setEventHandler { [weak self] in
+            // Drain rather than emit one chunk per fire. Dispatch coalesces a
+            // missed fire (a stalled encoder, a busy machine), and a bus capped
+            // at one chunk per fire can never catch up: the backlog would grow
+            // to `backlogCap` and then start dropping audio out of the middle
+            // of the recording, while the PTS clock fell behind wall time.
+            guard let self else { return }
+            while self.tick() {}
+        }
+        source.resume()
+        timer = source
+    }
+
+    /// Stops the timer and drains whatever is still buffered, so the tail of a
+    /// recording is not lost between the last tick and `stop()`.
+    func finish() {
+        lock.lock()
+        timer?.cancel()
+        timer = nil
+        lock.unlock()
+        // On the mix queue, not the caller's thread: `cancel()` does not wait
+        // for a handler that is already running, and `tick` calls `sink`
+        // outside the lock. Draining here would otherwise be able to overtake
+        // an in-flight tick and hand the writer a PTS lower than the one it
+        // just appended, which latches `failed` and truncates the file.
+        //
+        // Bounded: every flushing tick consumes at least one sample from a
+        // non-empty buffer, and the loop stops once all buffers are empty.
+        queue.sync { while self.tick(flushPartial: true) {} }
+    }
+
+    /// One mix step. Internal (not private) so tests can drive the bus without
+    /// waiting on a timer. Returns false when there was nothing to emit.
+    ///
+    /// `flushPartial` is for `finish()` only: during capture a tick waits until
+    /// some source has a whole chunk, because the callbacks' cadence does not
+    /// divide the tick interval and padding the shortfall would splice silence
+    /// into the middle of the recording. A source that is genuinely stalled is
+    /// still zero-filled, since the other one has its chunk ready.
+    @discardableResult
+    func tick(flushPartial: Bool = false) -> Bool {
+        lock.lock()
+        let sources = activeSources.sorted { $0.rawValue < $1.rawValue }
+        let ready = sources.contains { source in
+            let count = pending[source.rawValue].count
+            return flushPartial ? count > 0 : count >= frameChunk
+        }
+        guard ready else {
+            // Nothing captured yet (or ever again): do not emit silence and do
+            // not advance the clock — the engines would be fed a silent stream
+            // for as long as the bus lives.
+            lock.unlock()
+            return false
+        }
+        // Starting from zeros makes the single-source case an exact
+        // pass-through: summing with silence is the identity, so a mic-only
+        // recording keeps its full level (dividing by the source count would
+        // halve it).
+        var mixed = [Int16](repeating: 0, count: frameChunk)
+        for source in sources {
+            let index = source.rawValue
+            let take = min(frameChunk, pending[index].count)
+            if take > 0 {
+                for i in 0..<take {
+                    mixed[i] = Int16(clamping: Int32(mixed[i]) + Int32(pending[index][i]))
+                }
+                pending[index].removeFirst(take)
+            }
+            if pending[index].count > backlogCap {
+                pending[index].removeFirst(pending[index].count - backlogCap)
+                if !didLogBacklogDrop {
+                    didLogBacklogDrop = true
+                    NSLog("[ClassNote] AudioMixBus: dropping backlog from source \(index)")
+                }
+            }
+        }
+        let pts = emittedFrames
+        emittedFrames += Int64(frameChunk)
+        lock.unlock()
+
+        let data = mixed.withUnsafeBufferPointer { Data(buffer: $0) }
+        sink(data, pts, sampleRate)
+        return true
     }
 }
 
 // MARK: - File writer
 
-/// Thread-safe AVAssetWriter wrapper. SCK delivers CMSampleBuffers we can
-/// append directly; mic produces AVAudioPCMBuffers that are written with
-/// AVAudioFile. Keeping those two paths separate avoids AVAssetWriterInput
-/// Objective-C exceptions for PCM-to-AAC setup on some macOS releases.
+/// Thread-safe AVAssetWriter wrapper with one entry point.
+///
+/// Everything reaching it now comes from `AudioMixBus`, so it is always 16 kHz
+/// mono Int16 PCM with a frame-accurate PTS — which means every recording is
+/// archived as 16 kHz mono AAC, including system-audio ones that used to be
+/// kept at 48 kHz stereo. That is exactly what the ASR hears, it halves the
+/// file size, and it removes the two divergent writer paths whose "am I the
+/// only source?" guards left mixed recordings with no file at all.
 final class FileWriter: @unchecked Sendable {
     private let url: URL
     private let lock = NSLock()
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
-    private var pcmFile: AVAudioFile?
     private var started = false
     private var failed = false
+    /// Latched by `finish()`. The mix bus's timer handler can still be in
+    /// flight when capture stops, and a late append would otherwise re-open the
+    /// writer and truncate the recording that was just finalised.
+    private var closed = false
+    /// Frames the encoder was too busy to take. The bus has already advanced
+    /// its PTS clock past them, so they are an unannounced hole in the track —
+    /// worth a line in the log rather than silence.
+    private var droppedFrames = 0
+    private var didLogNotReady = false
 
     init(url: URL) {
         self.url = url
     }
 
-    func appendSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
+    /// Appends mixed PCM. `ptsFrames` is the frame index of the first sample,
+    /// so the file's timeline matches the AudioChunk timestamps exactly.
+    func append(pcm16: Data, sampleRate: Int, ptsFrames: Int64) {
         lock.lock()
         defer { lock.unlock() }
-        guard !failed else { return }
+        guard !failed, !closed, pcm16.count >= 2 else { return }
 
         if writer == nil {
-            guard let desc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
-            if !openWriter(with: desc) { return }
+            guard openWriter(sampleRate: sampleRate) else { return }
         }
-        guard let input = input, input.isReadyForMoreMediaData else { return }
+        guard let input = input else { return }
+        guard input.isReadyForMoreMediaData else {
+            // Appending anyway is illegal, so the block has to go; both sources
+            // now ride this one entry point, so say it happened at least once
+            // instead of letting the recording quietly develop gaps under load.
+            droppedFrames += pcm16.count / 2
+            if !didLogNotReady {
+                didLogNotReady = true
+                NSLog("[ClassNote] FileWriter: encoder not ready, dropping audio")
+            }
+            return
+        }
+        guard let sampleBuffer = Self.makeSampleBuffer(pcm16,
+                                                        sampleRate: sampleRate,
+                                                        ptsFrames: ptsFrames) else { return }
         if !started {
-            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            writer?.startSession(atSourceTime: pts)
+            writer?.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
             started = true
         }
         if !input.append(sampleBuffer) {
-            NSLog("[ClassNote] FileWriter: append(sampleBuffer) failed: %@", writer?.error?.localizedDescription ?? "?")
-            failed = true
-        }
-    }
-
-    func appendPCMBuffer(_ buffer: AVAudioPCMBuffer) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !failed else { return }
-
-        if pcmFile == nil {
-            if !openPCMFile(for: buffer.format) { return }
-        }
-        do {
-            try pcmFile?.write(from: buffer)
-        } catch {
-            NSLog("[ClassNote] FileWriter: append(mic pcm) failed: %@", error.localizedDescription)
+            NSLog("[ClassNote] FileWriter: append failed: %@", writer?.error?.localizedDescription ?? "?")
             failed = true
         }
     }
 
     func finish() async {
-        let (w, i, file): (AVAssetWriter?, AVAssetWriterInput?, AVAudioFile?) = {
+        let (w, i): (AVAssetWriter?, AVAssetWriterInput?) = {
             lock.lock()
             defer { lock.unlock() }
-            let result = (writer, input, pcmFile)
+            closed = true
+            if droppedFrames > 0 {
+                NSLog("[ClassNote] FileWriter: \(droppedFrames) frames never reached the encoder")
+            }
+            let result = (writer, input)
             writer = nil
             input = nil
-            pcmFile = nil
             return result
         }()
-        _ = file
         guard let writer = w else { return }
         i?.markAsFinished()
         if writer.status == .writing {
@@ -555,48 +777,87 @@ final class FileWriter: @unchecked Sendable {
         }
     }
 
-    private func openPCMFile(for format: AVAudioFormat) -> Bool {
-        if FileManager.default.fileExists(atPath: url.path) {
-            try? FileManager.default.removeItem(at: url)
+    /// Wraps one mixed frame block as a CMSampleBuffer. Static and internal so
+    /// the PTS/sample-count arithmetic can be tested without a real writer.
+    static func makeSampleBuffer(_ pcm16: Data, sampleRate: Int, ptsFrames: Int64) -> CMSampleBuffer? {
+        guard pcm16.count >= 2, sampleRate > 0 else { return nil }
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: Double(sampleRate),
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 2,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 2,
+            mChannelsPerFrame: 1,
+            mBitsPerChannel: 16,
+            mReserved: 0)
+        var formatDesc: CMAudioFormatDescription?
+        guard CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault,
+                                             asbd: &asbd,
+                                             layoutSize: 0,
+                                             layout: nil,
+                                             magicCookieSize: 0,
+                                             magicCookie: nil,
+                                             extensions: nil,
+                                             formatDescriptionOut: &formatDesc) == noErr,
+              let formatDesc else { return nil }
+
+        let byteCount = pcm16.count
+        let frames = byteCount / 2
+        var block: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault,
+                                                 memoryBlock: nil,
+                                                 blockLength: byteCount,
+                                                 blockAllocator: kCFAllocatorDefault,
+                                                 customBlockSource: nil,
+                                                 offsetToData: 0,
+                                                 dataLength: byteCount,
+                                                 flags: 0,
+                                                 blockBufferOut: &block) == noErr,
+              let block else { return nil }
+        let copied = pcm16.withUnsafeBytes { raw -> OSStatus in
+            guard let base = raw.baseAddress else { return -1 }
+            return CMBlockBufferReplaceDataBytes(with: base,
+                                                 blockBuffer: block,
+                                                 offsetIntoDestination: 0,
+                                                 dataLength: byteCount)
         }
-        do {
-            let rawSampleRate = format.sampleRate
-            let sampleRate = rawSampleRate.isFinite && rawSampleRate > 0 ? rawSampleRate : 48000
-            let channels = max(Int(format.channelCount), 1)
-            let settings: [String: Any] = [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVSampleRateKey: sampleRate,
-                AVNumberOfChannelsKey: channels,
-                AVEncoderBitRateKey: 128_000
-            ]
-            pcmFile = try AVAudioFile(forWriting: url,
-                                      settings: settings,
-                                      commonFormat: format.commonFormat,
-                                      interleaved: format.isInterleaved)
-            return true
-        } catch {
-            NSLog("[ClassNote] FileWriter: open mic file failed: %@", error.localizedDescription)
-            failed = true
-            return false
-        }
+        guard copied == noErr else { return nil }
+
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: CMTimeScale(sampleRate)),
+            presentationTimeStamp: CMTime(value: ptsFrames, timescale: CMTimeScale(sampleRate)),
+            decodeTimeStamp: .invalid)
+        var sampleSize = 2
+        var sampleBuffer: CMSampleBuffer?
+        guard CMSampleBufferCreateReady(allocator: kCFAllocatorDefault,
+                                        dataBuffer: block,
+                                        formatDescription: formatDesc,
+                                        sampleCount: frames,
+                                        sampleTimingEntryCount: 1,
+                                        sampleTimingArray: &timing,
+                                        sampleSizeEntryCount: 1,
+                                        sampleSizeArray: &sampleSize,
+                                        sampleBufferOut: &sampleBuffer) == noErr else { return nil }
+        return sampleBuffer
     }
 
-    private func openWriter(with sourceFormat: CMAudioFormatDescription) -> Bool {
+    private func openWriter(sampleRate: Int) -> Bool {
         if FileManager.default.fileExists(atPath: url.path) {
             try? FileManager.default.removeItem(at: url)
         }
         do {
             let w = try AVAssetWriter(outputURL: url, fileType: .m4a)
-            let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(sourceFormat)?.pointee
-            let rawSampleRate = asbd?.mSampleRate ?? 48000
-            let sampleRate = rawSampleRate.isFinite && rawSampleRate > 0 ? rawSampleRate : 48000
-            let rawChannels = Int(asbd?.mChannelsPerFrame ?? 2)
-            let channels = min(max(rawChannels, 1), 2)
+            // Flush a self-contained fragment every 5s so a crash or a force
+            // quit leaves a playable prefix instead of a file with no moov
+            // atom. Both have to be set before startWriting().
+            w.movieFragmentInterval = CMTime(seconds: 5, preferredTimescale: 600)
+            w.initialMovieFragmentInterval = CMTime(seconds: 2, preferredTimescale: 600)
             let settings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVSampleRateKey: sampleRate,
-                AVNumberOfChannelsKey: channels,
-                AVEncoderBitRateKey: 128_000
+                AVSampleRateKey: Double(sampleRate),
+                AVNumberOfChannelsKey: 1,
+                AVEncoderBitRateKey: 64_000
             ]
             // Do not pass the PCM source format as a hint while asking
             // AVAssetWriter to encode AAC. On newer macOS releases this can
@@ -626,7 +887,6 @@ final class FileWriter: @unchecked Sendable {
             return false
         }
     }
-
 }
 
 // MARK: - Sample counter (thread-safe for watchdog)

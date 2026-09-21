@@ -7,8 +7,10 @@ struct RecoveryCoordinator {
             let candidates = try await SessionRepository.shared.interruptedCandidates()
             var recoverable: [Session] = []
             for var session in candidates {
-                guard let path = session.audioPath,
-                      FileManager.default.fileExists(atPath: path) else { continue }
+                // Sessions whose recording is missing used to be skipped here,
+                // which left them with ended_at NULL forever: rescanned at every
+                // launch, never shown, never closed. They are listed too, and
+                // `recover` closes them out with whatever duration is known.
                 if session.state != SessionState.interrupted.rawValue {
                     try await SessionRepository.shared.markInterrupted(session.id)
                     session.state = SessionState.interrupted.rawValue
@@ -23,12 +25,12 @@ struct RecoveryCoordinator {
     }
 
     static func recover(_ session: Session) async throws {
-        guard let path = session.audioPath,
-              FileManager.default.fileExists(atPath: path) else {
-            throw EngineError.unsupported("No recoverable audio file found.")
+        var resolvedDuration = session.durationMs
+        if let path = session.audioPath,
+           FileManager.default.fileExists(atPath: path) {
+            let fileDuration = await durationMs(forAudioAt: URL(fileURLWithPath: path))
+            resolvedDuration = max(fileDuration, session.durationMs)
         }
-        let durationMs = await durationMs(forAudioAt: URL(fileURLWithPath: path))
-        let resolvedDuration = max(durationMs, session.durationMs)
         let endedAt = session.startedAt + resolvedDuration
         try await SessionRepository.shared.recoverInterrupted(session.id,
                                                               endedAt: endedAt,

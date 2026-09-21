@@ -1,28 +1,52 @@
 import SwiftUI
 
 #if os(macOS)
-/// Shuts the warm ASR sidecar down on quit.
+/// Finishes the recording and shuts the sidecars down on quit.
 ///
-/// The sidecar now outlives individual recordings so its models stay in memory,
-/// which means nothing else would reap it: an orphan would keep several GB
-/// resident and hold its port.
+/// `applicationWillTerminate` is the wrong hook for any of that: it is
+/// MainActor-isolated, so a `Task` created there is enqueued on the very thread
+/// that is about to go away, and waiting for it on that thread deadlocks by
+/// construction. AppKit's async-teardown hook is `applicationShouldTerminate`
+/// plus `.terminateLater`, which keeps the run loop spinning until we reply.
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationWillTerminate(_ notification: Notification) {
-        // Terminating is synchronous, so block briefly rather than leaving the
-        // teardown to a task that never gets scheduled. Both sidecars are torn
-        // down concurrently and each gives up after ~300ms, so quitting takes
-        // well under a second. They also watch for this pid and exit on their
-        // own, so the cap below is a backstop, not something we expect to hit.
-        let done = DispatchSemaphore(value: 0)
-        Task {
-            // force: a deferred retire would orphan a ~2 GB sidecar holding
-            // its port when the app quits mid-recording.
-            async let asr: Bool = LocalASRWarmPool.shared.retire(force: true)
-            async let translator: Void = LocalMLXTranslatorProcess.shared.shutdown()
-            _ = await (asr, translator)
-            done.signal()
+    private var isTearingDown = false
+    private var didReply = false
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Re-entry (⌘Q again while teardown runs): keep waiting on the reply
+        // already in flight rather than cancelling the quit.
+        guard !isTearingDown else { return .terminateLater }
+        isTearingDown = true
+
+        Task { @MainActor in
+            await AppState.shared.prepareForTermination()
+            self.replyOnce()
         }
-        _ = done.wait(timeout: .now() + 1)
+        // Backstop: a wedged sidecar must never hold the app hostage. It has to
+        // sit above the graceful path's own budget, not under it — the live
+        // stop drains its engines, then every import stops, then three sidecars
+        // shut down. Replying early would abort exactly the `setEnded` write
+        // that `.terminateLater` was taken for. `.terminateLater` keeps the run
+        // loop spinning, so the wait is not a beachball.
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(20))
+            self.replyOnce()
+        }
+        return .terminateLater
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Belt and braces for whatever the graceful path did not reach (the
+        // backstop firing, or a quit that never went through
+        // applicationShouldTerminate). Synchronous on purpose: signalling pids
+        // needs no actor hop.
+        SidecarRegistry.shared.terminateAll()
+    }
+
+    private func replyOnce() {
+        guard !didReply else { return }
+        didReply = true
+        NSApp.reply(toApplicationShouldTerminate: true)
     }
 }
 #endif

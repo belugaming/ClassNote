@@ -40,6 +40,14 @@ final class AppState: ObservableObject {
     @Published var microphoneDevices: [MicrophoneInputDevice] = []
     @AppStorage("preferredMicrophoneDeviceID") var preferredMicrophoneDeviceID: String = MicrophoneInputDevice.systemDefaultID
     @Published private var importOrchestrators: [String: SessionOrchestrator] = [:]
+    /// Task Center ids for the running imports/re-transcriptions, keyed the same
+    /// way, so the live window's own Cancel button can mark the task cancelled
+    /// instead of leaving it running forever.
+    private var importTaskIds: [String: String] = [:]
+    /// A settings change that arrived mid-recording, applied once the recording
+    /// ends. Retiring the warm pool while the live pipeline streams through it
+    /// kills that recording's transcription for good.
+    private var needsEngineReloadAfterRecording = false
     @Published var diagnosticReport: [DiagnosticCheck] = []
 
     /// Bumped whenever the user changes the language. Views observe this to
@@ -125,7 +133,11 @@ final class AppState: ObservableObject {
     /// Retires a warm sidecar whose models no longer match the settings, then
     /// warms the new configuration.
     func reloadLocalEngine() async {
-        await LocalASRWarmPool.shared.retire()
+        guard !isRecording else {
+            needsEngineReloadAfterRecording = true
+            return
+        }
+        _ = await LocalASRWarmPool.shared.retire()
         isLocalEngineReady = false
         await preloadLocalEngine()
     }
@@ -203,6 +215,7 @@ final class AppState: ObservableObject {
                 if let translationEnabled {
                     self.translationEnabled = translationEnabled
                 }
+                await Self.freeMemoryForRecording()
                 let sessionId = try await orchestrator.startNewSession(courseId: nil, source: source)
                 self.currentSessionId = sessionId
                 self.isRecording = true
@@ -223,8 +236,26 @@ final class AppState: ObservableObject {
     /// because each one really does get its own orchestrator.
     static let liveWindowId = "live"
 
-    func orchestrator(for windowId: String) -> SessionOrchestrator {
-        importOrchestrators[windowId] ?? orchestrator
+    /// Frees the notes/Q&A model before capture starts. ASR, translation and
+    /// notes are three separate MLX sidecars, and all three resident at once is
+    /// more memory than a 16 GB machine has; the long-form one is the only one
+    /// nobody is waiting on during a lecture.
+    private static func freeMemoryForRecording() async {
+        #if os(macOS)
+        await LocalMLXLLMProcess.shared.shutdown()
+        #endif
+    }
+
+    /// The orchestrator a window should bind to, or nil once that window's work
+    /// is over.
+    ///
+    /// The live orchestrator is only a fallback for the live window. An
+    /// import's entry is dropped the moment it finishes, and a window that
+    /// re-resolved to the shared orchestrator would start showing the live
+    /// recording's transcript — with a Stop button that kills it.
+    func orchestrator(for windowId: String) -> SessionOrchestrator? {
+        if let worker = importOrchestrators[windowId] { return worker }
+        return windowId == Self.liveWindowId ? orchestrator : nil
     }
 
     func startNewSession(courseId: String?,
@@ -234,6 +265,7 @@ final class AppState: ObservableObject {
             if let translationEnabled {
                 self.translationEnabled = translationEnabled
             }
+            await Self.freeMemoryForRecording()
             let sessionId = try await orchestrator.startNewSession(courseId: courseId, source: source)
             self.currentSessionId = sessionId
             self.isRecording = true
@@ -250,7 +282,7 @@ final class AppState: ObservableObject {
         Task { @MainActor in
             do {
                 self.translationEnabled = true
-                let windowId = try await orchestrator.startEphemeralTranslation(source: source)
+                _ = try await orchestrator.startEphemeralTranslation(source: source)
                 self.currentSessionId = nil
                 self.isRecording = true
                 NotificationCenter.default.post(name: .openLiveSession, object: Self.liveWindowId)
@@ -264,7 +296,7 @@ final class AppState: ObservableObject {
     func startEphemeralTranslation(source: AudioSourceKind) async -> Bool {
         do {
             self.translationEnabled = true
-            let windowId = try await orchestrator.startEphemeralTranslation(source: source)
+            _ = try await orchestrator.startEphemeralTranslation(source: source)
             self.currentSessionId = nil
             self.isRecording = true
             NotificationCenter.default.post(name: .openLiveSession, object: Self.liveWindowId)
@@ -281,7 +313,44 @@ final class AppState: ObservableObject {
             await orchestrator.stop()
             self.isRecording = false
             self.currentSessionId = nil
+            if self.needsEngineReloadAfterRecording {
+                self.needsEngineReloadAfterRecording = false
+                await self.reloadLocalEngine()
+            }
         }
+    }
+
+    /// Shorter than the interactive default: the whole quit — the live stop,
+    /// every import's stop, then the three sidecars — has to finish inside the
+    /// `applicationShouldTerminate` backstop, or the reply fires first and the
+    /// session row is left `recording` with no `ended_at`, which is the very
+    /// failure this path exists to prevent.
+    private static let terminationDrainTimeout: Duration = .seconds(2)
+
+    /// Finalises everything that must not be left half-written when the app
+    /// quits: the live recording's .m4a and session row, any running import,
+    /// then the sidecars. Every step is guarded, so calling it twice is safe.
+    func prepareForTermination() async {
+        if isRecording || orchestrator.currentSessionId != nil || orchestrator.isEphemeralTranslation {
+            await orchestrator.stop(drainTimeout: Self.terminationDrainTimeout)
+            isRecording = false
+            currentSessionId = nil
+        }
+        let workers = Array(importOrchestrators.values)
+        importOrchestrators.removeAll()
+        for worker in workers {
+            await worker.stop(drainTimeout: Self.terminationDrainTimeout)
+        }
+        // force: a deferred retire would orphan a ~2 GB sidecar holding its
+        // port when the app quits mid-recording.
+        #if os(macOS)
+        async let asr: Bool = LocalASRWarmPool.shared.retire(force: true)
+        async let translator: Void = LocalMLXTranslatorProcess.shared.shutdown()
+        async let llm: Void = LocalMLXLLMProcess.shared.shutdown()
+        _ = await (asr, translator, llm)
+        #else
+        _ = await LocalASRWarmPool.shared.retire(force: true)
+        #endif
     }
 
     func importFile(url: URL,
@@ -302,6 +371,15 @@ final class AppState: ObservableObject {
                                         await importOrchestrator?.stop()
                                         self?.taskCenter.cancel(id: taskId, detail: L10n.t("task.import.cancelled"))
                                     })
+        // Registered under the session id below; dropped however this ends, or
+        // every import in the app's lifetime keeps its orchestrator alive.
+        var registeredSessionId: String?
+        defer {
+            if let registeredSessionId {
+                importOrchestrators[registeredSessionId] = nil
+                importTaskIds[registeredSessionId] = nil
+            }
+        }
         do {
             let worker = SessionOrchestrator()
             importOrchestrator = worker
@@ -316,6 +394,8 @@ final class AppState: ObservableObject {
                                             self?.taskCenter.cancel(id: taskId, detail: L10n.t("task.import.cancelled"))
                                         })
             importOrchestrators[sessionId] = worker
+            importTaskIds[sessionId] = taskId
+            registeredSessionId = sessionId
             // Imports keep a per-session window id: each has its own orchestrator,
             // and several can run at once. Only live recordings share one window.
             NotificationCenter.default.post(name: .openLiveSession, object: sessionId)
@@ -392,6 +472,60 @@ final class AppState: ObservableObject {
     func stopImport(windowId: String) async {
         guard let importOrchestrator = importOrchestrators[windowId] else { return }
         await importOrchestrator.stop()
+        // The live window's own Cancel button bypasses the Task Center's cancel
+        // action, so say it here; `.cancelled` is sticky, so a later success
+        // report from the import's own path cannot overwrite it.
+        if let taskId = importTaskIds[windowId] {
+            taskCenter.cancel(id: taskId, detail: L10n.t("task.import.cancelled"))
+        }
+    }
+
+    /// Re-transcribes a session from its own recording, on its own orchestrator
+    /// so a live recording is never stomped. Same Task Center shape as an import.
+    func retranscribe(session: Session) async {
+        let taskId = taskCenter.start(title: L10n.t("task.retranscribe.title"),
+                                      detail: session.title,
+                                      icon: "arrow.clockwise",
+                                      progress: 0)
+        let worker = SessionOrchestrator()
+        importOrchestrators[session.id] = worker
+        importTaskIds[session.id] = taskId
+        defer {
+            importOrchestrators[session.id] = nil
+            importTaskIds[session.id] = nil
+        }
+        taskCenter.configureActions(id: taskId,
+                                    retry: { [weak self] in
+                                        await self?.retranscribe(session: session)
+                                    },
+                                    cancel: { [weak self, weak worker] in
+                                        await worker?.stop()
+                                        self?.taskCenter.cancel(id: taskId,
+                                                                detail: L10n.t("task.status.cancelled"))
+                                    })
+        do {
+            _ = try await worker.retranscribeSession(session)
+            NotificationCenter.default.post(name: .openLiveSession, object: session.id)
+            while worker.isImporting {
+                taskCenter.update(id: taskId, detail: worker.statusText, progress: worker.importProgress)
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
+            try await worker.waitForImportToFinish()
+            taskCenter.succeed(id: taskId, detail: L10n.t("task.retranscribe.done"))
+        } catch is CancellationError {
+            taskCenter.cancel(id: taskId, detail: L10n.t("task.status.cancelled"))
+        } catch {
+            taskCenter.fail(id: taskId, detail: session.title, error: error)
+            setError(error.localizedDescription)
+        }
+    }
+
+    /// Recovery banner's second action: stamp the interrupted session closed,
+    /// then rebuild its transcript from the audio that was captured.
+    func recoverAndRetranscribe(_ session: Session) async {
+        await recoverInterruptedSession(session)
+        let refreshed = (try? await SessionRepository.shared.get(id: session.id)) ?? session
+        await retranscribe(session: refreshed)
     }
 
     func saveTemporaryTranslationAsSession(courseId: String? = nil) async -> String? {
@@ -447,6 +581,25 @@ final class AppState: ObservableObject {
         self.lastError = message
     }
 
+    /// True when something the app is configured to use needs a cloud key that
+    /// is not stored. Not simply `apiKey.isEmpty`: a fully local setup needs no
+    /// key at all, and some presets are keyless.
+    var isMissingCloudCredential: Bool {
+        apiConfig.isCloudCredentialMissing
+            && (sttBackend == .openAICompatible
+                || translationBackend == .openAICompatible
+                || llmBackend == .openAICompatible)
+    }
+
+    /// The same question for the record button: only the engines a recording
+    /// actually drives count, so a missing key does not block a local lecture
+    /// just because notes would use the cloud.
+    var isMissingCloudCredentialForRecording: Bool {
+        apiConfig.isCloudCredentialMissing
+            && (sttBackend == .openAICompatible
+                || (translationEnabled && translationBackend == .openAICompatible))
+    }
+
     /// Switch UI language. Persists choice and re-publishes a token so any
     /// view observing `languageRefreshToken` re-renders with new strings.
     func setLanguage(_ lang: L10n.LanguageOverride) {
@@ -461,8 +614,8 @@ final class AppState: ObservableObject {
                                       progress: nil)
         var checks: [DiagnosticCheck] = []
         checks.append(.init(name: L10n.t("diagnostics.apiKey"),
-                            status: apiConfig.apiKey.isEmpty && sttBackend == .openAICompatible ? .warning : .ok,
-                            detail: apiConfig.apiKey.isEmpty ? L10n.t("diagnostics.apiKey.missing") : L10n.t("diagnostics.ok")))
+                            status: isMissingCloudCredential ? .warning : .ok,
+                            detail: isMissingCloudCredential ? L10n.t("diagnostics.apiKey.missing") : L10n.t("diagnostics.ok")))
         checks.append(.init(name: L10n.t("diagnostics.database"),
                             status: Database.shared.dbPool == nil ? .failed : .ok,
                             detail: Database.shared.dbPool == nil ? L10n.t("diagnostics.database.failed") : L10n.t("diagnostics.ok")))
