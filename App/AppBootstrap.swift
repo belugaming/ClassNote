@@ -6,12 +6,17 @@ enum AppBootstrap {
     /// database and bind their global hotkeys on every ⌘U. Tests that need the
     /// database call `Database.shared.setup()` themselves.
     static func run() {
-        guard !AppEnvironment.isRunningTests else { return }
+        // The test host is the real app, so its windows still hit the
+        // repositories (MainWindowViewModel.refresh runs on first render) and
+        // would trap on a nil pool. The database itself is already redirected
+        // to the throwaway test directory, so opening it is harmless; only the
+        // global hotkeys must stay unregistered under test.
         do {
             try Database.shared.setup()
         } catch {
             NSLog("[ClassNote] Database setup failed: \(error)")
         }
+        guard !AppEnvironment.isRunningTests else { return }
         #if os(macOS)
         GlobalShortcuts.register()
         #endif
