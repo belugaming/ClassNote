@@ -30,6 +30,10 @@ actor LocalASRWarmPool {
     private var key: Key?
     private var idleTimer: Task<Void, Never>?
     private var activeConnections = 0
+    /// Set when a retire was asked for while a connection was open. The sidecar
+    /// goes away as soon as the last connection closes instead of being killed
+    /// out from under a recording.
+    private var retireWhenIdle = false
     private var manager: LocalASRProcessManager?
     private var socketURL: URL?
     /// The in-flight warm-up, so concurrent callers await one start instead of
@@ -47,7 +51,13 @@ actor LocalASRWarmPool {
 
         if let key, key != wanted {
             // Different language or engine: the loaded models cannot serve it.
-            await retire()
+            // Refuse rather than kill — a file import asking for another
+            // configuration must not SIGKILL the sidecar a live recording is
+            // streaming through.
+            guard activeConnections == 0 else {
+                throw LocalASRProcessError.busyWithDifferentConfiguration
+            }
+            await retire(force: true)
         }
 
         if let socketURL, let manager, await manager.isRunning {
@@ -56,12 +66,21 @@ actor LocalASRWarmPool {
         if let warmTask {
             return try await warmTask.value
         }
+        // The configuration still matches but the process is gone (it crashed,
+        // was killed, or died while the Mac slept). Drop the stale manager so a
+        // fresh sidecar is started instead of handing out a URL that nothing is
+        // listening on.
+        if manager != nil {
+            await retire(force: true)
+        }
 
         let task = Task<URL, Error> { [wanted] in
             let manager = LocalASRProcessManager(engine: wanted.engine)
             let url = try await manager.start(language: wanted.language,
                                              onProgress: onProgress)
-            await self.adopt(key: wanted, manager: manager, url: url)
+            // No `await`: `Task` inherits this actor's isolation, so `adopt`
+            // is a synchronous call on the same actor.
+            self.adopt(key: wanted, manager: manager, url: url)
             return url
         }
         warmTask = task
@@ -92,8 +111,23 @@ actor LocalASRWarmPool {
         return await manager.isRunning
     }
 
+    /// Whether a connection is currently streaming through the sidecar.
+    var isInUse: Bool { activeConnections > 0 }
+
     /// Shuts down the current sidecar, e.g. on quit or a settings change.
-    func retire() async {
+    ///
+    /// Returns false and defers when a connection is open: Settings, a language
+    /// change and the "Unload from memory" button are all reachable while
+    /// recording, and killing the process there ends the recording's
+    /// transcription for good. `force` is for quit, where an orphaned 2 GB
+    /// sidecar holding its port is the worse outcome.
+    @discardableResult
+    func retire(force: Bool = false) async -> Bool {
+        guard force || activeConnections == 0 else {
+            retireWhenIdle = true
+            return false
+        }
+        retireWhenIdle = false
         idleTimer?.cancel()
         idleTimer = nil
         warmTask?.cancel()
@@ -104,6 +138,7 @@ actor LocalASRWarmPool {
         manager = nil
         socketURL = nil
         key = nil
+        return true
     }
 
     private func adopt(key: Key, manager: LocalASRProcessManager, url: URL) {
@@ -121,9 +156,12 @@ actor LocalASRWarmPool {
         idleTimer = nil
     }
 
-    func endUse() {
+    func endUse() async {
         activeConnections = max(0, activeConnections - 1)
-        if activeConnections == 0 {
+        guard activeConnections == 0 else { return }
+        if retireWhenIdle {
+            await retire()
+        } else {
             scheduleIdleRetire()
         }
     }

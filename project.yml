@@ -10,15 +10,20 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.10"
+    # Swift 5 language mode, so `complete` checking is warnings-only: it is the
+    # to-do list for an eventual Swift 6 move, not a build gate. The explicit
+    # NO keeps it that way if somebody later flips warnings-as-errors on.
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: "NO"
     ENABLE_USER_SCRIPT_SANDBOXING: NO
-    MARKETING_VERSION: "0.12.1"
-    CURRENT_PROJECT_VERSION: "15"
+    MARKETING_VERSION: "0.13.0"
+    CURRENT_PROJECT_VERSION: "16"
     DEAD_CODE_STRIPPING: YES
 
 packages:
   GRDB:
     url: https://github.com/groue/GRDB.swift
-    from: 6.29.0
+    from: 7.0.0
   KeyboardShortcuts:
     url: https://github.com/sindresorhus/KeyboardShortcuts
     from: 2.2.0
@@ -50,7 +55,7 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: ClassNote
-        CFBundleShortVersionString: "0.12.1"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleIconName: AppIcon
         CFBundleLocalizations:
           - en
@@ -119,7 +124,7 @@ targets:
       path: App/Info-iOS.plist
       properties:
         CFBundleDisplayName: ClassNote
-        CFBundleShortVersionString: "0.12.1"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleIconName: AppIcon
         CFBundleLocalizations:
           - en
@@ -180,6 +185,10 @@ schemes:
       config: Debug
     test:
       config: Debug
+      # Belt and braces for AppEnvironment.isRunningTests: the XCTest env vars
+      # are Xcode's to name, this one is ours.
+      environmentVariables:
+        CLASSNOTE_TEST_MODE: "1"
       targets:
         - ClassNoteTests
     archive:

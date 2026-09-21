@@ -9,9 +9,18 @@ import UIKit
 
 struct SessionDetailView: View {
     let sessionId: String
+    /// Set when the user opened this session from a search hit. Defaulted so
+    /// every other call site stays a plain `SessionDetailView(sessionId:)`.
+    var jumpTarget: SegmentJumpTarget? = nil
     @EnvironmentObject var appState: AppState
     @StateObject private var vm = SessionDetailViewModel()
     @State private var selectedTab: DetailTab = .transcript
+    @State private var confirmingRetranscribe = false
+
+    init(sessionId: String, jumpTarget: SegmentJumpTarget? = nil) {
+        self.sessionId = sessionId
+        self.jumpTarget = jumpTarget
+    }
 
     enum DetailTab: String, CaseIterable, Identifiable {
         case transcript, notes, study
@@ -45,7 +54,32 @@ struct SessionDetailView: View {
             }
             .background(Theme.surfaceElevated.opacity(0.25))
         }
-        .task(id: sessionId) { await vm.load(sessionId: sessionId) }
+        .task(id: sessionId) {
+            await vm.load(sessionId: sessionId)
+            applyJump(jumpTarget)
+        }
+        // The target session may already be the one on screen, in which case
+        // `.task(id:)` does not re-run and this is the only thing that fires.
+        .onChange(of: jumpTarget) { _, target in applyJump(target) }
+        .onDisappear { vm.stopPlayback() }
+        .confirmationDialog(L10n.t("session.action.retranscribe"),
+                            isPresented: $confirmingRetranscribe,
+                            titleVisibility: .visible) {
+            Button(L10n.t("session.action.retranscribe"), role: .destructive) {
+                guard let s = vm.session?.session else { return }
+                Task { await AppState.shared.retranscribe(session: s) }
+            }
+            Button(L10n.t("common.cancel"), role: .cancel) {}
+        } message: {
+            Text(L10n.t("session.retranscribe.confirm.message"))
+        }
+    }
+
+    private func applyJump(_ target: SegmentJumpTarget?) {
+        vm.applyJump(target)
+        // The view model cannot reach `selectedTab`, so the tab switch happens
+        // here — a jump into the notes tab would show nothing.
+        if target?.sessionId == sessionId { selectedTab = .transcript }
     }
 
     private var header: some View {
@@ -76,28 +110,41 @@ struct SessionDetailView: View {
                 .disabled(vm.isGeneratingNotes || (vm.session?.segments.isEmpty ?? true))
             }
 
-            HStack(spacing: 8) {
-                if vm.isPlaying {
-                    Button {
-                        vm.stopPlayback()
-                    } label: {
-                        Label(L10n.t("session.action.stop"), systemImage: "stop.circle")
-                    }
-                } else if vm.hasAudio {
-                    Button {
-                        vm.playFromBeginning()
-                    } label: {
-                        Label(L10n.t("session.action.play"), systemImage: "play.circle")
-                    }
-                }
+            if vm.hasAudio { transportRow }
 
-                Button {
-                    Task { await vm.retranslate() }
+            HStack(spacing: 8) {
+                Menu {
+                    Button {
+                        Task { await vm.retranslate(failedOnly: true) }
+                    } label: {
+                        Label("\(L10n.t("session.action.retranslateFailed")) (\(vm.failedTranslationCount))",
+                              systemImage: "exclamationmark.arrow.triangle.2.circlepath")
+                    }
+                    .disabled(vm.failedTranslationCount == 0)
+                    Button {
+                        Task { await vm.retranslate(failedOnly: false) }
+                    } label: {
+                        Label(L10n.t("session.action.retranslateAll"), systemImage: "arrow.triangle.2.circlepath")
+                    }
                 } label: {
-                    Label(vm.isRetranslating ? L10n.t("session.action.retranslating") : L10n.t("session.action.retranslate"),
-                          systemImage: "arrow.triangle.2.circlepath")
+                    Label(retranslateLabel, systemImage: "arrow.triangle.2.circlepath")
                 }
                 .disabled(vm.isRetranslating || (vm.session?.segments.isEmpty ?? true))
+
+                if vm.hasAudio {
+                    Menu {
+                        Button {
+                            confirmingRetranscribe = true
+                        } label: {
+                            Label(L10n.t("session.action.retranscribe"), systemImage: "waveform.badge.magnifyingglass")
+                        }
+                        .disabled(vm.isSessionRecording)
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                }
 
                 Spacer()
 
@@ -131,6 +178,49 @@ struct SessionDetailView: View {
                 .fill(Theme.hairline)
                 .frame(height: 1)
         }
+    }
+
+    /// Play/pause, scrubber and elapsed/total. Disabled while the session is
+    /// still recording: the `.m4a` is being written underneath us.
+    private var transportRow: some View {
+        HStack(spacing: 10) {
+            Button {
+                vm.togglePlayPause()
+            } label: {
+                Image(systemName: vm.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                    .font(.title2)
+            }
+            .buttonStyle(.plain)
+            .help(L10n.t(vm.isPlaying ? "session.action.pause" : "session.action.play"))
+
+            Text(formatTimestamp(vm.playheadMs))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+            Slider(value: playheadBinding, in: 0...max(1, Double(vm.playbackDurationMs))) { editing in
+                vm.isScrubbing = editing
+                if !editing { vm.scrub(to: vm.playheadMs) }
+            }
+            .controlSize(.small)
+            Text(formatTimestamp(vm.playbackDurationMs))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .disabled(vm.isSessionRecording)
+    }
+
+    /// The ticker owns `playheadMs`; during a drag `isScrubbing` keeps it from
+    /// fighting the user, so the slider can write straight back into it.
+    private var playheadBinding: Binding<Double> {
+        Binding(get: { Double(vm.playheadMs) },
+                set: { vm.playheadMs = Int64($0) })
+    }
+
+    private var retranslateLabel: String {
+        guard vm.isRetranslating else { return L10n.t("session.action.retranslate") }
+        if let progress = vm.retranslateProgress, progress.total > 0 {
+            return "\(L10n.t("session.action.retranslating")) \(progress.done)/\(progress.total)"
+        }
+        return L10n.t("session.action.retranslating")
     }
 
     private var metadataRow: some View {
@@ -212,8 +302,8 @@ struct SessionDetailView: View {
 
 struct TranscriptPane: View {
     @ObservedObject var vm: SessionDetailViewModel
-    @AppStorage("transcriptFontSize") private var transcriptFontSize: Double = 17
-    @AppStorage("transcriptCompactMode") private var compactMode: Bool = false
+    @AppStorage("transcriptFontSize", store: AppEnvironment.defaults) private var transcriptFontSize: Double = 17
+    @AppStorage("transcriptCompactMode", store: AppEnvironment.defaults) private var compactMode: Bool = false
     @State private var showingHighlightDetail = false
 
     var body: some View {
@@ -227,7 +317,7 @@ struct TranscriptPane: View {
                                 vm.selectHighlight(h.id)
                                 showingHighlightDetail = true
                             } label: {
-                                Text(h.userNote.isEmpty ? formatHighlightTs(h.timestampMs) : h.userNote)
+                                Text(h.userNote.isEmpty ? formatTimestamp(h.timestampMs) : h.userNote)
                             }
                         }
                     } label: {
@@ -258,28 +348,44 @@ struct TranscriptPane: View {
             .padding(.vertical, 6)
             .background(Theme.surface.opacity(0.22))
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: compactMode ? 6 : 10) {
-                    if let segments = vm.session?.segments, !segments.isEmpty {
-                        ForEach(segments) { seg in
-                            SegmentRowView(segment: seg,
-                                           fontSize: transcriptFontSize,
-                                           compact: compactMode) {
-                                vm.seek(to: seg.startMs)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: compactMode ? 6 : 10) {
+                        if let segments = vm.session?.segments, !segments.isEmpty {
+                            // Keyed on `rowKey`, not on `Segment.id`: the id is
+                            // `Int64?`, and `scrollTo` matches the id type
+                            // exactly, so a bare `Int64` would silently no-op.
+                            ForEach(segments, id: \.rowKey) { seg in
+                                SegmentRowView(segment: seg,
+                                               fontSize: transcriptFontSize,
+                                               compact: compactMode,
+                                               isHighlighted: isHighlighted(seg),
+                                               isRetryingTranslation: isRetrying(seg),
+                                               onRetryTranslation: { Task { await vm.retryTranslation(for: seg) } }) {
+                                    vm.seek(to: seg.startMs)
+                                }
                             }
+                        } else {
+                            ContentUnavailableView {
+                                Label(L10n.t("session.empty.transcript.title"), systemImage: "captions.bubble")
+                            } description: {
+                                Text(L10n.t("session.empty.transcript.desc"))
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .padding(40)
                         }
-                    } else {
-                        ContentUnavailableView {
-                            Label(L10n.t("session.empty.transcript.title"), systemImage: "captions.bubble")
-                        } description: {
-                            Text(L10n.t("session.empty.transcript.desc"))
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .padding(40)
                     }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 16)
                 }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 16)
+                .onChange(of: vm.pendingScrollSegmentId) { _, _ in
+                    consumePendingScroll(proxy)
+                }
+                // A jump published while this pane was unmounted — the user was
+                // on another tab while the session loaded — has no change left
+                // to observe, and an unconsumed id also blocks a second click
+                // on the same hit.
+                .onAppear { consumePendingScroll(proxy) }
             }
         }
         .sheet(isPresented: $showingHighlightDetail) {
@@ -288,9 +394,44 @@ struct TranscriptPane: View {
                 .padding(4)
         }
     }
+
+    /// Scrolls to the pending search hit and flashes it, then clears the id so
+    /// clicking the same hit again fires once more.
+    private func consumePendingScroll(_ proxy: ScrollViewProxy) {
+        guard let id = vm.pendingScrollSegmentId else { return }
+        withAnimation(.easeInOut(duration: 0.25)) {
+            proxy.scrollTo(id, anchor: .center)
+        }
+        vm.pendingScrollSegmentId = nil
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if vm.flashSegmentId == id { vm.flashSegmentId = nil }
+        }
+    }
+
+    /// One highlight for two jobs: the flash after a search jump, and the row
+    /// under the playhead while the recording plays.
+    private func isHighlighted(_ seg: Segment) -> Bool {
+        guard let id = seg.id else { return false }
+        return id == vm.flashSegmentId || id == vm.playingSegmentId
+    }
+
+    private func isRetrying(_ seg: Segment) -> Bool {
+        guard let id = seg.id else { return false }
+        return vm.retryingSegmentIds.contains(id)
+    }
 }
 
-private func formatHighlightTs(_ ms: Int64) -> String {
+extension Segment {
+    /// Non-optional identity for `ForEach`/`ScrollViewProxy`, which cannot
+    /// scroll to a `Int64?` id given a plain `Int64`. Unsaved rows collapse to
+    /// -1; they are never a scroll target.
+    var rowKey: Int64 { id ?? -1 }
+}
+
+/// Shared mm:ss / h:mm:ss rendering for the highlight menu and the player
+/// transport.
+private func formatTimestamp(_ ms: Int64) -> String {
     let s = Int(ms / 1000)
     let h = s / 3600
     let m = (s % 3600) / 60
@@ -303,6 +444,13 @@ struct SegmentRowView: View {
     let segment: Segment
     var fontSize: Double = 17
     var compact: Bool = false
+    /// Search-jump flash and playhead marker share one flag — two tints would
+    /// be noise, and they never mean different things to the reader.
+    var isHighlighted: Bool = false
+    var isRetryingTranslation: Bool = false
+    /// Defaulted so the highlight range preview can keep building rows with
+    /// nothing but a tap handler.
+    var onRetryTranslation: (() -> Void)? = nil
     let onTap: () -> Void
 
     var body: some View {
@@ -336,18 +484,40 @@ struct SegmentRowView: View {
                         .lineSpacing(2)
                         .textSelection(.enabled)
                 }
+                // Whatever arrived before the stream died is kept above; this
+                // says why it stops mid-sentence and offers the one-row retry.
+                if segment.translationState == .failed {
+                    HStack(spacing: 8) {
+                        Label(L10n.t("session.translation.failed"), systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(Theme.warning)
+                        if let retry = onRetryTranslation {
+                            Button(action: retry) {
+                                if isRetryingTranslation {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Label(L10n.t("session.translation.retry"), systemImage: "arrow.clockwise")
+                                        .font(.caption)
+                                }
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(isRetryingTranslation)
+                        }
+                    }
+                }
             }
             Spacer()
         }
         .padding(compact ? 8 : 12)
         .background(
             RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
-                .fill(Theme.surfaceElevated.opacity(0.68))
+                .fill(isHighlighted ? Theme.accentSoft : Theme.surfaceElevated.opacity(0.68))
         )
         .overlay(
             RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
                 .stroke(Theme.hairline, lineWidth: 1)
         )
+        .animation(.easeOut(duration: 0.3), value: isHighlighted)
     }
 
     private func formatTs(_ ms: Int64) -> String {
@@ -370,7 +540,7 @@ struct NotesPane: View {
                 noteToolbar
                 Divider()
                 ScrollView {
-                    if vm.isGeneratingNotes {
+                    if vm.isShowingNoteStream {
                         StreamingMarkdownPreview(markdown: vm.streamingNoteMarkdown)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -405,7 +575,7 @@ struct NotesPane: View {
     }
 
     private var displayedMarkdown: String {
-        if vm.isGeneratingNotes {
+        if vm.isShowingNoteStream {
             return vm.streamingNoteMarkdown
         }
         return vm.note?.markdown ?? ""
@@ -413,7 +583,7 @@ struct NotesPane: View {
 
     private var noteToolbar: some View {
         HStack(spacing: 10) {
-            if vm.isGeneratingNotes {
+            if vm.isShowingNoteStream {
                 Label(L10n.t("notes.status.streaming"), systemImage: "sparkles")
                     .font(.callout.weight(.medium))
                     .foregroundStyle(Theme.accent)
@@ -522,6 +692,11 @@ struct QAPane: View {
                 .onChange(of: vm.qaMessages.count) { _, _ in scrollToBottom(proxy) }
                 .onChange(of: vm.streamingQAResponse) { _, _ in scrollToBottom(proxy) }
             }
+            if !vm.transcriptTruncatedNotice.isEmpty {
+                LocalContextNotice(text: vm.transcriptTruncatedNotice)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 6)
+            }
             Divider()
             HStack(spacing: 8) {
                 TextField(L10n.t("qa.placeholder"), text: $question)
@@ -554,8 +729,13 @@ struct QAPane: View {
         Task { await vm.askQuestion(q) }
     }
 
+    /// Deferred by a turn so the row that triggered it is laid out first.
+    /// `@MainActor` because `ScrollViewProxy` and the view model are: the hop
+    /// has to stay inside the main actor rather than go through a `@Sendable`
+    /// dispatch block. Both callers are in `body`, which is already isolated.
+    @MainActor
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        DispatchQueue.main.async {
+        Task { @MainActor in
             if vm.isAnsweringQuestion {
                 proxy.scrollTo("streaming-qa-response", anchor: .bottom)
             } else if let last = vm.qaMessages.last {
@@ -607,6 +787,18 @@ private struct QAChatBubble: View {
             if message.role == .assistant { Spacer(minLength: 52) }
         }
         .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
+    }
+}
+
+/// Says the transcript was shortened before it reached the local model, so a
+/// thin answer is explained rather than mysterious.
+private struct LocalContextNotice: View {
+    let text: String
+
+    var body: some View {
+        Label(text, systemImage: "scissors")
+            .font(.caption)
+            .foregroundStyle(.secondary)
     }
 }
 
@@ -669,6 +861,9 @@ struct FlashcardsPane: View {
                         Label(L10n.t("flashcards.status.streaming"), systemImage: "sparkles")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(Theme.accent)
+                        if !vm.transcriptTruncatedNotice.isEmpty {
+                            LocalContextNotice(text: vm.transcriptTruncatedNotice)
+                        }
                         Text(vm.streamingFlashcardsRaw.isEmpty ? L10n.t("common.loading") : vm.streamingFlashcardsRaw)
                             .font(.system(.callout, design: .monospaced))
                             .textSelection(.enabled)
@@ -776,6 +971,9 @@ struct StudyToolsPane: View {
                                 Label(L10n.t("studyTools.status.streaming"), systemImage: "sparkles")
                                     .font(.caption.weight(.semibold))
                                     .foregroundStyle(Theme.accent)
+                                if !vm.transcriptTruncatedNotice.isEmpty {
+                                    LocalContextNotice(text: vm.transcriptTruncatedNotice)
+                                }
                                 StreamingMarkdownPreview(markdown: markdown)
                                     .textSelection(.enabled)
                             } else {
@@ -1065,8 +1263,39 @@ final class SessionDetailViewModel: ObservableObject {
     @Published var streamingHighlightId: Int64?
     @Published var streamingBuffer: String = ""
 
-    private var currentSessionId: String?
+    /// Audio transport. `playheadMs` is written by the ticker, except while the
+    /// user drags the scrubber.
+    @Published private(set) var hasAudio: Bool = false
+    @Published var playheadMs: Int64 = 0
+    @Published var playbackDurationMs: Int64 = 0
+    @Published var isScrubbing = false
+
+    /// Search-jump plumbing: the transcript scrolls to `pendingScrollSegmentId`
+    /// once and flashes `flashSegmentId` for a moment afterwards.
+    @Published var pendingScrollSegmentId: Int64?
+    @Published var flashSegmentId: Int64?
+
+    @Published var retranslateProgress: (done: Int, total: Int)?
+    @Published private(set) var retryingSegmentIds: Set<Int64> = []
+
+    /// Which session the in-flight note generation belongs to. The view model
+    /// outlives a session switch, so the stream must not be painted into
+    /// whatever session the user moved on to.
+    @Published private(set) var notesGenerationSessionId: String?
+    /// Set while a local-model generation runs on a shortened transcript.
+    @Published private(set) var transcriptTruncatedNotice: String = ""
+    @Published private(set) var course: Course?
+
+    /// Characters per local-model pass. A 4B MLX model has a few thousand
+    /// usable tokens and mixed English/Chinese runs ~3 characters per token,
+    /// which leaves room for the answer on top of the transcript.
+    private static let localChunkChars = 12_000
+    private static let localPromptChars = 16_000
+
+    private(set) var currentSessionId: String?
+    private var courseContext: CourseContext = .empty
     private var player: AVAudioPlayer?
+    private var playbackTicker: Task<Void, Never>?
     private let explanationService = HighlightExplanationService()
     private var streamingTask: Task<Void, Never>?
 
@@ -1103,17 +1332,49 @@ final class SessionDetailViewModel: ObservableObject {
         return String(format: "%d:%02d", m, ss)
     }
 
-    var hasAudio: Bool {
-        guard let path = session?.session.audioPath else { return false }
-        return FileManager.default.fileExists(atPath: path)
+    var isSessionRecording: Bool { session?.session.state == "recording" }
+
+    /// True only while the stream on screen belongs to the session on screen.
+    var isShowingNoteStream: Bool {
+        isGeneratingNotes && notesGenerationSessionId == currentSessionId
+    }
+
+    var failedTranslationCount: Int {
+        (session?.segments ?? []).filter { $0.translationState != .ok && !$0.textOriginal.isEmpty }.count
+    }
+
+    /// Segment under the playhead, for the transcript highlight.
+    var playingSegmentId: Int64? {
+        guard isPlaying || playheadMs > 0, let segs = session?.segments else { return nil }
+        return segs.last(where: { $0.startMs <= playheadMs })?.id
     }
 
     func load(sessionId: String) async {
+        // A player still holding the previous session's file would keep playing
+        // it under the new transcript.
+        if currentSessionId != sessionId { stopPlayback() }
         currentSessionId = sessionId
         do {
             guard let s = try await SessionRepository.shared.get(id: sessionId) else { return }
             let segs = try await SegmentRepository.shared.all(sessionId: sessionId)
             self.session = SessionWithSegments(session: s, segments: segs)
+            // Stat the recording once per load instead of on every body pass —
+            // the header reads this while note generation publishes per token.
+            self.hasAudio = s.audioPath.map { FileManager.default.fileExists(atPath: $0) } ?? false
+            // Seed the scrubber's range from the stored duration so it is live
+            // before the first play; opening the file here would also grab the
+            // iOS audio session out from under a still-recording session. A
+            // player that is already open knows the file's exact length, so a
+            // reload of the same session must not overwrite it.
+            if self.hasAudio && self.playbackDurationMs == 0 {
+                self.playbackDurationMs = s.durationMs
+            }
+            if let courseId = s.courseId {
+                self.course = try await CourseRepository.shared.get(id: courseId)
+            } else {
+                self.course = nil
+            }
+            self.courseContext = CourseContext(course: self.course)
             self.note = try await NoteRepository.shared.get(sessionId: sessionId)
             self.noteVersions = try await NoteRepository.shared.versions(sessionId: sessionId)
             self.highlights = try await HighlightRepository.shared.all(sessionId: sessionId)
@@ -1148,78 +1409,183 @@ final class SessionDetailViewModel: ObservableObject {
 
     func generateNotes(template: NoteTemplate = NoteTemplates.find("study")) async {
         guard let s = session, !s.segments.isEmpty else { return }
+        // Everything the write needs is captured before the first await. The
+        // published note and version list belong to whatever session the view
+        // is showing when the stream ends, which may no longer be this one —
+        // reading them afterwards is what moved a note between sessions.
+        let target = s.session.id
+        let currentNote: Note? = note?.sessionId == target ? note : nil
+        let existingNoteId = currentNote?.id
+        let baseVersion: Int64 = noteVersions.filter { $0.sessionId == target }.map(\.version).max()
+            ?? currentNote?.version
+            ?? 0
         isGeneratingNotes = true
+        notesGenerationSessionId = target
         streamingNoteMarkdown = ""
         defer {
             isGeneratingNotes = false
+            notesGenerationSessionId = nil
             streamingNoteMarkdown = ""
         }
         let config = AppState.shared.apiConfig
-        let llm = EngineFactory.makeLLM(config: config)
+        let backend = AppState.shared.llmBackend
+        let llm = EngineFactory.makeLLM(config: config, backend: backend)
         let transcriptText = s.segments.map { seg in
             "[\(formatTimecode(seg.startMs))] \(seg.textOriginal)"
         }.joined(separator: "\n")
 
-        let system = """
+        var system = """
         You are an academic note-taking assistant for a Chinese student studying in the US.
         \(template.systemPrompt)
         Do NOT paraphrase the transcript word-for-word. Do synthesize and organize.
         """
-        let user = "Transcript:\n\(transcriptText)"
+        if !courseContext.promptBlock.isEmpty {
+            system = courseContext.promptBlock + "\n\n" + system
+        }
         do {
-            var md = ""
-            for try await delta in llm.chat(messages: [
-                .init(role: .system, content: system),
-                .init(role: .user, content: user)
-            ], model: config.llmModel, temperature: 0.3)
-            {
-                md += delta
-                streamingNoteMarkdown = md
+            let md: String
+            if backend == .localMLX {
+                md = try await generateNotesInParts(system: system,
+                                                    transcript: transcriptText,
+                                                    llm: llm,
+                                                    config: config,
+                                                    target: target)
+            } else {
+                md = try await streamNotePass(system: system,
+                                              user: "Transcript:\n\(transcriptText)",
+                                              llm: llm,
+                                              config: config,
+                                              target: target,
+                                              header: "")
             }
-            let noteEntity = Note(id: note?.id ?? UUID().uuidString,
-                                   sessionId: s.session.id,
+            let noteEntity = Note(id: existingNoteId ?? UUID().uuidString,
+                                   sessionId: target,
                                    markdown: md,
-                                   version: ((noteVersions.map(\.version).max() ?? note?.version) ?? 0) + 1,
+                                   version: baseVersion + 1,
                                    generatedAt: Int64(Date().timeIntervalSince1970 * 1000),
                                    model: config.llmModel)
             try await NoteRepository.shared.upsert(noteEntity, template: template.id)
-            try await SessionRepository.shared.setState(s.session.id, state: "summarized")
-            self.note = noteEntity
-            self.noteVersions = try await NoteRepository.shared.versions(sessionId: s.session.id)
+            try await SessionRepository.shared.setState(target, state: "summarized")
+            guard currentSessionId == target else { return }   // persisted, just not on screen
+            // `upsert` keys on the session, so the surviving row may carry an
+            // id other than the one just built. Read into locals and re-check:
+            // the user can switch sessions while these two reads are in flight.
+            let freshNote = try await NoteRepository.shared.get(sessionId: target)
+            let freshVersions = try await NoteRepository.shared.versions(sessionId: target)
+            guard currentSessionId == target else { return }
+            self.note = freshNote
+            self.noteVersions = freshVersions
         } catch {
             AppState.shared.setError("Note generation failed: \(error.localizedDescription)")
         }
     }
 
+    /// Map-reduce for the local sidecar: one pass per chunk, then a merge pass.
+    /// A small model cannot hold a 90-minute lecture, and a single truncated
+    /// pass would silently drop the second half of the class.
+    private func generateNotesInParts(system: String,
+                                      transcript: String,
+                                      llm: LLMProvider,
+                                      config: ApiConfig,
+                                      target: String) async throws -> String {
+        let chunks = TranscriptChunker.split(text: transcript, maxChars: Self.localChunkChars)
+        guard chunks.count > 1 else {
+            return try await streamNotePass(system: system,
+                                            user: "Transcript:\n\(chunks.first ?? transcript)",
+                                            llm: llm,
+                                            config: config,
+                                            target: target,
+                                            header: "")
+        }
+        var partials: [String] = []
+        for (index, chunk) in chunks.enumerated() {
+            let header = String(format: L10n.t("notes.local.chunkProgress"),
+                                "\(index + 1)", "\(chunks.count)")
+            let part = try await streamNotePass(
+                system: system,
+                user: "Transcript (part \(index + 1) of \(chunks.count)):\n\(chunk)",
+                llm: llm,
+                config: config,
+                target: target,
+                header: header)
+            partials.append(part)
+        }
+        let mergeSystem = """
+        \(system)
+
+        You are given notes for consecutive parts of one lecture. Merge them into
+        a single set of notes: keep every distinct point, drop repetition, and use
+        one consistent heading structure. Never mention that the notes were merged
+        or that the lecture was processed in parts.
+        """
+        let merged = partials.enumerated()
+            .map { "## Part \($0.offset + 1)\n\($0.element)" }
+            .joined(separator: "\n\n")
+        return try await streamNotePass(system: mergeSystem,
+                                        user: merged,
+                                        llm: llm,
+                                        config: config,
+                                        target: target,
+                                        header: L10n.t("notes.local.merging"))
+    }
+
+    /// One streaming pass, mirrored into `streamingNoteMarkdown` under `header`
+    /// so a multi-pass local run still looks alive. Publishes only while the
+    /// session it belongs to is the one on screen.
+    private func streamNotePass(system: String,
+                                user: String,
+                                llm: LLMProvider,
+                                config: ApiConfig,
+                                target: String,
+                                header: String) async throws -> String {
+        var md = ""
+        for try await delta in llm.chat(messages: [
+            .init(role: .system, content: system),
+            .init(role: .user, content: user)
+        ], model: config.llmModel, temperature: 0.3)
+        {
+            md += delta
+            guard currentSessionId == target else { continue }
+            streamingNoteMarkdown = header.isEmpty ? md : header + "\n\n" + md
+        }
+        return md
+    }
+
     func askQuestion(_ question: String) async {
         guard let s = session, !s.segments.isEmpty else { return }
+        let target = s.session.id
         isAnsweringQuestion = true
         streamingQAResponse = ""
         defer {
             isAnsweringQuestion = false
             streamingQAResponse = ""
+            transcriptTruncatedNotice = ""
         }
         let config = AppState.shared.apiConfig
-        let llm = EngineFactory.makeLLM(config: config)
-        let transcriptText = transcriptForLLM(s.segments)
+        let llm = EngineFactory.makeLLM(config: config, backend: AppState.shared.llmBackend)
+        let transcriptText = budgetedTranscript(transcriptForLLM(s.segments))
         let createdAt = Int64(Date().timeIntervalSince1970 * 1000)
         let userMessage = QAMessage(id: UUID().uuidString,
-                                    sessionId: s.session.id,
+                                    sessionId: target,
                                     role: .user,
                                     content: question,
                                     model: nil,
                                     createdAt: createdAt)
         let recentHistory = qaMessages.suffix(10)
         qaMessages.append(userMessage)
+        var system = """
+        You answer questions about one lecture transcript for a Chinese student studying in the US.
+        Answer in Chinese, cite useful timecodes, and keep technical terms bilingual.
+        If the transcript does not contain enough evidence, say so.
+        """
+        if !courseContext.promptBlock.isEmpty {
+            system = courseContext.promptBlock + "\n\n" + system
+        }
         do {
             try await QAMessageRepository.shared.insert(userMessage)
             var answer = ""
             let messages = [
-                .init(role: .system, content: """
-                You answer questions about one lecture transcript for a Chinese student studying in the US.
-                Answer in Chinese, cite useful timecodes, and keep technical terms bilingual.
-                If the transcript does not contain enough evidence, say so.
-                """),
+                .init(role: .system, content: system),
                 .init(role: .user, content: "Lecture transcript:\n\(transcriptText)")
             ] + recentHistory.map { message in
                 ChatMessage(role: message.role == .user ? .user : .assistant,
@@ -1230,19 +1596,25 @@ final class SessionDetailViewModel: ObservableObject {
             for try await delta in llm.chat(messages: messages, model: config.llmModel, temperature: 0.2)
             {
                 answer += delta
+                guard currentSessionId == target else { continue }
                 streamingQAResponse = answer
             }
             let assistantMessage = QAMessage(id: UUID().uuidString,
-                                             sessionId: s.session.id,
+                                             sessionId: target,
                                              role: .assistant,
                                              content: answer,
                                              model: config.llmModel,
                                              createdAt: Int64(Date().timeIntervalSince1970 * 1000))
             try await QAMessageRepository.shared.insert(assistantMessage)
+            guard currentSessionId == target else { return }
             qaMessages.append(assistantMessage)
         } catch {
             try? await QAMessageRepository.shared.delete(id: userMessage.id)
-            qaMessages.removeAll { $0.id == userMessage.id }
+            // Only prune the in-memory list when it is still this session's —
+            // otherwise the removal would hit whatever is on screen now.
+            if currentSessionId == target {
+                qaMessages.removeAll { $0.id == userMessage.id }
+            }
             AppState.shared.setError("QA failed: \(error.localizedDescription)")
         }
     }
@@ -1269,26 +1641,33 @@ final class SessionDetailViewModel: ObservableObject {
 
     func generateFlashcards() async {
         guard let s = session, !s.segments.isEmpty else { return }
+        let target = s.session.id
         isGeneratingFlashcards = true
         streamingFlashcardsRaw = ""
         defer {
             isGeneratingFlashcards = false
             streamingFlashcardsRaw = ""
+            transcriptTruncatedNotice = ""
         }
         let config = AppState.shared.apiConfig
-        let llm = EngineFactory.makeLLM(config: config)
+        let llm = EngineFactory.makeLLM(config: config, backend: AppState.shared.llmBackend)
+        var system = """
+        Generate 8-12 high-value review flashcards from this lecture.
+        Return one card per line exactly as: front || back
+        Front should be a question or term. Back should be concise Chinese with key English terms preserved.
+        """
+        if !courseContext.promptBlock.isEmpty {
+            system = courseContext.promptBlock + "\n\n" + system
+        }
         do {
             var raw = ""
             for try await delta in llm.chat(messages: [
-                .init(role: .system, content: """
-                Generate 8-12 high-value review flashcards from this lecture.
-                Return one card per line exactly as: front || back
-                Front should be a question or term. Back should be concise Chinese with key English terms preserved.
-                """),
-                .init(role: .user, content: transcriptForLLM(s.segments))
+                .init(role: .system, content: system),
+                .init(role: .user, content: budgetedTranscript(transcriptForLLM(s.segments)))
             ], model: config.llmModel, temperature: 0.25)
             {
                 raw += delta
+                guard currentSessionId == target else { continue }
                 streamingFlashcardsRaw = raw
             }
             var parsed: [Flashcard] = []
@@ -1300,15 +1679,17 @@ final class SessionDetailViewModel: ObservableObject {
                 let back = parts.dropFirst().joined(separator: "||").trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !front.isEmpty, !back.isEmpty else { continue }
                 parsed.append(Flashcard(id: nil,
-                                        sessionId: s.session.id,
+                                        sessionId: target,
                                         front: front,
                                         back: back,
                                         sourceModel: config.llmModel,
                                         createdAt: createdAt,
                                         sortOrder: parsed.count))
             }
-            try await FlashcardRepository.shared.replace(sessionId: s.session.id, cards: parsed)
-            flashcards = try await FlashcardRepository.shared.all(sessionId: s.session.id)
+            try await FlashcardRepository.shared.replace(sessionId: target, cards: parsed)
+            let fresh = try await FlashcardRepository.shared.all(sessionId: target)
+            guard currentSessionId == target else { return }
+            flashcards = fresh
         } catch {
             AppState.shared.setError("Flashcards failed: \(error.localizedDescription)")
         }
@@ -1329,6 +1710,7 @@ final class SessionDetailViewModel: ObservableObject {
         guard let s = session,
               !s.segments.isEmpty,
               let tool = selectedStudyTool else { return }
+        let target = s.session.id
         isGeneratingStudyTool = true
         streamingStudyToolId = tool.id
         streamingStudyToolMarkdown = ""
@@ -1336,77 +1718,216 @@ final class SessionDetailViewModel: ObservableObject {
             isGeneratingStudyTool = false
             streamingStudyToolId = nil
             streamingStudyToolMarkdown = ""
+            transcriptTruncatedNotice = ""
         }
         let config = AppState.shared.apiConfig
-        let llm = EngineFactory.makeLLM(config: config)
+        let llm = EngineFactory.makeLLM(config: config, backend: AppState.shared.llmBackend)
+        let system = courseContext.promptBlock.isEmpty
+            ? tool.systemPrompt
+            : courseContext.promptBlock + "\n\n" + tool.systemPrompt
+        let transcript = budgetedTranscript(StudyTools.transcriptForLLM(s.segments))
         do {
             var markdown = ""
             for try await delta in llm.chat(messages: [
-                .init(role: .system, content: tool.systemPrompt),
-                .init(role: .user, content: "Lecture transcript:\n\(StudyTools.transcriptForLLM(s.segments))")
+                .init(role: .system, content: system),
+                .init(role: .user, content: "Lecture transcript:\n\(transcript)")
             ], model: config.llmModel, temperature: 0.25)
             {
                 markdown += delta
+                guard currentSessionId == target else { continue }
                 streamingStudyToolMarkdown = markdown
             }
             let result = StudyToolResult(id: UUID().uuidString,
-                                         sessionId: s.session.id,
+                                         sessionId: target,
                                          toolId: tool.id,
                                          markdown: markdown,
                                          model: config.llmModel,
                                          generatedAt: Int64(Date().timeIntervalSince1970 * 1000))
             try await StudyToolResultRepository.shared.upsert(result)
-            studyToolResults = try await StudyToolResultRepository.shared.all(sessionId: s.session.id)
+            let fresh = try await StudyToolResultRepository.shared.all(sessionId: target)
+            guard currentSessionId == target else { return }
+            studyToolResults = fresh
         } catch {
             AppState.shared.setError("Study tool failed: \(error.localizedDescription)")
         }
     }
 
-    func retranslate() async {
+    /// `failedOnly` covers just the rows whose translation never landed; the
+    /// full pass stays for a language or model change.
+    func retranslate(failedOnly: Bool) async {
         guard let sid = currentSessionId else { return }
         isRetranslating = true
-        defer { isRetranslating = false }
+        retranslateProgress = (0, 0)
+        defer {
+            isRetranslating = false
+            retranslateProgress = nil
+        }
         do {
-            try await AppState.shared.orchestrator.retranslateSession(sessionId: sid)
+            let stillFailed = try await AppState.shared.orchestrator.retranslateSession(
+                sessionId: sid,
+                failedOnly: failedOnly,
+                onProgress: { [weak self] done, total in
+                    guard let self, self.currentSessionId == sid else { return }
+                    self.retranslateProgress = (done, total)
+                })
+            guard currentSessionId == sid else { return }
             await load(sessionId: sid)
+            if stillFailed > 0 {
+                AppState.shared.setError(L10n.t("session.retranslate.partial"))
+            }
         } catch {
             AppState.shared.setError("Retranslate failed: \(error.localizedDescription)")
         }
     }
 
-    func seek(to startMs: Int64) {
-        guard let path = session?.session.audioPath,
-              FileManager.default.fileExists(atPath: path) else { return }
+    /// Retranslates a single row. A whole-session pass is the wrong tool when
+    /// one sentence lost its stream to a hiccup.
+    func retryTranslation(for segment: Segment) async {
+        guard let rowId = segment.id,
+              !segment.textOriginal.isEmpty,
+              let sid = currentSessionId,
+              !retryingSegmentIds.contains(rowId) else { return }
+        let config = AppState.shared.apiConfig
+        let translator = EngineFactory.makeTranslator(config: config,
+                                                      backend: AppState.shared.translationBackend)
+        let glossary = courseContext.translationGlossaryBlock
+        retryingSegmentIds.insert(rowId)
+        defer { retryingSegmentIds.remove(rowId) }
+        var buf = ""
         do {
-            if player == nil {
-                player = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
-                player?.prepareToPlay()
+            for try await delta in translator.translate(text: segment.textOriginal,
+                                                        sourceLanguage: config.sourceLanguage,
+                                                        targetLanguage: config.targetLanguage,
+                                                        context: [],
+                                                        glossary: glossary) {
+                buf += delta
             }
-            player?.currentTime = Double(startMs) / 1000
-            player?.play()
-            isPlaying = true
+            try await SegmentRepository.shared.updateTranslation(id: rowId,
+                                                                 textTranslated: buf,
+                                                                 state: .ok)
         } catch {
-            AppState.shared.setError("Playback failed: \(error.localizedDescription)")
+            // Keep whatever arrived and leave the row marked, so the failed
+            // filter still finds it next time.
+            try? await SegmentRepository.shared.updateTranslation(id: rowId,
+                                                                  textTranslated: buf,
+                                                                  state: .failed)
+            AppState.shared.setError("Translation error: \(error.localizedDescription)")
+        }
+        guard currentSessionId == sid, let current = session, current.session.id == sid else { return }
+        if let segs = try? await SegmentRepository.shared.all(sessionId: sid) {
+            guard currentSessionId == sid else { return }
+            self.session = SessionWithSegments(session: current.session, segments: segs)
         }
     }
 
-    func playFromBeginning() {
+    // MARK: - Playback
+
+    /// Lazily opens the session's recording. `AVAudioPlayerDelegate` needs an
+    /// `NSObject` and nonisolated callbacks, so the end of the file is noticed
+    /// by the ticker instead — the same idiom the orchestrator uses.
+    private func ensurePlayer() -> AVAudioPlayer? {
+        if let player { return player }
         guard let path = session?.session.audioPath,
-              FileManager.default.fileExists(atPath: path) else { return }
+              FileManager.default.fileExists(atPath: path) else { return nil }
+        #if os(iOS)
+        // Without the playback category the ring/silent switch mutes us.
+        try? AVAudioSession.sharedInstance().setCategory(.playback)
+        try? AVAudioSession.sharedInstance().setActive(true)
+        #endif
         do {
-            player = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
-            player?.prepareToPlay()
-            player?.play()
-            isPlaying = true
+            let p = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
+            p.prepareToPlay()
+            player = p
+            playbackDurationMs = Int64(p.duration * 1000)
+            return p
         } catch {
             AppState.shared.setError("Playback failed: \(error.localizedDescription)")
+            return nil
         }
+    }
+
+    func togglePlayPause() {
+        guard let p = ensurePlayer() else { return }
+        if p.isPlaying {
+            // Stop the ticker first: `pause()` clears `isPlaying`, which the
+            // ticker would otherwise read as "reached the end".
+            stopTicker()
+            p.pause()
+            isPlaying = false
+        } else {
+            p.play()
+            isPlaying = true
+            startTicker()
+        }
+    }
+
+    /// Tapping a transcript line means "play from here", so this starts
+    /// playback if it is not already running.
+    func seek(to startMs: Int64) {
+        guard let p = ensurePlayer() else { return }
+        p.currentTime = min(max(0, Double(startMs) / 1000), p.duration)
+        playheadMs = Int64(p.currentTime * 1000)
+        if !p.isPlaying {
+            p.play()
+            isPlaying = true
+            startTicker()
+        }
+    }
+
+    /// Moves the playhead without deciding whether to play. Releasing the
+    /// scrubber on a paused recording must leave it paused — `seek(to:)` is the
+    /// other half of the pair, for "play from this line".
+    func scrub(to ms: Int64) {
+        guard let p = ensurePlayer() else { return }
+        p.currentTime = min(max(0, Double(ms) / 1000), p.duration)
+        playheadMs = Int64(p.currentTime * 1000)
     }
 
     func stopPlayback() {
+        stopTicker()
         player?.stop()
         player = nil
         isPlaying = false
+        playheadMs = 0
+        // Otherwise the next session's transport inherits this file's length:
+        // `playbackDurationMs` is only rewritten when a player is opened.
+        playbackDurationMs = 0
+    }
+
+    private func startTicker() {
+        stopTicker()
+        playbackTicker = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                guard let self, let p = self.player else { return }
+                if !self.isScrubbing { self.playheadMs = Int64(p.currentTime * 1000) }
+                if !p.isPlaying {
+                    // Reached the end: nothing calls back, so rewind here or
+                    // the transport stays stuck on Pause forever.
+                    p.currentTime = 0
+                    self.isPlaying = false
+                    self.playheadMs = 0
+                    self.playbackTicker = nil
+                    return
+                }
+            }
+        }
+    }
+
+    private func stopTicker() {
+        playbackTicker?.cancel()
+        playbackTicker = nil
+    }
+
+    /// Consumes a search hit: scroll target plus a brief flash. Ignored when
+    /// the hit belongs to a session this view model is not showing, or when the
+    /// segment was deleted between the search and the click.
+    func applyJump(_ target: SegmentJumpTarget?) {
+        guard let target,
+              target.sessionId == currentSessionId,
+              session?.segments.contains(where: { $0.id == target.segmentId }) == true else { return }
+        pendingScrollSegmentId = target.segmentId
+        flashSegmentId = target.segmentId
     }
 
     // MARK: - Highlight explanation
@@ -1503,6 +2024,10 @@ final class SessionDetailViewModel: ObservableObject {
         let config = AppState.shared.apiConfig
         streamingBuffer = ""
         streamingHighlightId = highlightId
+        let llm = EngineFactory.makeLLM(config: config, backend: AppState.shared.llmBackend)
+        // Captured now: a session switch mid-stream would otherwise explain
+        // this range with another course's glossary.
+        let coursePrompt = courseContext.promptBlock
 
         let task = Task { [weak self] in
             guard let self else { return }
@@ -1512,7 +2037,9 @@ final class SessionDetailViewModel: ObservableObject {
                     rangeEndMs: range.end,
                     allSegments: segments,
                     preset: preset,
-                    config: config)
+                    config: config,
+                    llm: llm,
+                    courseContext: coursePrompt)
                 for try await delta in stream {
                     if Task.isCancelled { return }
                     self.streamingBuffer += delta
@@ -1545,6 +2072,9 @@ final class SessionDetailViewModel: ObservableObject {
     private func reloadHighlights() async {
         guard let sid = currentSessionId else { return }
         if let fresh = try? await HighlightRepository.shared.all(sessionId: sid) {
+            // The read is an await: the view may have moved to another session
+            // while it was in flight.
+            guard currentSessionId == sid else { return }
             self.highlights = fresh
         }
     }
@@ -1682,6 +2212,19 @@ final class SessionDetailViewModel: ObservableObject {
             "[\(formatTimecode(seg.startMs))] \(seg.textOriginal)" +
             (seg.textTranslated.isEmpty ? "" : "\n译文: \(seg.textTranslated)")
         }.joined(separator: "\n")
+    }
+
+    /// Transcript for a one-shot prompt. The cloud path is untouched; the local
+    /// sidecar gets a head-and-tail shortening and the UI says so, because a
+    /// silently halved lecture reads as a bad model rather than a full context.
+    private func budgetedTranscript(_ text: String) -> String {
+        guard AppState.shared.llmBackend == .localMLX else {
+            transcriptTruncatedNotice = ""
+            return text
+        }
+        let result = TranscriptChunker.truncate(text: text, maxChars: Self.localPromptChars)
+        transcriptTruncatedNotice = result.wasTruncated ? L10n.t("notes.local.truncated") : ""
+        return result.text
     }
 }
 

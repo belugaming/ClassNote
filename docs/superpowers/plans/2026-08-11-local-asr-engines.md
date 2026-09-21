@@ -50,7 +50,7 @@
 - Modify: `Features/Settings/SettingsView.swift:440-463`
 
 - [ ] **Step 1:** 在 `SttBackend` 枚举加 `case funasr = "funasr"` 和 `case nemotronStreaming = "nemotron"`，`displayName` 补充对应文案（"FunASR (Local, 2-Pass)" / "Nemotron Streaming (Local, English)"）。
-- [ ] **Step 2:** `EngineSettingsView` 的 Picker 无需改动（`ForEach(SttBackend.allCases)` 自动包含新 case）；为两个新引擎各加一条 `Label(...)` 提示（类似现有 `whisperKitNote`），说明首次使用需要下载依赖。
+- [ ] **Step 2:** `EngineSettingsView` 的 Picker 无需改动（`ForEach(SttBackend.allCases)` 自动包含新 case）；为两个新引擎各加一条 `Label(...)` 提示，说明首次使用需要下载依赖。
 - [ ] **Step 3:** `swift build` 确认通过。
 - [ ] **Step 4:** 提交：`git commit -m "feat: add funasr/nemotron backend options to settings"`
 

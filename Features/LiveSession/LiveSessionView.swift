@@ -3,11 +3,24 @@ import SwiftUI
 struct LiveSessionView: View {
     let sessionId: String
     @EnvironmentObject var appState: AppState
+    /// Resolved once per window. An import's orchestrator leaves the registry
+    /// as soon as it finishes, and re-resolving on every render would re-bind
+    /// this window to the live recording.
+    @State private var resolved: SessionOrchestrator?
 
     var body: some View {
-        InnerView(windowId: sessionId,
-                  appState: appState,
-                  orchestrator: appState.orchestrator(for: sessionId))
+        Group {
+            if let orchestrator = resolved ?? appState.orchestrator(for: sessionId) {
+                InnerView(windowId: sessionId,
+                          appState: appState,
+                          orchestrator: orchestrator)
+            } else {
+                Theme.surface
+            }
+        }
+        .onAppear {
+            if resolved == nil { resolved = appState.orchestrator(for: sessionId) }
+        }
     }
 }
 

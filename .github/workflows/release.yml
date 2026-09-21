@@ -7,7 +7,12 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    name: Tests must pass before a release is cut
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: test
     runs-on: macos-15
     permissions:
       contents: write
@@ -16,7 +21,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_26.2.app
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.2.app 2>/dev/null \
+            || sudo xcode-select -s "$(ls -d /Applications/Xcode_2*.app | sort -V | tail -1)"
+          xcodebuild -version
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -40,6 +48,23 @@ jobs:
                      -skipMacroValidation \
                      build
 
+      - name: Resolve the version (tag, or MARKETING_VERSION for a manual run)
+        run: |
+          set -euo pipefail
+          APP_VERSION="$(grep -E '^\s*MARKETING_VERSION:' project.yml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            if [[ "$TAG_VERSION" != "$APP_VERSION" ]]; then
+              echo "✗ tag v$TAG_VERSION does not match MARKETING_VERSION $APP_VERSION in project.yml"
+              exit 1
+            fi
+            VERSION="$TAG_VERSION"
+          else
+            # workflow_dispatch on a branch: build the DMG as an artifact only.
+            VERSION="$APP_VERSION"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
       - name: Package DMG
         run: |
           set -euo pipefail
@@ -49,7 +74,6 @@ jobs:
             exit 1
           fi
 
-          VERSION="${GITHUB_REF_NAME#v}"
           STAGE_DIR="build/dmg-stage"
           rm -rf "$STAGE_DIR"
           mkdir -p "$STAGE_DIR"

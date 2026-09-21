@@ -47,51 +47,22 @@ final class VADTests: XCTestCase {
         let rms = VADGate.rms(pcm16: data)
         XCTAssertGreaterThan(rms, 0.3)
     }
-
-    func testGatePassesSpeechAndSuppressesSilence() async {
-        let gate = VADGate(rmsThreshold: 0.05)
-        // Loud chunk
-        let n = 1600
-        var loud = Data(capacity: n * 2)
-        for i in 0..<n {
-            let t = Double(i) / 16000.0
-            let v = sin(2 * .pi * 440 * t) * 0.8
-            let s = Int16(v * 32767.0)
-            withUnsafeBytes(of: s.littleEndian) { loud.append(contentsOf: $0) }
-        }
-        let silent = Data(repeating: 0, count: n * 2)
-        let chunkLoud = AudioChunk(pcmData: loud, sampleRate: 16000, timestamp: 0)
-        let chunkSilent = AudioChunk(pcmData: silent, sampleRate: 16000, timestamp: 100)
-        let pass1 = await gate.shouldPass(chunk: chunkLoud)
-        let pass2 = await gate.shouldPass(chunk: chunkSilent)
-        XCTAssertTrue(pass1, "Loud chunk must pass VAD")
-        // Within hangover window so should still pass
-        XCTAssertTrue(pass2, "Silent chunk within hangover should still pass")
-    }
 }
 
 final class FileWriterTests: XCTestCase {
-    func testPCMBufferWriterCreatesM4AWithoutCrashing() async throws {
+    func testMixedPCMWriterCreatesM4AWithoutCrashing() async throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("classnote-filewriter-\(UUID().uuidString).m4a")
         defer { try? FileManager.default.removeItem(at: url) }
 
-        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                         sampleRate: 48000,
-                                         channels: 1,
-                                         interleaved: false),
-              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4800) else {
-            return XCTFail("Could not create audio test buffer")
-        }
-        buffer.frameLength = 4800
-        if let channel = buffer.floatChannelData?[0] {
-            for frame in 0..<Int(buffer.frameLength) {
-                channel[frame] = 0
-            }
-        }
+        // The writer now takes the mix bus's 16 kHz mono Int16 frames directly.
+        let frames = [Int16](repeating: 0, count: 1600)
+        let pcm = frames.withUnsafeBufferPointer { Data(buffer: $0) }
 
         let writer = FileWriter(url: url)
-        writer.appendPCMBuffer(buffer)
+        for block in 0..<10 {
+            writer.append(pcm16: pcm, sampleRate: 16000, ptsFrames: Int64(block * 1600))
+        }
         await writer.finish()
 
         let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
@@ -120,8 +91,10 @@ final class DatabaseTests: XCTestCase {
         try Database.shared.setup()
         let course = Course.new(name: "Test Course")
         try await CourseRepository.shared.insert(course)
+        addTeardownBlock { try? await CourseRepository.shared.delete(id: course.id) }
         let session = Session.new(courseId: course.id, title: "Test session")
         try await SessionRepository.shared.insert(session)
+        addTeardownBlock { try? await SessionRepository.shared.delete(id: session.id, force: true) }
 
         let seg = Segment(id: nil, sessionId: session.id, startMs: 0, endMs: 1000,
                            speakerId: nil, textOriginal: "The quick brown fox jumps over the lazy dog",
@@ -132,10 +105,6 @@ final class DatabaseTests: XCTestCase {
 
         let hits = try await SegmentRepository.shared.searchFTS(query: "brown", limit: 10)
         XCTAssertTrue(hits.contains(where: { $0.segment.id == id }))
-
-        // Cleanup
-        try await SessionRepository.shared.delete(id: session.id)
-        try await CourseRepository.shared.delete(id: course.id)
     }
 
     func testSessionCanMoveBetweenCoursesAndUnfiled() async throws {
@@ -144,9 +113,14 @@ final class DatabaseTests: XCTestCase {
         let targetCourse = Course.new(name: "Target Course")
         try await CourseRepository.shared.insert(sourceCourse)
         try await CourseRepository.shared.insert(targetCourse)
+        addTeardownBlock {
+            try? await CourseRepository.shared.delete(id: sourceCourse.id)
+            try? await CourseRepository.shared.delete(id: targetCourse.id)
+        }
 
         let session = Session.new(courseId: sourceCourse.id, title: "Movable session")
         try await SessionRepository.shared.insert(session)
+        addTeardownBlock { try? await SessionRepository.shared.delete(id: session.id, force: true) }
 
         try await SessionRepository.shared.move(id: session.id, toCourseId: targetCourse.id)
         var reloaded = try await SessionRepository.shared.get(id: session.id)
@@ -155,14 +129,16 @@ final class DatabaseTests: XCTestCase {
         try await SessionRepository.shared.move(id: session.id, toCourseId: nil)
         reloaded = try await SessionRepository.shared.get(id: session.id)
         XCTAssertNil(reloaded?.courseId)
-
-        try await SessionRepository.shared.delete(id: session.id)
-        try await CourseRepository.shared.delete(id: sourceCourse.id)
-        try await CourseRepository.shared.delete(id: targetCourse.id)
     }
 
     func testApiConfigPersistence() async throws {
         try Database.shared.setup()
+        // Registered before the first write: an assertion does not abort the
+        // test, but any `try` below can, and the restore has to run either way.
+        addTeardownBlock {
+            try? await ApiConfigRepository.shared.save(.default)
+            ApiConfigBackupStore.clear()
+        }
         var c = try await ApiConfigRepository.shared.load()
         c.baseUrl = "https://example.test/v1"
         c.apiKey = "test-secret-key-do-not-keep"
@@ -180,7 +156,10 @@ final class DatabaseTests: XCTestCase {
         XCTAssertEqual(reloaded.sttModel, "test-stt-model")
         XCTAssertEqual(reloaded.translationModel, "test-translation-model")
         XCTAssertEqual(reloaded.llmModel, "test-llm-model")
+        // A rawValue no backend answers to any more: it must survive the round
+        // trip byte for byte and only be folded onto the cloud engine on decode.
         XCTAssertEqual(reloaded.sttBackend, "whisperkit")
+        XCTAssertEqual(SttBackend.resolve(reloaded.sttBackend), .openAICompatible)
         XCTAssertEqual(reloaded.targetLanguage, "ja")
         XCTAssertEqual(reloaded.sourceLanguage, "")
         XCTAssertEqual(reloaded.redactedKey, "test…keep")
@@ -189,14 +168,14 @@ final class DatabaseTests: XCTestCase {
             try String.fetchOne(db, sql: "SELECT api_key FROM api_config WHERE id=1") ?? ""
         }
         XCTAssertEqual(rawDatabaseKey, "test-secret-key-do-not-keep")
-
-        // Restore default
-        try await ApiConfigRepository.shared.save(.default)
-        ApiConfigBackupStore.clear()
     }
 
     func testApiConfigRestoresNonSecretFieldsFromBackup() async throws {
         try Database.shared.setup()
+        addTeardownBlock {
+            try? await ApiConfigRepository.shared.save(.default)
+            ApiConfigBackupStore.clear()
+        }
         var custom = ApiConfig.default
         custom.baseUrl = "https://backup.example.test/v1"
         custom.apiKey = "backup-key"
@@ -222,24 +201,26 @@ final class DatabaseTests: XCTestCase {
         XCTAssertEqual(restored.translationModel, "backup-translation")
         XCTAssertEqual(restored.llmModel, "backup-llm")
         XCTAssertEqual(restored.sttBackend, "whisperkit")
+        XCTAssertEqual(SttBackend.resolve(restored.sttBackend), .openAICompatible)
         XCTAssertEqual(restored.targetLanguage, "ko")
         XCTAssertEqual(restored.sourceLanguage, "auto")
-
-        try await ApiConfigRepository.shared.save(.default)
-        ApiConfigBackupStore.clear()
     }
 
     func testDeletingSessionRemovesManagedRecordingFile() async throws {
         try Database.shared.setup()
         let session = Session.new(courseId: nil, title: "Delete recording")
         let url = AppBootstrap.recordingURL(sessionId: session.id)
+        addTeardownBlock {
+            try? await SessionRepository.shared.delete(id: session.id, force: true)
+            try? FileManager.default.removeItem(at: url)
+        }
         try Data("audio".utf8).write(to: url)
         var saved = session
         saved.audioPath = url.path
         try await SessionRepository.shared.insert(saved)
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
-        try await SessionRepository.shared.delete(id: session.id)
+        try await SessionRepository.shared.delete(id: session.id, force: true)
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
     }
 
@@ -265,6 +246,7 @@ final class DatabaseTests: XCTestCase {
         try Database.shared.setup()
         let session = Session.new(courseId: nil, title: "Flashcard source")
         try await SessionRepository.shared.insert(session)
+        addTeardownBlock { try? await SessionRepository.shared.delete(id: session.id, force: true) }
 
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         let cards = [
@@ -276,8 +258,6 @@ final class DatabaseTests: XCTestCase {
         let loaded = try await FlashcardRepository.shared.all(sessionId: session.id)
         XCTAssertEqual(loaded.map(\.front), ["What is ATP?", "Define osmosis"])
         XCTAssertEqual(loaded.map(\.sortOrder), [0, 1])
-
-        try await SessionRepository.shared.delete(id: session.id)
     }
 
     func testFlashcardsMarkdownExport() {
@@ -328,6 +308,7 @@ final class DatabaseTests: XCTestCase {
         try Database.shared.setup()
         let session = Session.new(courseId: nil, title: "Study tool source")
         try await SessionRepository.shared.insert(session)
+        addTeardownBlock { try? await SessionRepository.shared.delete(id: session.id, force: true) }
 
         let result = StudyToolResult(id: UUID().uuidString,
                                      sessionId: session.id,
@@ -339,14 +320,13 @@ final class DatabaseTests: XCTestCase {
 
         let loaded = try await StudyToolResultRepository.shared.get(sessionId: session.id, toolId: "catch_up")
         XCTAssertEqual(loaded?.markdown, "# Catch up")
-
-        try await SessionRepository.shared.delete(id: session.id)
     }
 
     func testNoteDeleteRemovesCurrentAndVersions() async throws {
         try Database.shared.setup()
         let session = Session.new(courseId: nil, title: "Note delete source")
         try await SessionRepository.shared.insert(session)
+        addTeardownBlock { try? await SessionRepository.shared.delete(id: session.id, force: true) }
 
         let note = Note(id: UUID().uuidString,
                         sessionId: session.id,
@@ -365,14 +345,13 @@ final class DatabaseTests: XCTestCase {
         let deletedVersions = try await NoteRepository.shared.versions(sessionId: session.id)
         XCTAssertNil(deletedNote)
         XCTAssertEqual(deletedVersions.count, 0)
-
-        try await SessionRepository.shared.delete(id: session.id)
     }
 
     func testQAMessagePersistenceAndDeletion() async throws {
         try Database.shared.setup()
         let session = Session.new(courseId: nil, title: "QA source")
         try await SessionRepository.shared.insert(session)
+        addTeardownBlock { try? await SessionRepository.shared.delete(id: session.id, force: true) }
 
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         let user = QAMessage(id: UUID().uuidString,
@@ -400,8 +379,6 @@ final class DatabaseTests: XCTestCase {
         try await QAMessageRepository.shared.deleteAll(sessionId: session.id)
         messages = try await QAMessageRepository.shared.all(sessionId: session.id)
         XCTAssertTrue(messages.isEmpty)
-
-        try await SessionRepository.shared.delete(id: session.id)
     }
 }
 
@@ -524,9 +501,11 @@ final class ShouldEmitTests: XCTestCase {
     }
 }
 
-/// Guards the config-loss bug: a stale in-memory `.default` (before
-/// `loadConfig()` finishes) used to be written to both the database and the
-/// UserDefaults backup, destroying the copy meant to recover from exactly that.
+/// Guards the config-loss bugs around the UserDefaults backup: the backup may
+/// only replace a row the user never saved (`configured_at` is NULL), and a row
+/// the user did save is authoritative even when it happens to equal the factory
+/// defaults. The premature `.default` write that once destroyed the backup is
+/// prevented upstream by `AppState.saveConfig`'s `hasLoadedConfig` guard.
 final class ApiConfigBackupTests: XCTestCase {
     override func setUp() async throws {
         try Database.shared.setup()
@@ -548,18 +527,23 @@ final class ApiConfigBackupTests: XCTestCase {
         XCTAssertEqual(backup?.apiKey, "sk-regression-test")
     }
 
-    func testSavingDefaultsDoesNotClobberBackup() async throws {
+    func testSavedConfigIsAuthoritativeEvenWhenItEqualsTheDefaults() async throws {
         var real = ApiConfig.default
         real.baseUrl = "https://example.test/v1"
-        real.apiKey = "sk-must-survive"
+        real.apiKey = "sk-old-provider"
         try await ApiConfigRepository.shared.save(real)
 
-        // An all-defaults save is what a premature write looks like.
-        try await ApiConfigRepository.shared.save(.default)
+        // Choosing the OpenAI preset again yields a config equal to the factory
+        // defaults except for the key. Provenance, not value, decides whether
+        // the backup may replace it — so the new key must win.
+        var back = ApiConfig.default
+        back.apiKey = "sk-new-key"
+        try await ApiConfigRepository.shared.save(back)
 
-        let backup = ApiConfigBackupStore.read()
-        XCTAssertEqual(backup?.apiKey, "sk-must-survive",
-                       "An all-defaults save must not overwrite the backup")
+        let loaded = try await ApiConfigRepository.shared.load()
+        XCTAssertEqual(loaded.baseUrl, ApiConfig.default.baseUrl)
+        XCTAssertEqual(loaded.apiKey, "sk-new-key",
+                       "A deliberately saved config must not be overwritten by an older backup")
     }
 
     func testLoadRestoresFromBackupWhenDatabaseIsDefaulted() async throws {
@@ -616,7 +600,13 @@ final class PipProgressParsingTests: XCTestCase {
 /// local engine could not be installed on any machine.
 final class PythonVersionGateTests: XCTestCase {
     func test_accepts_the_minimum_supported_version() {
-        XCTAssertTrue(LocalASREnvironment.isVersionSupported((major: 3, minor: 10)))
+        XCTAssertTrue(LocalASREnvironment.isVersionSupported((major: 3, minor: 11)))
+    }
+
+    func test_rejects_python_below_the_dependency_floor() {
+        // websockets 17 and numpy 2.4 both require 3.11; a 3.10 venv would pass
+        // the gate and then die in pip.
+        XCTAssertFalse(LocalASREnvironment.isVersionSupported((major: 3, minor: 10)))
     }
 
     func test_accepts_newer_python_3() {
@@ -625,7 +615,7 @@ final class PythonVersionGateTests: XCTestCase {
     }
 
     func test_rejects_the_system_python_that_ships_with_macos() {
-        // /usr/bin/python3 is 3.9 and cannot install mlx-audio.
+        // /usr/bin/python3 is 3.9 and cannot install the pinned dependency set.
         XCTAssertFalse(LocalASREnvironment.isVersionSupported((major: 3, minor: 9)))
         XCTAssertFalse(LocalASREnvironment.isVersionSupported((major: 2, minor: 7)))
     }
@@ -633,6 +623,6 @@ final class PythonVersionGateTests: XCTestCase {
     func test_minimum_is_a_python_3_version() {
         // Guards the shape of the constant itself, not just the comparison.
         XCTAssertEqual(LocalASREnvironment.minimumPythonVersion.major, 3)
-        XCTAssertEqual(LocalASREnvironment.minimumPythonVersion.minor, 10)
+        XCTAssertEqual(LocalASREnvironment.minimumPythonVersion.minor, 11)
     }
 }

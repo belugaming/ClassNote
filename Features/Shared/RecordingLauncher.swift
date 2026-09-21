@@ -66,8 +66,8 @@ extension AudioSourceKind {
 /// recording, so the menu bar and the toolbar cannot drift apart.
 @MainActor
 struct RecordingLauncher {
-    @AppStorage("preferredRecordingSource") private var sourceRaw = AudioSourceKind.microphone.rawValue
-    @AppStorage("preferredRecordingIntent") private var intentRaw = RecordingIntent.keep.rawValue
+    @AppStorage("preferredRecordingSource", store: AppEnvironment.defaults) private var sourceRaw = AudioSourceKind.microphone.rawValue
+    @AppStorage("preferredRecordingIntent", store: AppEnvironment.defaults) private var intentRaw = RecordingIntent.keep.rawValue
 
     var source: AudioSourceKind {
         get { AudioSourceKind(rawValue: sourceRaw) ?? .microphone }

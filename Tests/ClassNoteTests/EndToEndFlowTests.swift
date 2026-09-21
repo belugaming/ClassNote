@@ -58,15 +58,19 @@ final class EndToEndFlowTests: XCTestCase {
         cfg.translationModel = "test-translate"
         cfg.llmModel = "test-llm"
         try await ApiConfigRepository.shared.save(cfg)
-        // Force AppState to reload from DB so test cfg sticks (avoids race with init Task)
+        addTeardownBlock { try? await ApiConfigRepository.shared.save(.default) }
+        // AppState is only handed a config by `bootstrap()`, which no longer
+        // runs under test, so the orchestrator would otherwise use the factory
+        // default endpoint instead of the mock server.
         await AppState.shared.loadConfig()
         let live = await MainActor.run { AppState.shared.apiConfig.baseUrl }
-        XCTAssertTrue(live.contains("\(port)"), "AppState didn't pick up test cfg, got: \(live)")
+        XCTAssertTrue(live.contains("\(port)"), "AppState is not pointed at the mock server, got: \(live)")
         await MainActor.run { AppState.shared.translationEnabled = true }
 
         // Create course
         let course = Course.new(name: "Linear Algebra 101")
         try await CourseRepository.shared.insert(course)
+        addTeardownBlock { try? await CourseRepository.shared.delete(id: course.id) }
 
         // Write test WAV file
         let tempDir = FileManager.default.temporaryDirectory
@@ -77,6 +81,7 @@ final class EndToEndFlowTests: XCTestCase {
         // Run import via orchestrator
         let orch = await AppState.shared.orchestrator
         let sessionId = try await orch.ingestFile(url: wavURL, courseId: course.id)
+        addTeardownBlock { try? await SessionRepository.shared.delete(id: sessionId, force: true) }
         try await orch.waitForImportToFinish()
 
         // Poll for completion - we need both segments inserted and translations done
@@ -105,11 +110,6 @@ final class EndToEndFlowTests: XCTestCase {
         try await HighlightRepository.shared.mark(sessionId: sessionId, timestampMs: 1000, note: "important")
         let hl = try await HighlightRepository.shared.all(sessionId: sessionId)
         XCTAssertEqual(hl.count, 1)
-
-        // Cleanup
-        try await SessionRepository.shared.delete(id: sessionId)
-        try await CourseRepository.shared.delete(id: course.id)
-        try await ApiConfigRepository.shared.save(.default)
     }
 
     static func makeTestWav(to url: URL, seconds: Int) throws {

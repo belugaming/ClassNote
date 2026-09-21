@@ -1,7 +1,23 @@
 # Identical to requirements-funasr.txt on purpose -- see the comment there.
-sherpa-onnx>=1.13.7
-huggingface_hub
-numpy
-websockets
-mlx
-mlx-lm
+# Pinned exactly, on 2026-09-21, to whatever was current on PyPI that day. Two
+# machines installing a week apart otherwise get different programs: mlx-lm in
+# particular has changed stream_generate's chunk shape between releases, and
+# the venv is built from this file on the user's machine, not shipped.
+#
+# To bump: pick the new versions, install them into a scratch venv on macOS
+# arm64, run a real recording plus a file import through the app, then edit
+# both files (they must stay identical) and bump
+# LocalASREnvironment.requirementsGeneration so existing venvs reinstall.
+# Transitive dependencies are deliberately left unpinned -- pinning them
+# without --require-hashes buys nothing, and pip refuses a partially hashed
+# file.
+sherpa-onnx==1.13.8
+huggingface_hub==1.32.0
+# numpy stays a minor behind: 2.5.x declares Requires-Python >=3.12, and
+# LocalASREnvironment accepts any interpreter from 3.11 up. 2.4.6 is the last
+# release that installs on 3.11, which is also what CI runs. Raise this only
+# together with the floor in LocalASREnvironment.minimumPythonVersion.
+numpy==2.4.6
+websockets==17.1
+mlx==0.32.2
+mlx-lm==0.31.3

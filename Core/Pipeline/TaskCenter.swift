@@ -130,6 +130,11 @@ final class TaskCenter: ObservableObject {
                         detail: String?,
                         errorMessage: String?) {
         guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
+        // Cancelled is terminal. An import's own completion path can report
+        // success moments after the user cancelled it — the work really did
+        // stop, and overwriting the status is how a cancelled import ended up
+        // listed as finished.
+        guard items[idx].status != .cancelled else { return }
         if let detail { items[idx].detail = detail }
         items[idx].status = status
         items[idx].completedAt = Date()

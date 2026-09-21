@@ -1,5 +1,7 @@
 import Foundation
-import AVFoundation
+// @preconcurrency: `AVAudioPCMBuffer` is not `Sendable`, and the converter
+// input block below is a `@Sendable` closure that has to hand one over.
+@preconcurrency import AVFoundation
 import Speech
 import CoreMedia
 

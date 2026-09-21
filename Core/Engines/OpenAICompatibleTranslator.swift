@@ -12,7 +12,8 @@ final class OpenAICompatibleTranslator: TranslationProvider, Sendable {
     func translate(text: String,
                    sourceLanguage: String,
                    targetLanguage: String,
-                   context: [String]) -> AsyncThrowingStream<String, Error> {
+                   context: [String],
+                   glossary: String) -> AsyncThrowingStream<String, Error> {
 
         let cfg = self.config
         let trimmedContext = Array(context.suffix(4))
@@ -20,11 +21,16 @@ final class OpenAICompatibleTranslator: TranslationProvider, Sendable {
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    let system = """
+                    var system = """
                     You are a professional translator for college lectures. Translate the user's text from \(sourceLanguage) to \(targetLanguage).
                     Return ONLY the translated sentence, no explanations, no quotes, no language tags.
                     Preserve technical terms and proper nouns. Keep punctuation natural for \(targetLanguage).
                     """
+                    // The system prompt is the only place the glossary can go:
+                    // as a user turn it would be translated along with the line.
+                    if !glossary.isEmpty {
+                        system += "\n\n" + glossary
+                    }
                     var messages: [ChatMessage] = [.init(role: .system, content: system)]
                     if !trimmedContext.isEmpty {
                         let ctx = "Recent context:\n" + trimmedContext.joined(separator: "\n") + "\n\nNow translate the next line."

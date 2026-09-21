@@ -13,11 +13,11 @@ enum L10n {
 
     static var override: LanguageOverride {
         get {
-            let raw = UserDefaults.standard.string(forKey: userOverrideKey) ?? "system"
+            let raw = AppEnvironment.defaults.string(forKey: userOverrideKey) ?? "system"
             return LanguageOverride(rawValue: raw) ?? .system
         }
         set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: userOverrideKey)
+            AppEnvironment.defaults.set(newValue.rawValue, forKey: userOverrideKey)
         }
     }
 
@@ -129,6 +129,16 @@ enum L10n {
         "session.action.generateNotes": "Generate AI notes",
         "session.action.generatingNotes": "Generating…",
         "session.action.retranslate": "Retranslate",
+        "session.action.retranslateFailed": "Retry failed translations",
+        "session.action.retranslateAll": "Retranslate everything",
+        "session.translation.failed": "Translation failed",
+        "session.translation.retry": "Retry",
+        "session.retranslate.partial": "Some segments still could not be translated. Try again later.",
+        "session.action.pause": "Pause",
+        "search.openHit": "Open in transcript",
+        "notes.local.chunkProgress": "Summarizing part %@ of %@…",
+        "notes.local.merging": "Merging the parts into one set of notes…",
+        "notes.local.truncated": "The transcript was shortened to fit the local model's context.",
         "session.action.retranslating": "Retranslating…",
         "session.action.export": "Export",
         "session.export.transcriptMd": "Transcript (Markdown)",
@@ -290,8 +300,9 @@ enum L10n {
         "settings.api.openSystemSettings": "Open System Settings",
         "settings.engines.stt": "Speech-to-text backend",
         "settings.engines.sttPicker": "STT engine",
-        "settings.engines.whisperKitNote": "Local WhisperKit is planned for v1.1. For now, switch to OpenAI Compatible.",
         "settings.engines.sttBackend.apple": "macOS System (Local)",
+        "settings.engines.sttBackend.openai": "OpenAI Compatible (Cloud)",
+        "settings.engines.sttBackend.local": "Local Nemotron (Streaming, Apple Silicon)",
         "settings.engines.appleSpeechNote": "Uses Apple's on-device speech recognition. Language packs are downloaded automatically the first time you use a language.",
         "settings.engines.funasrNote": "Runs a local sherpa-onnx service on Apple Silicon with word-by-word streaming text and file import. Dependencies and the model install on first use. One model, NVIDIA Nemotron 3.5 (40 languages, with punctuation and casing), handles every language in a single pass — text appears about 200 ms after it is spoken.",
         "localASR.installing": "Setting up the local engine…",
@@ -339,6 +350,26 @@ enum L10n {
         "settings.engines.translationBackend.mlx": "Local MLX (Hy-MT2)",
         "settings.engines.translationBackend.mlxNote": "Runs a dedicated translation model on Apple Silicon, in the same local environment as the speech engine. Higher quality than the system framework, and nothing leaves your Mac. Downloads about 1 GB the first time.",
         "localASR.stage.translation": "Loading translation model",
+
+        // MARK: Engines wave -- local sidecar errors, the notes/QA backend and
+        // the engine error strings that used to be hard-coded English.
+        "localASR.stage.llm": "Loading the local language model…",
+        "localASR.busy": "The local engine is in use by a recording. Stop the recording before changing engine settings.",
+        "localASR.error.file.missing": "The audio file could not be found.",
+        "localASR.error.file.unreadable": "The audio file could not be read. It may be damaged or in an unsupported format.",
+        "localASR.error.file.failed": "The local engine could not transcribe this file.",
+        "localASR.error.internal": "The local engine hit an internal error.",
+        "settings.translation.resume": "Resume download",
+        "settings.translation.partial": "Download was interrupted",
+        "settings.engines.lockedWhileRecording": "Engine settings are locked while recording. Stop the recording to change them.",
+        "main.deleteSession.recordingError": "This session is still recording. Stop the recording before deleting it.",
+        "settings.engines.llmBackend.openai": "OpenAI Compatible (Cloud)",
+        "settings.engines.llmBackend.mlx": "Local MLX (Apple Silicon)",
+        "engine.error.missingApiKey": "API key is not configured. Please set it in Settings.",
+        "engine.error.networkError": "Network error: %@",
+        "engine.error.decodingError": "Could not read the server's response: %@",
+        "engine.error.httpError": "HTTP %@: %@",
+        "engine.error.unsupported": "Unsupported: %@",
         "settings.engines.appleTranslationNote": "Uses Apple's on-device Translation framework. Language packs are downloaded automatically the first time you use a language pair.",
         "settings.engines.liveTranslationToggle": "Enable live translation",
         "settings.engines.liveHelp": "When off, only the original transcript is captured. You can retranslate later.",
@@ -443,6 +474,47 @@ enum L10n {
         "menubar.openMain": "Open main window",
         "menubar.settings": "Settings…",
         "menubar.quit": "Quit ClassNote",
+
+        // Pipeline, capture and re-transcription (wave 2)
+        "live.engineReconnecting": "Engine restarting… subtitles resume shortly",
+        "live.engineGaveUp": "The local engine could not be restarted. Audio is still being recorded; you can re-transcribe afterwards.",
+        "session.action.retranscribe": "Re-transcribe from audio",
+        "session.retranscribe.confirm.message": "The existing transcript is replaced. Notes and flashcards made from the old transcript are kept but will be out of date.",
+        "retranscribe.noAudio": "This session has no saved recording.",
+        "retranscribe.recording": "This session is being recorded.",
+        "task.retranscribe.title": "Re-transcribe",
+        "task.retranscribe.done": "Re-transcribe finished",
+        "recovery.action.recoverAndRetranscribe": "Recover and re-transcribe",
+
+        // MARK: Settings, sidebar and menu wave -- presets that serve no STT,
+        // the course editor, delete confirmations and the notes/Q&A engine.
+        "settings.api.preset.noStt": "This provider serves chat models only. Keep transcription on Apple Speech or the local engine — its STT model field is not used.",
+        "settings.api.preset.noKeyNeeded": "This provider runs on your own machine and needs no API key.",
+        "settings.api.keyOptional": "Local servers usually need no key — leaving this blank is fine.",
+
+        "main.deleteSession.confirm.title": "Delete this session?",
+        "main.deleteSession.confirm.message": "“%@” and its transcript, notes and audio will be permanently removed.",
+        "main.deleteCourse.confirm.title": "Delete this course?",
+        "main.deleteCourse.confirm.message": "“%@” will be removed. Its sessions are kept, but they become unfiled.",
+
+        "main.editCourse": "Edit course…",
+        "course.field.name": "Course name",
+        "course.field.semester": "Term",
+        "course.field.instructor": "Instructor",
+        "course.field.glossary": "Glossary",
+        "course.field.notes": "Notes",
+        "course.field.glossary.help": "One term per line, e.g. `eigenvalue = 特征值`. Used when translating and when generating notes.",
+
+        "settings.engines.llmSection": "Notes & Q&A",
+        "settings.engines.llmBackendPicker": "Notes & Q&A engine",
+        "settings.engines.llmBackend.mlxNote": "Runs a general-purpose model on Apple Silicon, so notes, questions and flashcards need no API key. It downloads about 2.4 GB the first time, generates more slowly than the cloud, and shortens long transcripts to fit its context.",
+        "settings.engines.llmHelp": "Applies to notes, Q&A, flashcards, study tools and highlight explanations. Transcription and translation have their own engines.",
+        "settings.llm.notInstalled": "Language model not downloaded yet",
+        "settings.llm.ready": "Language model ready",
+        "settings.llm.download": "Download language model",
+        "settings.llm.downloading": "Preparing language model…",
+        "settings.llm.resume": "Resume download",
+        "settings.llm.partial": "Download was interrupted",
     ]
 
     private static let zh: [String: String] = [
@@ -521,6 +593,16 @@ enum L10n {
         "session.action.generateNotes": "生成 AI 笔记",
         "session.action.generatingNotes": "生成中…",
         "session.action.retranslate": "重新翻译",
+        "session.action.retranslateFailed": "重试失败的翻译",
+        "session.action.retranslateAll": "全部重新翻译",
+        "session.translation.failed": "翻译失败",
+        "session.translation.retry": "重试",
+        "session.retranslate.partial": "仍有部分句子翻译失败，可稍后重试。",
+        "session.action.pause": "暂停",
+        "search.openHit": "在逐字稿中打开",
+        "notes.local.chunkProgress": "正在总结第 %@/%@ 部分…",
+        "notes.local.merging": "正在把各部分合并成一份笔记…",
+        "notes.local.truncated": "逐字稿已被截短以适应本地模型的上下文长度。",
         "session.action.retranslating": "重译中…",
         "session.action.export": "导出",
         "session.export.transcriptMd": "逐字稿(Markdown)",
@@ -682,8 +764,9 @@ enum L10n {
         "settings.api.openSystemSettings": "打开系统设置",
         "settings.engines.stt": "语音识别后端",
         "settings.engines.sttPicker": "语音识别引擎",
-        "settings.engines.whisperKitNote": "本地 WhisperKit 计划在 v1.1 集成。当前请使用 OpenAI 兼容后端。",
         "settings.engines.sttBackend.apple": "macOS 系统(本地)",
+        "settings.engines.sttBackend.openai": "OpenAI 兼容(云端)",
+        "settings.engines.sttBackend.local": "本地 Nemotron(流式，Apple 芯片)",
         "settings.engines.appleSpeechNote": "使用 Apple 系统自带的本地语音识别。首次使用某语言时会自动下载语言包。",
         "settings.engines.funasrNote": "在 Apple 芯片上运行本地 sherpa-onnx 服务，逐字流式出字，支持文件导入。首次使用会自动安装依赖并下载模型。所有语言由同一个模型 NVIDIA Nemotron 3.5（40 种语言，自带标点和大小写）单遍完成，字幕在说出后约 200 毫秒出现。",
         "localASR.installing": "正在准备本地引擎…",
@@ -731,6 +814,25 @@ enum L10n {
         "settings.engines.translationBackend.mlx": "本地 MLX (Hy-MT2)",
         "settings.engines.translationBackend.mlxNote": "在 Apple 芯片上运行专用翻译模型，与语音引擎共用同一个本地环境。质量优于系统框架，且数据不出本机。首次使用需下载约 1 GB。",
         "localASR.stage.translation": "加载翻译模型",
+
+        // MARK: Engines wave -- 本地引擎错误、笔记/问答后端，以及原本写死英文的引擎错误。
+        "localASR.stage.llm": "加载本地大模型…",
+        "localASR.busy": "本地引擎正在被录音使用。请先停止录音，再修改引擎设置。",
+        "localASR.error.file.missing": "找不到音频文件。",
+        "localASR.error.file.unreadable": "无法读取音频文件，可能已损坏或格式不受支持。",
+        "localASR.error.file.failed": "本地引擎无法转写这个文件。",
+        "localASR.error.internal": "本地引擎发生内部错误。",
+        "settings.translation.resume": "继续下载",
+        "settings.translation.partial": "下载未完成",
+        "settings.engines.lockedWhileRecording": "录音期间无法更改引擎设置，请先停止录音。",
+        "main.deleteSession.recordingError": "该会话正在录音，请先停止录音再删除。",
+        "settings.engines.llmBackend.openai": "OpenAI 兼容(云端)",
+        "settings.engines.llmBackend.mlx": "本地 MLX(Apple 芯片)",
+        "engine.error.missingApiKey": "尚未配置 API Key，请在设置中填写。",
+        "engine.error.networkError": "网络错误：%@",
+        "engine.error.decodingError": "无法解析服务器返回的内容：%@",
+        "engine.error.httpError": "HTTP %@：%@",
+        "engine.error.unsupported": "不支持：%@",
         "settings.engines.appleTranslationNote": "使用 Apple 系统自带的本地翻译框架。首次使用某语言对时会自动下载语言包。",
         "settings.engines.liveTranslationToggle": "启用实时翻译",
         "settings.engines.liveHelp": "关闭后,仅捕获原文,可随时回过头来重译。",
@@ -835,6 +937,46 @@ enum L10n {
         "menubar.openMain": "打开主窗口",
         "menubar.settings": "设置…",
         "menubar.quit": "退出 ClassNote",
+
+        // 管道、采集与重新转写(第二轮)
+        "live.engineReconnecting": "引擎重启中…字幕稍后恢复",
+        "live.engineGaveUp": "本地引擎无法重启。录音仍在继续,结束后可以重新转写。",
+        "session.action.retranscribe": "用录音重新转写",
+        "session.retranscribe.confirm.message": "现有逐字稿会被替换。基于旧逐字稿生成的笔记和卡片会保留,但内容会过时。",
+        "retranscribe.noAudio": "这场会话没有保存录音。",
+        "retranscribe.recording": "这场会话正在录音。",
+        "task.retranscribe.title": "重新转写",
+        "task.retranscribe.done": "重新转写完成",
+        "recovery.action.recoverAndRetranscribe": "恢复并重新转写",
+
+        // MARK: 设置、侧边栏与菜单
+        "settings.api.preset.noStt": "该供应商只提供对话模型，不提供语音转写。请将转写引擎切换为「系统语音识别」或本地引擎。",
+        "settings.api.preset.noKeyNeeded": "该服务运行在你自己的电脑上，不需要 API Key。",
+        "settings.api.keyOptional": "本地服务通常不需要 API Key，可以留空。",
+
+        "main.deleteSession.confirm.title": "删除该会话？",
+        "main.deleteSession.confirm.message": "“%@”及其逐字稿、笔记和录音将被永久删除。",
+        "main.deleteCourse.confirm.title": "删除该课程？",
+        "main.deleteCourse.confirm.message": "“%@”将被删除。其下的会话会保留，但变为未归类。",
+
+        "main.editCourse": "编辑课程…",
+        "course.field.name": "课程名称",
+        "course.field.semester": "学期",
+        "course.field.instructor": "授课教师",
+        "course.field.glossary": "术语表",
+        "course.field.notes": "备注",
+        "course.field.glossary.help": "每行一个术语，例如 `eigenvalue = 特征值`。翻译和生成笔记时会参考。",
+
+        "settings.engines.llmSection": "笔记与问答",
+        "settings.engines.llmBackendPicker": "笔记与问答引擎",
+        "settings.engines.llmBackend.mlxNote": "在 Apple 芯片上运行通用大模型，生成笔记、问答和卡片都不需要 API Key。首次使用约下载 2.4 GB，生成速度慢于云端，过长的逐字稿会被压缩以适配上下文。",
+        "settings.engines.llmHelp": "作用于笔记、问答、卡片、学习工具和重点讲解。转写与翻译各有独立的引擎设置。",
+        "settings.llm.notInstalled": "大模型尚未下载",
+        "settings.llm.ready": "大模型已就绪",
+        "settings.llm.download": "下载大模型",
+        "settings.llm.downloading": "正在准备大模型…",
+        "settings.llm.resume": "继续下载",
+        "settings.llm.partial": "下载未完成",
     ]
 }
 

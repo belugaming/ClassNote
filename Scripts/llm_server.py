@@ -1,30 +1,32 @@
 #!/usr/bin/env python3
-"""Local MLX translation sidecar for ClassNote.
+"""Local MLX chat-completion sidecar for ClassNote.
 
-Started by LocalMLXTranslatorProcess.swift, which waits for the ``READY`` line on
-stdout before sending work.
+Started by LocalMLXLLMProcess.swift, which waits for the ``READY`` line on stdout
+before sending work. Structurally a sibling of translate_server.py: same
+NDJSON-over-a-pipe protocol, same one-worker threading, same cancel handling.
 
-Protocol -- newline-delimited JSON over stdin/stdout. Translation is
-request/response rather than a continuous audio stream, so this needs none of the
-WebSocket machinery asr_server.py has; a pipe is enough and avoids allocating a
-port.
+It is a separate process rather than a second request kind on the translation
+sidecar because that sidecar's single worker thread is its design -- MLX state
+is thread-affine, so a second worker cannot share the first model -- and a
+30-second notes generation would park every live subtitle translation behind it.
 
 Client -> server (one JSON object per line):
-    {"id": 1, "text": "...", "source": "en", "target": "zh"}
+    {"id": 1, "messages": [{"role": "system", "content": "..."},
+                           {"role": "user", "content": "..."}],
+     "temperature": 0.3, "max_tokens": 2048}
     {"id": 2, "cancel": true}
 
 Server -> client:
-    STAGE n/m key                     (plain line, load progress, repeated
-                                       every few seconds while the model loads)
+    STAGE 1/1 llm                     (plain line, repeated every few seconds
+                                       while the model loads)
     READY                             (plain line, model resident)
     FATAL <msg>                       (plain line, load failed)
-    {"id": 1, "delta": "线粒体"}       (zero or more)
+    {"id": 1, "delta": "..."}         (zero or more)
     {"id": 1, "done": true}
     {"id": 1, "error": "..."}
 
-The model stays resident between requests: Hy-MT2-1.8B takes seconds to load and
-~1.2s to translate a sentence, so a per-request process would be dominated by
-startup.
+The requested model name is not part of a request: this process loads exactly
+one model, chosen by --model, and the app's model picker does not apply to it.
 """
 
 from __future__ import annotations
@@ -37,43 +39,43 @@ import threading
 import traceback
 from queue import Queue
 
-DEFAULT_MODEL = "mlx-community/Hy-MT2-1.8B-4bit"
-# Commit to download. Empty means "whatever main points at"; a sha is read off
-# the CI job that prints model_info(...).sha for every repo the app uses, and
-# pinning it stops a re-upload changing the model under a user who already has
-# the old weights cached.
-DEFAULT_REVISION = "e5c6fe56c7b3bc77fae5ae92db31f2178f1e6912"
-# A superset of what mlx_lm.load() would fetch on its own (mlx_lm/utils.py
-# _download, 0.31.3), but not of the whole repo: without it the snapshot also
-# pulls original PyTorch weights and GGUF conversions. It has to stay a superset
-# -- load() receives a local directory here and cannot fetch a file it misses --
-# so re-check _download's defaults whenever mlx-lm is bumped.
+# A 4B instruct model quantized to 4 bits: ~2.4 GB resident, which is what is
+# left for notes and Q&A once nemotron and the translation model are loaded.
+DEFAULT_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+# Commit to download. Empty means "whatever main points at"; see the same
+# constant in translate_server.py.
+DEFAULT_REVISION = "50d427756c6b1b2fe0c0a10f67fbda1fc8e82c1b"
+# A superset of what mlx_lm.load() would fetch on its own; see the same constant
+# in translate_server.py for why it must stay one.
 MODEL_ALLOW_PATTERNS = ["*.json", "*.safetensors", "*.py", "*.jinja",
                         "tokenizer.model", "*.tiktoken", "tiktoken.model",
                         "*.txt", "*.jsonl"]
+
+# Notes want a little variety in phrasing; an answer about the transcript does
+# not want invention. 0.3 is the compromise the app sends, and it is only a
+# default here.
+DEFAULT_TEMPERATURE = 0.3
+# A set of lecture notes runs to a few thousand tokens. The floor keeps a
+# caller from truncating its own answer mid-sentence; the ceiling keeps a model
+# that has started repeating itself from generating for an hour at ~30 tok/s.
+DEFAULT_MAX_TOKENS = 2048
+MIN_MAX_TOKENS = 256
+MAX_MAX_TOKENS = 8192
+
+ROLES = ("system", "user", "assistant")
 
 # The only three lines Swift parses on stdout, held as the real stream so a
 # library that rebinds sys.stdout (huggingface_hub does, mid-download) cannot
 # take the handshake channel with it.
 _HANDSHAKE = sys.stdout
-STAGE_LINE = "STAGE 1/1 translation"
+STAGE_LINE = "STAGE 1/1 llm"
 # The app extends its start-up deadline on every STAGE line; the first run
-# downloads ~1 GB with nothing else to show for it.
+# downloads ~2.4 GB with nothing else to show for it.
 HEARTBEAT_SECONDS = 5.0
 
-# Hy-MT2 is a dedicated translation model, not a general chat model: it is
-# trained to answer this instruction shape with the translation and nothing else.
-# Language names are spelled out because that is what the model card documents --
-# codes like "zh-Hans" are not part of its training format.
-LANGUAGE_NAMES = {
-    "zh": "Chinese", "zh-hans": "Chinese", "zh-hant": "Traditional Chinese",
-    "zh-cn": "Chinese", "zh-tw": "Traditional Chinese",
-    "en": "English", "ja": "Japanese", "ko": "Korean", "fr": "French",
-    "de": "German", "es": "Spanish", "pt": "Portuguese", "ru": "Russian",
-    "it": "Italian", "ar": "Arabic", "hi": "Hindi", "th": "Thai",
-    "vi": "Vietnamese", "id": "Indonesian", "tr": "Turkish", "pl": "Polish",
-    "nl": "Dutch", "cs": "Czech", "uk": "Ukrainian", "he": "Hebrew",
-}
+_stdout_lock = threading.Lock()
+_cancelled: set[int] = set()
+_cancel_lock = threading.Lock()
 
 
 def log(*a):
@@ -84,6 +86,14 @@ def handshake(line: str):
     """One handshake line (STAGE/READY/FATAL) on the real stdout."""
     with _stdout_lock:
         print(line, file=_HANDSHAKE, flush=True)
+
+
+def emit(payload: dict):
+    """One JSON object per line on stdout. Guarded by a lock because streaming
+    deltas and a late error can race."""
+    with _stdout_lock:
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
 
 
 def resolve_model_path(model: str, revision: str) -> str:
@@ -107,43 +117,55 @@ def resolve_model_path(model: str, revision: str) -> str:
     return snapshot_download(model, allow_patterns=MODEL_ALLOW_PATTERNS)
 
 
-def emit(payload: dict):
-    """One JSON object per line on stdout. Guarded by a lock because streaming
-    deltas and a late error can race."""
-    with _stdout_lock:
-        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        sys.stdout.flush()
+def normalize_messages(raw) -> list[dict]:
+    """Keeps the well-formed turns of a request.
+
+    A turn with a missing or non-string content makes apply_chat_template raise,
+    which would cost the whole request; dropping it still leaves an answerable
+    prompt. An unknown role becomes "user" for the same reason.
+    """
+    out: list[dict] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        role = item.get("role")
+        out.append({"role": role if role in ROLES else "user", "content": content})
+    return out
 
 
-_stdout_lock = threading.Lock()
-_cancelled: set[int] = set()
-_cancel_lock = threading.Lock()
-
-
-def language_name(code: str, fallback: str) -> str:
-    if not code:
-        return fallback
-    return LANGUAGE_NAMES.get(code.strip().lower(), code.strip())
-
-
-def build_prompt(tokenizer, text: str, source: str, target: str) -> str:
-    src = language_name(source, "English")
-    tgt = language_name(target, "Chinese")
-    instruction = (
-        f"Translate the following segment into {tgt}, without additional "
-        f"explanation.\n\n{text}"
-    )
-    if src:
-        instruction = (
-            f"Translate the following {src} segment into {tgt}, without "
-            f"additional explanation.\n\n{text}"
-        )
-    messages = [{"role": "user", "content": instruction}]
+def clamp_max_tokens(value) -> int:
     try:
-        return tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+        n = int(value)
+    except (TypeError, ValueError):
+        n = DEFAULT_MAX_TOKENS
+    return max(MIN_MAX_TOKENS, min(MAX_MAX_TOKENS, n))
+
+
+def clamp_temperature(value) -> float:
+    try:
+        t = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_TEMPERATURE
+    return max(0.0, min(2.0, t))
+
+
+def plain_prompt(messages: list[dict]) -> str:
+    """Fallback prompt for a tokenizer with no chat template. Labelled turns
+    plus an empty assistant turn is what an instruct model was tuned on anyway,
+    so the answer is usable even without the model's own control tokens."""
+    return "\n\n".join([f"{m['role']}: {m['content']}" for m in messages]
+                       + ["assistant:"])
+
+
+def build_prompt(tokenizer, messages: list[dict]) -> str:
+    try:
+        return tokenizer.apply_chat_template(messages, add_generation_prompt=True,
+                                             tokenize=False)
     except Exception:
-        # No chat template: fall back to the raw instruction rather than failing.
-        return instruction
+        return plain_prompt(messages)
 
 
 def handle(model, tokenizer, req: dict):
@@ -151,18 +173,15 @@ def handle(model, tokenizer, req: dict):
     from mlx_lm.sample_utils import make_sampler
 
     req_id = req.get("id")
-    text = (req.get("text") or "").strip()
-    if not text:
+    messages = normalize_messages(req.get("messages"))
+    if not messages:
         emit({"id": req_id, "done": True})
         return
 
-    prompt = build_prompt(tokenizer, text, req.get("source", ""), req.get("target", ""))
-    # Greedy. Translation wants the most likely rendering, and sampling here
-    # would make the same sentence translate differently on a retranslate.
-    sampler = make_sampler(temp=0.0)
-    # Generous relative to the input: CJK->Latin can expand, and a hard cap that
-    # truncates mid-sentence is worse than spending a few extra tokens.
-    max_tokens = max(64, min(1024, len(text) * 4))
+    prompt = build_prompt(tokenizer, messages)
+    sampler = make_sampler(temp=clamp_temperature(req.get("temperature",
+                                                          DEFAULT_TEMPERATURE)))
+    max_tokens = clamp_max_tokens(req.get("max_tokens", DEFAULT_MAX_TOKENS))
 
     try:
         for chunk in stream_generate(model, tokenizer, prompt,
@@ -170,7 +189,7 @@ def handle(model, tokenizer, req: dict):
             with _cancel_lock:
                 if req_id in _cancelled:
                     _cancelled.discard(req_id)
-                    log(f"[translate] request {req_id} cancelled")
+                    log(f"[llm] request {req_id} cancelled")
                     emit({"id": req_id, "done": True})
                     return
             piece = getattr(chunk, "text", "") or ""
@@ -178,7 +197,7 @@ def handle(model, tokenizer, req: dict):
                 emit({"id": req_id, "delta": piece})
         emit({"id": req_id, "done": True})
     except Exception as exc:
-        log(f"[translate] {traceback.format_exc()}")
+        log(f"[llm] {traceback.format_exc()}")
         emit({"id": req_id, "error": str(exc)})
 
 
@@ -202,8 +221,8 @@ def watch_parent(parent_pid: int, interval: float = 5.0):
             return
         # Outside the handler on purpose. The parent is gone, so its end of the
         # stderr pipe is closed and this write raises BrokenPipeError; raised
-        # inside the handler that exception escaped before os._exit could run,
-        # and the sidecar stayed resident with the weights loaded.
+        # inside the handler that exception would escape before os._exit could
+        # run, leaving the sidecar resident with the weights loaded.
         try:
             log(f"[parent] pid {parent_pid} is gone, exiting")
         except Exception:
@@ -225,8 +244,8 @@ def main():
 
     handshake(STAGE_LINE)
 
-    # Generation runs on its own thread so stdin stays readable while a request is
-    # in flight. Doing both on one thread would make cancel useless: the loop
+    # Generation runs on its own thread so stdin stays readable while a request
+    # is in flight. Doing both on one thread would make cancel useless: the loop
     # would be blocked inside handle() and could not read the cancel line until
     # the work it was meant to abort had already finished.
     #
@@ -263,7 +282,7 @@ def main():
             try:
                 handle(model, tokenizer, req)
             except Exception:
-                log(f"[translate] {traceback.format_exc()}")
+                log(f"[llm] {traceback.format_exc()}")
                 emit({"id": req_id, "error": "internal error"})
 
     threading.Thread(target=worker, daemon=True).start()
@@ -275,11 +294,11 @@ def main():
     if load_failed:
         # Swift waits for READY; without this it blocks for the full timeout
         # instead of surfacing the failure.
-        handshake("FATAL translation model load failed")
+        handshake("FATAL llm model load failed")
         sys.exit(1)
 
     handshake("READY")
-    log(f"[translate] ready with {args.model}")
+    log(f"[llm] ready with {args.model}")
 
     for line in sys.stdin:
         line = line.strip()
@@ -288,7 +307,7 @@ def main():
         try:
             req = json.loads(line)
         except json.JSONDecodeError:
-            log(f"[translate] ignoring non-JSON line: {line[:80]!r}")
+            log(f"[llm] ignoring non-JSON line: {line[:80]!r}")
             continue
         if req.get("cancel"):
             with _cancel_lock:

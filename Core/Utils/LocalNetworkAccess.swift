@@ -56,13 +56,15 @@ enum LocalNetworkAccess {
         let connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: params)
 
         return await withCheckedContinuation { continuation in
-            var finished = false
-            let finish: (ProbeResult) -> Void = { result in
-                if !finished {
-                    finished = true
-                    connection.cancel()
-                    continuation.resume(returning: result)
-                }
+            // `stateUpdateHandler` runs on the connection's own queue while the
+            // timeout below fires on a global one, so the "did we already
+            // answer?" flag has to be guarded — a plain captured `var` lets
+            // both through and resumes the continuation twice, which traps.
+            let once = ProbeGate()
+            let finish: @Sendable (ProbeResult) -> Void = { result in
+                guard once.claim() else { return }
+                connection.cancel()
+                continuation.resume(returning: result)
             }
 
             connection.stateUpdateHandler = { state in
@@ -116,5 +118,21 @@ enum LocalNetworkAccess {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         UIApplication.shared.open(url)
         #endif
+    }
+}
+
+/// Resolves `LocalNetworkAccess.probe`'s continuation exactly once, whichever
+/// of the connection's state handler and the timeout gets there first. Both run
+/// off any actor, on different queues, hence the lock.
+private final class ProbeGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !claimed else { return false }
+        claimed = true
+        return true
     }
 }
