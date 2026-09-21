@@ -729,8 +729,13 @@ struct QAPane: View {
         Task { await vm.askQuestion(q) }
     }
 
+    /// Deferred by a turn so the row that triggered it is laid out first.
+    /// `@MainActor` because `ScrollViewProxy` and the view model are: the hop
+    /// has to stay inside the main actor rather than go through a `@Sendable`
+    /// dispatch block. Both callers are in `body`, which is already isolated.
+    @MainActor
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        DispatchQueue.main.async {
+        Task { @MainActor in
             if vm.isAnsweringQuestion {
                 proxy.scrollTo("streaming-qa-response", anchor: .bottom)
             } else if let last = vm.qaMessages.last {

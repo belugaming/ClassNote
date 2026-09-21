@@ -369,8 +369,10 @@ struct OverlayWindowConfigurator: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
         // The view has no window yet at make time, so this first resolve has to
-        // wait a turn. Subsequent updates run synchronously.
-        DispatchQueue.main.async { apply(to: view, context.coordinator) }
+        // wait a turn. Subsequent updates run synchronously. The hop stays on
+        // the main actor — `NSView` and `Coordinator` must not cross out of it.
+        let coordinator = context.coordinator
+        Task { @MainActor in apply(to: view, coordinator) }
         return view
     }
 

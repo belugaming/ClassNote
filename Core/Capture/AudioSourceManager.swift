@@ -911,7 +911,11 @@ final class SampleCounter: @unchecked Sendable {
 // MARK: - SCK adapters (macOS only)
 
 #if os(macOS)
-final class SCStreamOutputHandler: NSObject, SCStreamOutput {
+/// Handed to ScreenCaptureKit, which calls it on the sample handler queue it
+/// was given, so it leaves the main actor. There is no mutable state to guard:
+/// the class is final and its one stored property is an immutable `@Sendable`
+/// closure — which is what makes the `@unchecked` honest.
+final class SCStreamOutputHandler: NSObject, SCStreamOutput, @unchecked Sendable {
     let handler: @Sendable (CMSampleBuffer) -> Void
     init(_ handler: @escaping @Sendable (CMSampleBuffer) -> Void) {
         self.handler = handler
@@ -922,7 +926,9 @@ final class SCStreamOutputHandler: NSObject, SCStreamOutput {
     }
 }
 
-final class SCStreamDelegateAdapter: NSObject, SCStreamDelegate {
+/// See `SCStreamOutputHandler`: final, one immutable `@Sendable` closure, no
+/// mutable state, so nothing to lock.
+final class SCStreamDelegateAdapter: NSObject, SCStreamDelegate, @unchecked Sendable {
     let onError: @Sendable (Error) -> Void
     init(onError: @escaping @Sendable (Error) -> Void) {
         self.onError = onError
