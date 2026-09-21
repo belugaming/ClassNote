@@ -29,8 +29,8 @@ actor CourseRepository {
     }
 
     func delete(id: String) async throws {
-        _ = try await Database.shared.dbPool.write { db in
-            try Course.deleteOne(db, key: id)
+        try await Database.shared.dbPool.write { db in
+            _ = try Course.deleteOne(db, key: id)
         }
     }
 
@@ -639,7 +639,9 @@ actor QAMessageRepository {
 
     func delete(id: String) async throws {
         try await Database.shared.dbPool.write { db in
-            try QAMessage.deleteOne(db, key: id)
+            // Discarded inside the closure, so `write` itself returns Void:
+            // returning `deleteOne`'s Bool would make the call's result unused.
+            _ = try QAMessage.deleteOne(db, key: id)
         }
     }
 

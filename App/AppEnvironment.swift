@@ -54,7 +54,11 @@ enum AppEnvironment {
     /// Only writes are confined. `UserDefaults(suiteName:)` keeps the host app's
     /// domain in its search list, so a read still falls through to whatever the
     /// developer has set — a test that depends on a default must write it first.
-    static let defaults: UserDefaults = {
+    ///
+    /// `nonisolated(unsafe)` rather than an actor: `UserDefaults` is documented
+    /// thread-safe, so the shared store is safe to reach from any isolation and
+    /// it is Foundation, not the compiler, that serialises access to it.
+    nonisolated(unsafe) static let defaults: UserDefaults = {
         guard isRunningTests, let suite = UserDefaults(suiteName: defaultsSuiteName) else {
             return .standard
         }

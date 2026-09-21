@@ -230,7 +230,7 @@ struct LocalASREnvironment: Sendable {
     /// enough output to fill a pipe buffer and deadlock if nothing reads it.
     private static func run(_ launchPath: String,
                             _ arguments: [String],
-                            onOutput: ((String) -> Void)? = nil) throws {
+                            onOutput: (@Sendable (String) -> Void)? = nil) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: launchPath)
         process.arguments = arguments

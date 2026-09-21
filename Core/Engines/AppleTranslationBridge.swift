@@ -17,7 +17,7 @@ final class AppleTranslationBridge: ObservableObject {
 
     @Published fileprivate var activeConfiguration: TranslationSession.Configuration?
 
-    private var pendingWaiters: [(source: Locale.Language, target: Locale.Language, continuation: CheckedContinuation<TranslationSession, Never>)] = []
+    private var pendingWaiters: [(source: Locale.Language, target: Locale.Language, continuation: CheckedContinuation<TranslationSessionBox, Never>)] = []
     private var currentPair: (source: Locale.Language, target: Locale.Language)?
 
     private init() {}
@@ -25,10 +25,10 @@ final class AppleTranslationBridge: ObservableObject {
     /// Requests a session for the given language pair. Triggers (or reuses)
     /// the hidden view's `.translationTask`. Suspends until that task's
     /// action closure delivers a session for this exact pair.
-    func session(source: Locale.Language, target: Locale.Language) async -> TranslationSession {
+    func session(source: Locale.Language, target: Locale.Language) async -> TranslationSessionBox {
         if let current = currentPair, current.source == source, current.target == target,
            let existing = latestSession {
-            return existing
+            return TranslationSessionBox(session: existing)
         }
         return await withCheckedContinuation { continuation in
             pendingWaiters.append((source, target, continuation))
@@ -45,9 +45,24 @@ final class AppleTranslationBridge: ObservableObject {
         let matching = pendingWaiters.filter { $0.source == pair.source && $0.target == pair.target }
         pendingWaiters.removeAll { $0.source == pair.source && $0.target == pair.target }
         for waiter in matching {
-            waiter.continuation.resume(returning: session)
+            waiter.continuation.resume(returning: TranslationSessionBox(session: session))
         }
     }
+}
+
+/// Carries a `TranslationSession` across the two boundaries it has to cross:
+/// the `CheckedContinuation` above, and the hop from the main actor back to the
+/// task that asked for a translation. Both require a `Sendable` value.
+///
+/// `@unchecked` here is an accepted hand-over, not a claim of thread safety:
+/// `TranslationSession` has no `Sendable` conformance, yet the only way to get
+/// one is on the main actor and the only things to do with it are nonisolated
+/// `async` calls, so the crossing is unavoidable. The box keeps it in one named
+/// place instead of at every call site; the session itself is used exactly
+/// where it was before the box existed — in the task that requested it.
+@available(macOS 15.0, iOS 18.0, *)
+struct TranslationSessionBox: @unchecked Sendable {
+    let session: TranslationSession
 }
 
 @available(macOS 15.0, iOS 18.0, *)

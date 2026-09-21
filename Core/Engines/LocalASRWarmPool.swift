@@ -78,7 +78,9 @@ actor LocalASRWarmPool {
             let manager = LocalASRProcessManager(engine: wanted.engine)
             let url = try await manager.start(language: wanted.language,
                                              onProgress: onProgress)
-            await self.adopt(key: wanted, manager: manager, url: url)
+            // No `await`: `Task` inherits this actor's isolation, so `adopt`
+            // is a synchronous call on the same actor.
+            self.adopt(key: wanted, manager: manager, url: url)
             return url
         }
         warmTask = task

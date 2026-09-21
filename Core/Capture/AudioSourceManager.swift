@@ -231,11 +231,10 @@ final class AudioSourceManager: NSObject {
             let outCapacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 1024)
             guard let outBuffer = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outCapacity) else { return }
             var error: NSError?
-            var provided = false
+            let provided = OneShot()
             let status = converter.convert(to: outBuffer, error: &error) { _, outStatus in
-                if provided { outStatus.pointee = .noDataNow; return nil }
+                guard provided.take() else { outStatus.pointee = .noDataNow; return nil }
                 outStatus.pointee = .haveData
-                provided = true
                 return buffer
             }
             if status == .error { return }
@@ -440,10 +439,9 @@ final class AudioSourceManager: NSObject {
         guard let outBuffer = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outCapacity) else { return }
 
         var err: NSError?
-        var provided = false
+        let provided = OneShot()
         _ = converter.convert(to: outBuffer, error: &err) { _, outStatus in
-            if provided { outStatus.pointee = .noDataNow; return nil }
-            provided = true
+            guard provided.take() else { outStatus.pointee = .noDataNow; return nil }
             outStatus.pointee = .haveData
             return inBuffer
         }
@@ -481,6 +479,27 @@ final class AudioSourceManager: NSObject {
             if !running { break }
         }
         subscribers.finishAll()
+    }
+}
+
+// MARK: - Converter input
+
+/// One-shot flag for an `AVAudioConverter` input block, which must hand its
+/// source buffer over exactly once and answer `.noDataNow` from then on.
+///
+/// A local `var` cannot do that any more: `AVAudioConverterInputBlock` is
+/// `@Sendable`, so capturing and mutating one is a data-race warning. No lock
+/// is needed either — `convert(to:error:withInputFrom:)` calls the block
+/// synchronously on the calling thread and returns before that thread moves
+/// on, so the flag is only ever touched by that one thread.
+private final class OneShot: @unchecked Sendable {
+    private(set) var fired = false
+
+    /// True the first time only.
+    func take() -> Bool {
+        if fired { return false }
+        fired = true
+        return true
     }
 }
 

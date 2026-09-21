@@ -43,6 +43,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SidecarRegistry.shared.terminateAll()
     }
 
+    // AppKit calls both `Task { @MainActor in ... }` blocks above back into
+    // here, and `NSApp.reply(toApplicationShouldTerminate:)` is main-actor only.
+    @MainActor
     private func replyOnce() {
         guard !didReply else { return }
         didReply = true
