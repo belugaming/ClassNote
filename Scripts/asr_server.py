@@ -12,6 +12,7 @@ Client -> server:
       {"type": "config", "language": "zh"}
       {"type": "eof"}                       flush and finalize the live stream
       {"type": "file", "path": "/abs.wav"}  transcribe a whole 16 kHz mono WAV
+      {"type": "cancel"}                    stop a running file job
 
 Server -> client (JSON text frames), all carrying the same envelope so the
 Swift decoder can treat them uniformly:
@@ -20,7 +21,10 @@ Swift decoder can treat them uniformly:
   {"type": "final",    ...}     the segment's text once it is closed
   {"type": "progress", "completed", "total"}
   {"type": "eof"}
-  {"type": "error",    "message"}
+  {"type": "error",    "code", "message"}
+
+``code`` is one of ERROR_CODES; the app localizes on it, so ``message`` is a
+developer-facing detail (a path, an exception) and never a UI string.
 
 Engine
 ------
@@ -54,6 +58,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import traceback
 import wave
@@ -71,6 +76,17 @@ FEATURE_DIM = 128                        # nemotron's mel front end
 CHUNK_CHOICES = (80, 160, 320, 560, 1120)
 DEFAULT_CHUNK_MS = 160
 MODEL_REPO = "csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-{chunk}ms-int8-2026-06-11"
+# Commit to download, per chunk size. None means "whatever main points at"; the
+# shas are read off the CI job that prints `model_info(...).sha` for every repo
+# and pasted in here, so a re-export upstream cannot change the model under a
+# user who already has the old weights cached. Bump together with MODEL_REPO.
+MODEL_REVISIONS = {
+    80: "2ac5952ae18a2cc010c25e3fd96ad20cf254bd09",
+    160: "b3a4dbde84fba1a13cb4270e6730b525ac6a2db6",
+    320: "424ce58898995b713f84341f2e1492f9207a26aa",
+    560: "ab43d895f5985b1bbab8b6eac8607fcdc05343f3",
+    1120: "cba1c96ca5ef0e8393b50584ae153a79145dc492",
+}
 
 # Punctuation restoration (CT-Transformer, Chinese + English, ~300 MB). Nemotron
 # punctuates its own output only sporadically in continuous speech -- measured
@@ -81,6 +97,8 @@ MODEL_REPO = "csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-{chunk}ms-
 # the line breaks and the marks are inserted into the transcript.
 PUNCT_MODEL_REPO = "csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12"
 PUNCT_MODEL_FILES = ("model.onnx", "tokens.json", "config.yaml")
+# As MODEL_REVISIONS: None means main.
+PUNCT_MODEL_REVISION = "432aeba669265e7aeb06b9359753419683b38597"
 
 # A segment closes once the audio has been quiet -- no voice energy and no new
 # token -- for this long. Both are required: the transducer sometimes holds a
@@ -147,8 +165,50 @@ _ALIASES = {
 }
 
 
+# Error codes the app localizes on. The message beside them is a diagnostic.
+ERROR_CODES = ("file.missing", "file.unreadable", "file.failed", "internal")
+
+# The handshake channel: STAGE/READY/FATAL, the only three lines Swift parses.
+# Engine.load() redirects sys.stdout to stderr so huggingface_hub's progress
+# bars cannot corrupt it, and since print() looks sys.stdout up at call time
+# that redirected the STAGE lines too. Hold the real stream instead.
+_HANDSHAKE = sys.stdout
+_handshake_lock = threading.Lock()
+
+
+def handshake(line: str):
+    """One handshake line. Locked because the download heartbeat runs on its own
+    thread while the loader emits the next stage."""
+    with _handshake_lock:
+        print(line, file=_HANDSHAKE, flush=True)
+
+
 def log(*a):
     print(*a, file=sys.stderr, flush=True)
+
+
+@contextlib.contextmanager
+def stage_heartbeat(repeat, interval: float = 5.0):
+    """Re-emits the current STAGE line every `interval` seconds for as long as
+    the block runs.
+
+    The app extends its start-up deadline on every STAGE line it reads, and a
+    650 MB download is otherwise minutes of complete silence on the handshake
+    channel -- indistinguishable, from the outside, from a hung child.
+    """
+    stop = threading.Event()
+
+    def beat():
+        while not stop.wait(interval):
+            repeat()
+
+    thread = threading.Thread(target=beat, name="stage-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
 
 
 def resolve_language(code: str | None) -> str | None:
@@ -503,6 +563,10 @@ class Engine:
     def repo(self) -> str:
         return MODEL_REPO.format(chunk=self.chunk_ms)
 
+    @property
+    def revision(self) -> str | None:
+        return MODEL_REVISIONS.get(self.chunk_ms)
+
     def load(self):
         # huggingface_hub prints progress bars to stdout, which is the channel
         # Swift scans for READY. Redirect anything it prints to stderr.
@@ -510,28 +574,42 @@ class Engine:
             self._load()
 
     def _load(self):
-        from huggingface_hub import snapshot_download
-
         cached = self._cached_snapshot(self.repo, ("encoder.int8.onnx", "decoder.int8.onnx",
-                                                   "joiner.int8.onnx", "tokens.txt"))
-        punct_cached = self._cached_snapshot(PUNCT_MODEL_REPO, PUNCT_MODEL_FILES)
+                                                   "joiner.int8.onnx", "tokens.txt"),
+                                       revision=self.revision)
+        punct_cached = self._cached_snapshot(PUNCT_MODEL_REPO, PUNCT_MODEL_FILES,
+                                             revision=PUNCT_MODEL_REVISION)
         total = 3 + (0 if cached and punct_cached else 1)
         step = 0
+        current = ""
 
-        def stage(key: str):
-            """Report a loading step. Only the key crosses the boundary; the app
-            localizes it, so the sidecar carries no UI strings."""
-            nonlocal step
-            step += 1
+        def emit(key: str):
             log(f"[engine] ({step}/{total}) {key}")
             if self.on_stage:
                 self.on_stage(key, step, total)
 
-        if not (cached and punct_cached):
+        def stage(key: str):
+            """Report a loading step. Only the key crosses the boundary; the app
+            localizes it, so the sidecar carries no UI strings."""
+            nonlocal step, current
+            step += 1
+            current = key
+            emit(key)
+
+        def stage_repeat():
+            """Re-announce the step in progress without advancing it."""
+            if current:
+                emit(current)
+
+        if cached and punct_cached:
+            self.model_dir, punct_dir = cached, punct_cached
+        else:
             stage("download")
-        self.model_dir = cached or snapshot_download(self.repo)
-        punct_dir = punct_cached or snapshot_download(PUNCT_MODEL_REPO,
-                                                      allow_patterns=list(PUNCT_MODEL_FILES))
+            with stage_heartbeat(stage_repeat):
+                self.model_dir = cached or self._download(self.repo, self.revision)
+                punct_dir = punct_cached or self._download(
+                    PUNCT_MODEL_REPO, PUNCT_MODEL_REVISION,
+                    allow_patterns=list(PUNCT_MODEL_FILES))
 
         stage("streaming")
         self.recognizer = self._build_recognizer(self.model_dir)
@@ -557,13 +635,22 @@ class Engine:
         log(f"[engine] ready: {self.repo} on {self.threads} threads")
 
     @staticmethod
-    def _cached_snapshot(repo: str, required) -> str | None:
-        """Path of an already-downloaded model, or None. Avoids reporting a
-        download stage (and touching the network) when nothing is needed."""
+    def _download(repo: str, revision: str | None, **kwargs) -> str:
+        """snapshot_download with the pin applied only when there is one: the
+        hub treats a missing `revision` as main, and the pins in
+        MODEL_REVISIONS start out empty."""
         from huggingface_hub import snapshot_download
 
+        if revision:
+            kwargs["revision"] = revision
+        return snapshot_download(repo, **kwargs)
+
+    @classmethod
+    def _cached_snapshot(cls, repo: str, required, revision: str | None = None) -> str | None:
+        """Path of an already-downloaded model, or None. Avoids reporting a
+        download stage (and touching the network) when nothing is needed."""
         try:
-            path = snapshot_download(repo, local_files_only=True)
+            path = cls._download(repo, revision, local_files_only=True)
         except Exception:
             return None
         if all(os.path.exists(os.path.join(path, name)) for name in required):
@@ -616,7 +703,13 @@ class Transcriber:
         self._marks_for: str | None = None
         self._marks: list[tuple[int, str]] = []
 
-        self.stream_ms = 0          # audio fed so far
+        # Audio fed so far, counted in samples rather than milliseconds. A mic
+        # frame is 4096/3 samples at 16 kHz, so rounding each one down to whole
+        # ms lost ~0.33 ms per 85 ms -- 4.8 s after twenty minutes, by which
+        # point nothing could stay quiet long enough to close a line, because
+        # the token timestamps this clock is compared against come from sherpa
+        # and are sample-accurate.
+        self.stream_samples = 0
         self.offset = 0             # tokens already committed to closed segments
         self.segment_id = 0
         self.partial_text = ""
@@ -658,6 +751,13 @@ class Transcriber:
         return self._marks
 
     @property
+    def stream_ms(self) -> int:
+        """Audio fed so far. Derived from the sample count every time, so the
+        error against sherpa's own clock stays below one millisecond however
+        the frames are cut."""
+        return self.stream_samples * 1000 // SAMPLE_RATE
+
+    @property
     def held_ms(self) -> int:
         if self.first_token_ms is None:
             return 0
@@ -669,8 +769,9 @@ class Transcriber:
             pcm = pcm[:-1]  # keep Int16 alignment across frame boundaries
         if not pcm:
             return []
-        frame_ms = len(pcm) // BYTES_PER_MS
-        self.stream_ms += frame_ms
+        before_ms = self.stream_ms
+        self.stream_samples += len(pcm) // 2
+        frame_ms = self.stream_ms - before_ms
         if frame_rms(pcm) >= VOICE_RMS_THRESHOLD:
             self.last_voiced_ms = self.stream_ms
         self.stream.accept_waveform(SAMPLE_RATE, pcm_to_float(pcm))
@@ -855,6 +956,17 @@ class Session:
         self._queued_bytes = 0
         self._warned_lag_ms = 0
 
+        # A file import runs as its own task so the socket keeps being read
+        # while it does -- that is what makes cancelling one possible at all.
+        self.file_task: asyncio.Task | None = None
+        # Set once a send has failed with ConnectionClosed: the client is gone
+        # and a file job has nobody left to transcribe for.
+        self._peer_gone = False
+        # Set by finish(): the live transcriber is dropped there, so a frame
+        # arriving afterwards would build a second one whose clock starts at 0.
+        self._finished = False
+        self._warned_late_frame = False
+
     # ---- plumbing -------------------------------------------------------
 
     async def _run(self, fn, *a, **kw):
@@ -865,7 +977,15 @@ class Session:
         try:
             await self.ws.send(json.dumps(payload, ensure_ascii=False))
         except websockets.ConnectionClosed:
-            pass
+            # Still swallowed -- a disconnect must not raise out of a decode --
+            # but remembered, so a file job can stop instead of spending an hour
+            # transcribing for a client that has already gone.
+            self._peer_gone = True
+
+    async def _send_error(self, code: str, message: str):
+        """`code` is what the app localizes on; `message` only ever reaches a
+        log, so it carries the path or the exception rather than UI text."""
+        await self._send({"type": "error", "code": code, "message": message})
 
     async def _emit_all(self, events: list[dict]):
         for ev in events:
@@ -883,6 +1003,11 @@ class Session:
 
     def enqueue(self, pcm: bytes):
         """Called from the socket read loop. Never blocks on inference."""
+        if self._finished:
+            if not self._warned_late_frame:
+                self._warned_late_frame = True
+                log("[ws] audio arrived after eof, dropping it")
+            return
         if pcm:
             self._queued_bytes += len(pcm)
             self._inbox.put_nowait(pcm)
@@ -920,6 +1045,7 @@ class Session:
     async def finish(self):
         """Client signalled end of audio: decode what is queued, close the open
         segment, and say goodbye."""
+        self._finished = True
         await self.drain_inbox()
         if self._transcriber is not None:
             events = await self._run(self._transcriber.finish)
@@ -927,7 +1053,18 @@ class Session:
             self._transcriber = None
         await self._send({"type": "eof"})
 
+    async def cancel_file(self):
+        """Stops a running file import. The slice already handed to the worker
+        thread (200 ms of audio) finishes and its result is dropped."""
+        task, self.file_task = self.file_task, None
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
     async def close(self):
+        await self.cancel_file()
         if self._worker is not None:
             self._worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -939,60 +1076,95 @@ class Session:
 
     async def transcribe_file(self, path: str):
         if not os.path.exists(path):
-            await self._send({"type": "error", "message": f"文件不存在: {path}"})
+            await self._send_error("file.missing", f"file not found: {path}")
             return
-        await self._send({"type": "progress", "completed": 0, "total": 1})
         try:
-            pcm = await self._run(read_wav_pcm16_mono_16k, path)
+            reader = await self._run(open_wav_pcm16_mono_16k, path)
         except Exception as exc:
             log(f"[file] {traceback.format_exc()}")
-            await self._send({"type": "error", "message": f"无法读取音频: {exc}"})
+            await self._send_error("file.unreadable", f"cannot read audio: {exc}")
             return
 
-        total = len(pcm)
+        # Bytes of PCM, straight from the header, so the very first progress
+        # frame already carries the real size instead of a placeholder.
+        total = reader.getnframes() * 2
+        await self._send({"type": "progress", "completed": 0, "total": total})
         # A private transcriber, so a file import never disturbs a live stream
         # on the same connection.
         transcriber = Transcriber(self.engine, self.language)
-        # Small slices so pause detection has the same resolution as live audio.
-        slice_bytes = 200 * BYTES_PER_MS
-        offset = 0
+        # Small slices so pause detection has the same resolution as live audio,
+        # and so only 200 ms of PCM is resident rather than the whole lecture.
+        slice_frames = 200 * SAMPLE_RATE // 1000
+        done = 0
+        slices = 0
         try:
-            while offset < total:
-                chunk = pcm[offset:offset + slice_bytes]
-                offset += len(chunk)
-                events = await self._run(transcriber.feed, chunk)
-                # Only committed lines matter for an import; partials would
-                # just churn the UI.
+            try:
+                while True:
+                    # A cancel scheduled while the last slice decoded is
+                    # delivered here, before another one is started.
+                    await asyncio.sleep(0)
+                    if self._peer_gone or self.ws.close_code is not None:
+                        log("[file] client is gone, aborting")
+                        return
+                    chunk = await self._run(reader.readframes, slice_frames)
+                    if not chunk:
+                        break
+                    done += len(chunk)
+                    slices += 1
+                    events = await self._run(transcriber.feed, chunk)
+                    # Only committed lines matter for an import; partials would
+                    # just churn the UI.
+                    await self._emit_all([ev for ev in events if ev["type"] == "final"])
+                    if slices % 10 == 0:
+                        await self._send({"type": "progress", "completed": done, "total": total})
+                events = await self._run(transcriber.finish)
                 await self._emit_all([ev for ev in events if ev["type"] == "final"])
-                if (offset // slice_bytes) % 10 == 0:
-                    await self._send({"type": "progress", "completed": offset, "total": total})
-            events = await self._run(transcriber.finish)
-            await self._emit_all([ev for ev in events if ev["type"] == "final"])
-        except Exception as exc:
-            log(f"[file] {traceback.format_exc()}")
-            await self._send({"type": "error", "message": f"文件转写失败: {exc}"})
-            return
+            except asyncio.CancelledError:
+                # BaseException, so the handler below never sees it; caught only
+                # to say in the log why the job stopped.
+                log("[file] cancelled")
+                raise
+            except Exception as exc:
+                log(f"[file] {traceback.format_exc()}")
+                await self._send_error("file.failed", f"file transcription failed: {exc}")
+                return
+        finally:
+            with contextlib.suppress(Exception):
+                reader.close()
+        # A truncated file holds fewer frames than its header promises; report
+        # what was really decoded so the bar still reaches the end.
+        total = max(total, done)
         await self._send({"type": "progress", "completed": total, "total": total})
         await self._send({"type": "eof"})
 
 
-def read_wav_pcm16_mono_16k(path: str) -> bytes:
-    """Reads a WAV the app has already converted to 16 kHz mono Int16.
+def open_wav_pcm16_mono_16k(path: str) -> wave.Wave_read:
+    """Opens a WAV the app has already converted to 16 kHz mono Int16.
 
     The Swift side does the format conversion with AVFoundation, which handles
-    every container macOS can play; this only has to validate and read.
+    every container macOS can play; this only has to validate the header. The
+    caller reads it slice by slice and closes it -- a three-hour lecture is
+    ~350 MB of PCM, which is not worth holding beside the models.
     """
-    with wave.open(path, "rb") as w:
+    w = wave.open(path, "rb")
+    try:
         rate, channels, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
         if (rate, channels, width) != (SAMPLE_RATE, 1, 2):
             raise ValueError(f"expected 16 kHz mono 16-bit WAV, got {rate} Hz, "
                              f"{channels} ch, {width * 8}-bit")
-        return w.readframes(w.getnframes())
+    except Exception:
+        w.close()
+        raise
+    return w
 
 
 # ---------------------------------------------------------------------------
 # Server
 # ---------------------------------------------------------------------------
+
+# Tasks that must outlive the call that created them. asyncio keeps only weak
+# references to running tasks, so anything not held here can be collected.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 
 async def _exit_when_parent_gone(parent_pid: int, interval: float = 5.0):
@@ -1006,11 +1178,29 @@ async def _exit_when_parent_gone(parent_pid: int, interval: float = 5.0):
         await asyncio.sleep(interval)
         try:
             os.kill(parent_pid, 0)
+            continue
         except (ProcessLookupError, PermissionError):
-            log(f"[parent] pid {parent_pid} is gone, exiting")
-            os._exit(0)
+            pass                       # gone -- fall through to the exit
         except Exception:
             return
+        # Outside the handler on purpose. The parent is gone, so its end of the
+        # stderr pipe is closed and this write raises BrokenPipeError; raised
+        # inside the handler that exception escaped before os._exit could run,
+        # and the sidecar stayed resident with the model loaded.
+        with contextlib.suppress(Exception):
+            log(f"[parent] pid {parent_pid} is gone, exiting")
+        os._exit(0)
+
+
+def _report_file_job(task: asyncio.Task):
+    """Retrieves a finished file job's result. Nothing awaits these tasks on the
+    success path, and an unretrieved exception would only surface as asyncio's
+    'never retrieved' warning at collection time."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log(f"[file] job failed: {exc!r}")
 
 
 async def handle_connection(ws, engine: Engine, default_language: str | None):
@@ -1042,14 +1232,26 @@ async def handle_connection(ws, engine: Engine, default_language: str | None):
             elif kind == "eof":
                 await session.finish()
             elif kind == "file":
-                await session.transcribe_file(cmd.get("path", ""))
+                # As a task, so this loop keeps reading: a cancel -- or the
+                # ConnectionClosed that ends it -- has to be able to arrive
+                # while the job runs, which is the whole point.
+                if session.file_task is not None and not session.file_task.done():
+                    await session._send_error("file.failed",
+                                              "a file job is already running")
+                    continue
+                session.file_task = asyncio.create_task(
+                    session.transcribe_file(cmd.get("path", "")))
+                session.file_task.add_done_callback(_report_file_job)
+            elif kind == "cancel":
+                await session.cancel_file()
+                await session._send({"type": "eof"})
             else:
                 log(f"[ws] unknown command: {kind}")
     except websockets.ConnectionClosed:
         log("[ws] client disconnected")
     except Exception:
         log(f"[ws] {traceback.format_exc()}")
-        await session._send({"type": "error", "message": "本地引擎内部错误"})
+        await session._send_error("internal", "local engine internal error")
     finally:
         await session.close()
 
@@ -1072,9 +1274,10 @@ async def main():
 
     # Model loading happens before the WebSocket exists, so progress has to go out
     # on stdout -- the same channel Swift already reads for READY. Without this the
-    # app looks frozen while weights download.
+    # app looks frozen while weights download. It goes through handshake() because
+    # Engine.load() has sys.stdout redirected for the duration.
     def emit_stage(key: str, step: int, total: int):
-        print(f"STAGE {step}/{total} {key}", flush=True)
+        handshake(f"STAGE {step}/{total} {key}")
 
     engine = Engine(chunk_ms=parse_chunk_ms(args.chunk_ms), threads=args.threads,
                     on_stage=emit_stage)
@@ -1084,7 +1287,7 @@ async def main():
         log(f"[fatal] model load failed: {traceback.format_exc()}")
         # Swift waits for READY on stdout; without this it would block for the
         # full timeout instead of surfacing the failure.
-        print("FATAL model load failed", flush=True)
+        handshake("FATAL model load failed")
         sys.exit(1)
 
     language = args.language if args.language and args.language != "auto" else None
@@ -1093,7 +1296,12 @@ async def main():
         await handle_connection(ws, engine, language)
 
     if args.exit_with_parent:
-        asyncio.create_task(_exit_when_parent_gone(args.exit_with_parent))
+        # The loop holds only a weak reference to a task, so the watchdog has to
+        # be kept alive here or it can be collected mid-run and nothing is left
+        # to reap the sidecar.
+        watchdog = asyncio.create_task(_exit_when_parent_gone(args.exit_with_parent))
+        _BACKGROUND_TASKS.add(watchdog)
+        watchdog.add_done_callback(_BACKGROUND_TASKS.discard)
 
     server = await websockets.serve(
         handler, "127.0.0.1", args.port,
@@ -1101,7 +1309,7 @@ async def main():
         ping_interval=20,
         ping_timeout=60,
     )
-    print(f"READY port={args.port}", flush=True)
+    handshake(f"READY port={args.port}")
     await server.wait_closed()
 
 

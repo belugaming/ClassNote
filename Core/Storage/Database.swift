@@ -1,25 +1,34 @@
 import Foundation
 import GRDB
 
-final class Database {
+final class Database: @unchecked Sendable {
     static let shared = Database()
 
-    private(set) var dbPool: DatabasePool!
-    private var isSetup = false
+    // `_dbPool` is written once, by `setup()`, and read from every repository
+    // actor; the lock is what makes the `@unchecked` above honest. It also
+    // doubles as the idempotence flag, so a `setup()` that throws installs
+    // nothing and a later retry runs the whole migration again instead of
+    // leaving a half-migrated pool behind.
+    private let lock = NSLock()
+    private var _dbPool: DatabasePool?
+
+    var dbPool: DatabasePool! { lock.withLock { _dbPool } }
 
     private init() {}
 
     func setup() throws {
-        guard !isSetup else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard _dbPool == nil else { return }
         let dbURL = AppBootstrap.applicationSupportURL.appendingPathComponent("classnote.sqlite")
         var config = Configuration()
         config.prepareDatabase { db in
             try db.execute(sql: "PRAGMA journal_mode = WAL;")
             try db.execute(sql: "PRAGMA foreign_keys = ON;")
         }
-        dbPool = try DatabasePool(path: dbURL.path, configuration: config)
-        try migrator.migrate(dbPool)
-        isSetup = true
+        let pool = try DatabasePool(path: dbURL.path, configuration: config)
+        try migrator.migrate(pool)
+        _dbPool = pool
     }
 
     private var migrator: DatabaseMigrator {
@@ -197,6 +206,102 @@ final class Database {
         migrator.registerMigration("v7_translation_backend") { db in
             try db.alter(table: "api_config") { t in
                 t.add(column: "translation_backend", .text).notNull().defaults(to: "openai")
+            }
+        }
+
+        migrator.registerMigration("v8_segment_fts_trigram") { db in
+            // unicode61 classifies Han ideographs as letters, so a whole Chinese
+            // sentence indexes as a single token and no Chinese query can ever
+            // match it. trigram indexes every 3-character substring instead,
+            // which is how FTS5 covers CJK without an ICU build. The tokenizer
+            // arrived in SQLite 3.34; every supported macOS is far past that,
+            // but skip rather than fail the migration on an older engine.
+            let version = try String.fetchOne(db, sql: "SELECT sqlite_version()") ?? "0"
+            let parts = version.split(separator: ".").compactMap { Int($0) }
+            let major = parts.count > 0 ? parts[0] : 0
+            let minor = parts.count > 1 ? parts[1] : 0
+            guard major > 3 || (major == 3 && minor >= 34) else { return }
+
+            try db.execute(sql: "DROP TRIGGER IF EXISTS segment_ai;")
+            try db.execute(sql: "DROP TRIGGER IF EXISTS segment_ad;")
+            try db.execute(sql: "DROP TRIGGER IF EXISTS segment_au;")
+            try db.execute(sql: "DROP TABLE IF EXISTS segment_fts;")
+            try db.execute(sql: """
+                CREATE VIRTUAL TABLE segment_fts USING fts5(
+                    text_original, text_translated,
+                    content='segment', content_rowid='id',
+                    tokenize='trigram'
+                );
+            """)
+            // Recreated verbatim from v1_initial: SQLite re-resolves the table
+            // name on every fire, so keeping them here makes v8 self-contained.
+            try db.execute(sql: """
+                CREATE TRIGGER segment_ai AFTER INSERT ON segment BEGIN
+                    INSERT INTO segment_fts(rowid, text_original, text_translated)
+                    VALUES (new.id, new.text_original, new.text_translated);
+                END;
+            """)
+            try db.execute(sql: """
+                CREATE TRIGGER segment_ad AFTER DELETE ON segment BEGIN
+                    INSERT INTO segment_fts(segment_fts, rowid, text_original, text_translated)
+                    VALUES('delete', old.id, old.text_original, old.text_translated);
+                END;
+            """)
+            try db.execute(sql: """
+                CREATE TRIGGER segment_au AFTER UPDATE ON segment BEGIN
+                    INSERT INTO segment_fts(segment_fts, rowid, text_original, text_translated)
+                    VALUES('delete', old.id, old.text_original, old.text_translated);
+                    INSERT INTO segment_fts(rowid, text_original, text_translated)
+                    VALUES (new.id, new.text_original, new.text_translated);
+                END;
+            """)
+            try db.execute(sql: "INSERT INTO segment_fts(segment_fts) VALUES('rebuild');")
+        }
+
+        migrator.registerMigration("v9_api_config_provenance") { db in
+            try db.alter(table: "api_config") { t in
+                t.add(column: "configured_at", .integer)
+            }
+            // Seed provenance once with the heuristic this column replaces: a
+            // row that already differs from the factory row really was saved by
+            // hand. A pristine row stays NULL so a wiped database can still be
+            // recovered from the UserDefaults backup.
+            try db.execute(sql: """
+                UPDATE api_config SET configured_at = ?
+                WHERE id = 1 AND (api_key <> ''
+                               OR base_url <> 'https://api.openai.com/v1'
+                               OR stt_model <> 'whisper-1'
+                               OR translation_model <> 'gpt-4o-mini'
+                               OR llm_model <> 'gpt-4o-mini'
+                               OR stt_backend <> 'openai'
+                               OR target_language <> 'zh-Hans'
+                               OR source_language <> 'en'
+                               OR translation_backend <> 'openai')
+                """, arguments: [Int64(Date().timeIntervalSince1970 * 1000)])
+        }
+
+        migrator.registerMigration("v10_segment_translation_state") { db in
+            try db.alter(table: "segment") { t in
+                // See TranslationState: 0 = not attempted, 1 = ok, 2 = failed.
+                t.add(column: "translation_state", .integer).notNull().defaults(to: 0)
+            }
+            // Anything already translated was, by definition, a success. The
+            // AFTER UPDATE trigger re-indexes each touched row; correct, and a
+            // one-off cost on a large library.
+            try db.execute(sql: "UPDATE segment SET translation_state = 1 WHERE text_translated <> ''")
+        }
+
+        migrator.registerMigration("v11_course_glossary") { db in
+            try db.alter(table: "course") { t in
+                // One "term = 译名" per line. Free text on purpose: a student
+                // pastes the syllabus glossary, they do not fill in a form.
+                t.add(column: "glossary", .text)
+            }
+        }
+
+        migrator.registerMigration("v12_llm_backend") { db in
+            try db.alter(table: "api_config") { t in
+                t.add(column: "llm_backend", .text).notNull().defaults(to: "openai")
             }
         }
 

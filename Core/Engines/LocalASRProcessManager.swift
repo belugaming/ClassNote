@@ -4,12 +4,17 @@ enum LocalASRProcessError: Error, LocalizedError {
     case launchFailed(String)
     case readyTimeout
     case portUnavailable
+    /// A sidecar is loaded for a different engine/latency and a recording is
+    /// streaming through it. Refusing is the point: the alternative is killing
+    /// the process that recording depends on.
+    case busyWithDifferentConfiguration
 
     var errorDescription: String? {
         switch self {
         case .launchFailed(let msg): return "本地引擎启动失败: \(msg)"
         case .readyTimeout: return "本地引擎启动超时"
         case .portUnavailable: return "无法找到可用端口"
+        case .busyWithDifferentConfiguration: return L10n.t("localASR.busy")
         }
     }
 }
@@ -20,6 +25,9 @@ actor LocalASRProcessManager {
     private let engine: LocalASREngineKind
     private var process: Process?
     private var stderrPipe: Pipe?
+    /// Kept only so the drain handler installed after READY can be removed on
+    /// shutdown; nothing reads from it again.
+    private var stdoutPipe: Pipe?
 
     init(engine: LocalASREngineKind) {
         self.engine = engine
@@ -67,7 +75,6 @@ actor LocalASRProcessManager {
         if let language, !language.isEmpty, language != "auto" {
             arguments += ["--language", language]
         }
-        process.arguments = arguments
         // Force unbuffered stdout so the READY marker arrives as soon as the
         // model finishes loading rather than sitting in Python's block buffer.
         // Weights live in the default ~/.cache/huggingface location.
@@ -80,7 +87,9 @@ actor LocalASRProcessManager {
         process.standardError = stderr
         self.process = process
         self.stderrPipe = stderr
+        self.stdoutPipe = stdout
 
+        let activity = SidecarHandshake.ActivityClock()
         // asr_server.py's dependencies (torch/FunASR model loading, tqdm
         // progress bars, library warnings) write heavily to stderr. If
         // nothing reads this pipe, its buffer fills up and the Python
@@ -88,7 +97,12 @@ actor LocalASRProcessManager {
         // socket on the Swift side minutes later. Drain it continuously.
         stderr.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            guard !data.isEmpty else { return }
+            // Feeds the handshake watchdog: while the first-run weights come
+            // down, huggingface_hub's progress bars are the only traffic
+            // anywhere, and a silent 950 MB fetch must not read as a stall.
+            activity.touch()
+            guard let text = String(data: data, encoding: .utf8) else { return }
             NSLog("[asr_server stderr] \(text)")
         }
 
@@ -106,13 +120,49 @@ actor LocalASRProcessManager {
             NSLog("[LocalASRProcessManager] process.run() failed: \(error)")
             throw LocalASRProcessError.launchFailed(error.localizedDescription)
         }
+        SidecarRegistry.shared.register(process.processIdentifier)
 
         NSLog("[LocalASRProcessManager] waiting for READY marker...")
-        try await Self.waitForReady(pipe: stdout, expectedPort: port,
-                                    process: process, onProgress: onProgress)
+        do {
+            _ = try await SidecarHandshake.waitForReady(
+                pipe: stdout,
+                readyLine: "READY port=\(port)",
+                process: process,
+                activity: activity,
+                stageMessage: { counter, key in
+                    "\(L10n.t("localASR.stage.\(key)")) (\(counter))"
+                },
+                onProgress: onProgress)
+        } catch {
+            // Nothing else can reap this child: the warm pool only adopts the
+            // manager once start() returns, so a throw here used to leave a
+            // ~2 GB Python process running for the life of the app.
+            SidecarRegistry.shared.unregister(process.processIdentifier)
+            await Self.terminateQuickly(process, name: "asr_server")
+            stderr.fileHandleForReading.readabilityHandler = nil
+            self.process = nil
+            self.stderrPipe = nil
+            self.stdoutPipe = nil
+            throw Self.mapHandshakeFailure(error)
+        }
+        // The handshake reader is gone, so keep stdout drained by hand: a late
+        // print from a library would otherwise fill the 64 KB pipe and block
+        // the sidecar in write() forever, looking exactly like a dead engine.
+        stdout.fileHandleForReading.readabilityHandler = { handle in
+            _ = handle.availableData
+        }
         let url = URL(string: "ws://127.0.0.1:\(port)")!
         NSLog("[LocalASRProcessManager] sidecar ready at \(url)")
         return url
+    }
+
+    private static func mapHandshakeFailure(_ error: Error) -> Error {
+        guard let failure = error as? SidecarHandshake.Failure else { return error }
+        switch failure {
+        case .modelLoadFailed: return LocalASRProcessError.launchFailed(L10n.t("localASR.modelLoadFailed"))
+        case .exitedEarly: return LocalASRProcessError.launchFailed(L10n.t("localASR.exitedEarly"))
+        case .stalled: return LocalASRProcessError.readyTimeout
+        }
     }
 
     /// Whether the sidecar is still alive. The warm pool checks this before
@@ -124,11 +174,12 @@ actor LocalASRProcessManager {
     func shutdown() async {
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe = nil
-        guard let process, process.isRunning else {
-            self.process = nil
-            return
-        }
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+        stdoutPipe = nil
+        guard let process else { return }
         self.process = nil
+        SidecarRegistry.shared.unregister(process.processIdentifier)
+        guard process.isRunning else { return }
         await Self.terminateQuickly(process, name: "asr_server")
     }
 
@@ -171,47 +222,5 @@ actor LocalASRProcessManager {
         }
         guard gotName == 0 else { throw LocalASRProcessError.portUnavailable }
         return UInt16(bigEndian: actualAddr.sin_port)
-    }
-
-    private static func waitForReady(pipe: Pipe,
-                                     expectedPort: UInt16,
-                                     process: Process,
-                                     onProgress: (@Sendable (String) -> Void)?) async throws {
-        let handle = pipe.fileHandleForReading
-        // The very first run downloads ~650 MB, which can take minutes. Progress
-        // lines let us distinguish "still working" from "hung", so the deadline
-        // only has to cover a stall.
-        var deadline = Date().addingTimeInterval(180)
-        var pending = Data()
-
-        while Date() < deadline {
-            if !process.isRunning, pending.isEmpty {
-                throw LocalASRProcessError.launchFailed(L10n.t("localASR.exitedEarly"))
-            }
-            let chunk = handle.availableData
-            if !chunk.isEmpty {
-                pending.append(chunk)
-                guard let text = String(data: pending, encoding: .utf8) else { continue }
-
-                // "STAGE 2/4 vad 加载断句模型…" — report it and extend the
-                // deadline, since visible progress means it is not stuck.
-                for line in text.split(separator: "\n") where line.hasPrefix("STAGE ") {
-                    let parts = line.split(separator: " ").map(String.init)
-                    guard parts.count >= 3 else { continue }
-                    let counter = parts[1]   // "2/4"
-                    let key = parts[2]       // "vad"
-                    onProgress?("\(L10n.t("localASR.stage.\(key)")) (\(counter))")
-                    deadline = Date().addingTimeInterval(180)
-                }
-                if text.contains("FATAL") {
-                    throw LocalASRProcessError.launchFailed(L10n.t("localASR.modelLoadFailed"))
-                }
-                if text.contains("READY port=\(expectedPort)") {
-                    return
-                }
-            }
-            try await Task.sleep(nanoseconds: 100_000_000)
-        }
-        throw LocalASRProcessError.readyTimeout
     }
 }

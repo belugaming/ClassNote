@@ -471,11 +471,6 @@ struct EngineSettingsView: View {
                     }
                     .pickerStyle(.menu)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    if appState.sttBackend == .whisperKitLocal {
-                        Label(L10n.t("settings.engines.whisperKitNote"), systemImage: "exclamationmark.triangle")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
                     if appState.sttBackend == .appleSpeech {
                         Label(L10n.t("settings.engines.appleSpeechNote"), systemImage: "info.circle")
                             .font(.caption)

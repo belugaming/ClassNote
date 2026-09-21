@@ -6,24 +6,37 @@ so anything in it ships inside ClassNote.app.
 
 The recogniser is faked: loading nemotron pulls ~650 MB of weights, so the real
 model is only exercised by the end-to-end harness. What is covered here is the
-model-free logic -- language mapping, cut placement, and the segment bookkeeping
-that turns the recogniser's growing token list into partial/final events.
+model-free logic -- language mapping, cut placement, the segment bookkeeping
+that turns the recogniser's growing token list into partial/final events, and
+the process plumbing around them: the handshake channel, the parent watchdog and
+a file import's cancellation.
 
 Run: python3 -m unittest discover -s Tests/PythonTests
 """
+import asyncio
+import contextlib
+import io
+import json
 import os
 import sys
+import tempfile
+import time
 import unittest
+import unittest.mock as mock
+import wave
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Scripts"))
 
 import numpy as np
+import websockets
 
+import asr_server
 from asr_server import (
     BYTES_PER_MS,
     DEFAULT_CHUNK_MS,
     MIN_SENTENCE_CHARS,
     PAUSE_CLOSE_MS,
+    SAMPLE_RATE,
     SOFT_CUT_MS,
     TOKEN_TAIL_MS,
     SENT_MARK_KINDS,
@@ -235,7 +248,8 @@ class _Result:
 
 
 class _FakeStream:
-    def __init__(self):
+    def __init__(self, owner=None):
+        self.owner = owner
         self.options = {}
         self.samples = 0
         self.finished = False
@@ -245,6 +259,8 @@ class _FakeStream:
 
     def accept_waveform(self, rate, samples):
         self.samples += len(samples)
+        if self.owner is not None:
+            self.owner.feeds += 1
 
     def input_finished(self):
         self.finished = True
@@ -256,9 +272,10 @@ class _FakeRecognizer:
 
     def __init__(self):
         self.tokens: list[tuple[str, float]] = []
+        self.feeds = 0          # slices accepted, for the file-import tests
 
     def create_stream(self):
-        return _FakeStream()
+        return _FakeStream(self)
 
     def is_ready(self, stream):
         return False
@@ -447,6 +464,323 @@ class TranscriberTests(unittest.TestCase):
         t = self.make()
         t.feed(bytes(BYTES_PER_MS * 10 + 1))
         self.assertEqual(t.stream_ms, 10)
+
+    def test_clock_does_not_drift_on_fractional_mic_frames(self):
+        t = self.make()
+        mic = _MicClock()
+        with mock.patch.object(asr_server, "log"):      # ten minutes of RTF stats
+            while mic.fed < 10 * 60 * SAMPLE_RATE:
+                t.feed(mic.next_frame())
+        # Summing per-frame floors lost ~0.33 ms per 85 ms buffer: 2.4 s here.
+        self.assertLessEqual(abs(t.stream_ms - mic.true_ms), 1)
+
+    def test_pause_still_closes_a_line_after_ten_minutes_of_fractional_frames(self):
+        # The pause rule compares this clock against sherpa's own token
+        # timestamps, which are sample-accurate. A clock that drifts behind them
+        # makes every silence look shorter than it was, until after twenty
+        # minutes nothing can stay quiet long enough to close a line.
+        t = self.make()
+        mic = _MicClock()
+        with mock.patch.object(asr_server, "log"):      # ten minutes of RTF stats
+            while mic.fed < 10 * 60 * SAMPLE_RATE:
+                t.feed(mic.next_frame())
+        self.rec.tokens.append((" hello", mic.true_ms / 1000.0))
+        t.feed(mic.next_frame())
+        events = []
+        quiet_until = mic.true_ms + PAUSE_CLOSE_MS + 200
+        while mic.true_ms < quiet_until:
+            events += t.feed(mic.next_frame())
+        self.assertEqual([e["type"] for e in events], ["final"])
+        self.assertEqual(events[0]["text"], "Hello")
+
+
+class _MicClock:
+    """Frames the way AVAudioEngine delivers them: a 4096-frame tap at 48 kHz is
+    1365.33 samples at 16 kHz, so buffers alternate 1365/1366 samples and no
+    frame is ever a whole number of milliseconds."""
+
+    def __init__(self):
+        self.exact = 0.0
+        self.fed = 0
+
+    def next_frame(self) -> bytes:
+        self.exact += 4096 / 3.0
+        want = int(self.exact) - self.fed
+        self.fed += want
+        return bytes(want * 2)
+
+    @property
+    def true_ms(self) -> float:
+        return self.fed * 1000.0 / SAMPLE_RATE
+
+
+# ---------------------------------------------------------------------------
+# Handshake channel
+# ---------------------------------------------------------------------------
+
+
+class HandshakeChannelTests(unittest.TestCase):
+    def test_stage_lines_survive_a_redirected_stdout(self):
+        # Engine.load() redirects sys.stdout to stderr for the whole model load
+        # so huggingface_hub's progress bars cannot corrupt the channel Swift
+        # parses for READY -- which used to take the STAGE lines with it,
+        # leaving the app with no progress and an unextendable deadline.
+        real = io.StringIO()
+        with mock.patch.object(asr_server, "_HANDSHAKE", real), \
+                contextlib.redirect_stdout(io.StringIO()) as redirected:
+            def emit_stage(key, step, total):
+                asr_server.handshake(f"STAGE {step}/{total} {key}")
+
+            emit_stage("download", 1, 4)
+            print("a progress bar")
+        self.assertEqual(real.getvalue(), "STAGE 1/4 download\n")
+        self.assertEqual(redirected.getvalue(), "a progress bar\n")
+
+    def test_a_slow_download_keeps_reporting_its_stage(self):
+        # The one case the app cannot tell from a hang: a first run spends
+        # minutes inside snapshot_download with nothing to say. Every STAGE line
+        # extends the app's start-up deadline, so the stage in progress is
+        # re-announced until the download returns.
+        original_heartbeat = asr_server.stage_heartbeat
+        real = io.StringIO()
+
+        def slow_download(repo, revision, **kwargs):
+            print("a tqdm progress bar")        # what huggingface_hub does
+            time.sleep(0.12)
+            return "/models/" + repo.replace("/", "--")
+
+        with mock.patch.object(asr_server, "_HANDSHAKE", real), \
+                mock.patch.object(asr_server, "stage_heartbeat",
+                                  lambda repeat, interval=5.0: original_heartbeat(repeat, 0.02)), \
+                mock.patch.object(asr_server.Engine, "_cached_snapshot",
+                                  staticmethod(lambda *a, **kw: None)), \
+                mock.patch.object(asr_server.Engine, "_download", staticmethod(slow_download)), \
+                mock.patch.object(asr_server.Engine, "_build_recognizer",
+                                  lambda self, model_dir: _FakeRecognizer()), \
+                mock.patch.object(asr_server, "Punctuator", lambda model_dir: None), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            engine = asr_server.Engine(
+                chunk_ms=160,
+                on_stage=lambda key, step, total: asr_server.handshake(
+                    f"STAGE {step}/{total} {key}"))
+            engine.load()
+
+        lines = real.getvalue().splitlines()
+        self.assertGreaterEqual(lines.count("STAGE 1/4 download"), 3)
+        self.assertEqual(lines[-3:], ["STAGE 2/4 streaming", "STAGE 3/4 punct",
+                                      "STAGE 4/4 warmup"])
+        # Whatever the hub printed went to stderr, not onto the channel Swift
+        # parses -- that is what the redirect inside Engine.load() is for.
+        self.assertIn("a tqdm progress bar", stderr.getvalue())
+        self.assertNotIn("tqdm", real.getvalue())
+
+    def test_stage_heartbeat_repeats_until_the_block_ends(self):
+        beats = []
+        with asr_server.stage_heartbeat(lambda: beats.append(1), interval=0.01):
+            time.sleep(0.1)
+        self.assertGreaterEqual(len(beats), 2)
+        settled = len(beats)
+        time.sleep(0.05)
+        self.assertEqual(len(beats), settled)
+
+
+# ---------------------------------------------------------------------------
+# Parent watchdog
+# ---------------------------------------------------------------------------
+
+
+class _Exited(BaseException):
+    """Stands in for os._exit, which a test process cannot actually call. A
+    BaseException so it is not swallowed by the code under test."""
+
+
+class ParentWatchdogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exits_even_when_the_log_write_fails(self):
+        # The parent being gone is exactly what closes the read end of the
+        # stderr pipe, so the watchdog's own log line is the operation most
+        # likely to raise in the one situation it exists for.
+        with mock.patch.object(asr_server, "log", side_effect=BrokenPipeError), \
+                mock.patch.object(asr_server.os, "kill", side_effect=ProcessLookupError), \
+                mock.patch.object(asr_server.os, "_exit", side_effect=_Exited):
+            with self.assertRaises(_Exited):
+                await asr_server._exit_when_parent_gone(1, interval=0)
+
+    async def test_keeps_watching_while_the_parent_is_alive(self):
+        seen = []
+
+        def kill(pid, sig):
+            seen.append(pid)
+            if len(seen) >= 3:
+                raise ProcessLookupError
+
+        with mock.patch.object(asr_server, "log"), \
+                mock.patch.object(asr_server.os, "kill", side_effect=kill), \
+                mock.patch.object(asr_server.os, "_exit", side_effect=_Exited):
+            with self.assertRaises(_Exited):
+                await asr_server._exit_when_parent_gone(7, interval=0)
+        self.assertEqual(seen, [7, 7, 7])
+
+    async def test_a_broken_probe_stops_the_watchdog(self):
+        # Anything other than "the pid is gone" must not turn into an exit, and
+        # must not spin either.
+        with mock.patch.object(asr_server.os, "kill", side_effect=OSError), \
+                mock.patch.object(asr_server.os, "_exit", side_effect=_Exited):
+            await asr_server._exit_when_parent_gone(1, interval=0)
+
+
+# ---------------------------------------------------------------------------
+# File import: cancellation, disconnects, error codes
+# ---------------------------------------------------------------------------
+
+
+def _write_silence_wav(seconds: float) -> str:
+    fd, path = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SAMPLE_RATE)
+        w.writeframes(bytes(int(seconds * SAMPLE_RATE) * 2))
+    return path
+
+
+class _FakeWS:
+    """Just enough of a websockets server connection for Session and
+    handle_connection: text frames out, a scripted script of frames in, and a
+    close_code that flips when the client goes away."""
+
+    def __init__(self, incoming=()):
+        self.sent: list[dict] = []
+        self.close_code = None
+        self._incoming = list(incoming)
+
+    async def send(self, message):
+        if self.close_code is not None:
+            raise websockets.ConnectionClosedOK(None, None)
+        self.sent.append(json.loads(message))
+
+    def __aiter__(self):
+        return self._receive()
+
+    async def _receive(self):
+        for message in self._incoming:
+            await asyncio.sleep(0)
+            yield message
+        self.close_code = 1000      # the client hung up
+
+    def kinds(self) -> list[str]:
+        return [ev["type"] for ev in self.sent]
+
+
+class FileImportTests(unittest.IsolatedAsyncioTestCase):
+    """Drives Session.transcribe_file against a fake socket and the scripted
+    recogniser. The WAV is a minute of silence -- 300 slices of 200 ms -- so a
+    job that ignored a cancel would be obvious."""
+
+    SLICES = 300
+
+    async def asyncSetUp(self):
+        self.rec = _FakeRecognizer()
+        self.ws = _FakeWS()
+        self.session = asr_server.Session(self.ws, _FakeEngine(self.rec), None)
+        self.path = _write_silence_wav(60)
+        self.addCleanup(os.unlink, self.path)
+
+    async def asyncTearDown(self):
+        await self.session.close()
+
+    def start_job(self, path=None):
+        self.session.file_task = asyncio.create_task(
+            self.session.transcribe_file(path or self.path))
+
+    async def wait_for_slices(self, count: int, timeout: float = 5.0):
+        deadline = time.monotonic() + timeout
+        while self.rec.feeds < count:
+            self.assertLess(time.monotonic(), deadline, "the file job never ran")
+            await asyncio.sleep(0.005)
+
+    async def test_cancel_stops_the_job_within_two_slices(self):
+        self.start_job()
+        await self.wait_for_slices(3)
+        fed = self.rec.feeds
+        await self.session.cancel_file()
+        self.assertLessEqual(self.rec.feeds - fed, 2)
+        self.assertLess(self.rec.feeds, self.SLICES)
+        self.assertNotIn("eof", self.ws.kinds())
+
+    async def test_a_closed_socket_stops_the_job_within_two_slices(self):
+        self.start_job()
+        await self.wait_for_slices(3)
+        fed = self.rec.feeds
+        self.ws.close_code = 1000
+        await asyncio.wait_for(self.session.file_task, timeout=5.0)
+        self.assertLessEqual(self.rec.feeds - fed, 2)
+        self.assertLess(self.rec.feeds, self.SLICES)
+
+    async def test_a_whole_file_ends_with_a_full_progress_frame_and_eof(self):
+        path = _write_silence_wav(1)
+        self.addCleanup(os.unlink, path)
+        await self.session.transcribe_file(path)
+        total = SAMPLE_RATE * 2
+        # The first progress frame already carries the real size: it comes from
+        # the WAV header, not from a PCM buffer read into memory.
+        self.assertEqual(self.ws.sent[0], {"type": "progress", "completed": 0,
+                                           "total": total})
+        self.assertEqual(self.ws.sent[-2], {"type": "progress", "completed": total,
+                                            "total": total})
+        self.assertEqual(self.ws.sent[-1], {"type": "eof"})
+
+    async def test_a_missing_file_reports_a_code(self):
+        await self.session.transcribe_file("/nowhere/missing.wav")
+        self.assertEqual(self.ws.sent[-1]["type"], "error")
+        self.assertEqual(self.ws.sent[-1]["code"], "file.missing")
+        self.assertIn("missing.wav", self.ws.sent[-1]["message"])
+
+    async def test_a_file_that_is_not_a_16k_mono_wav_reports_a_code(self):
+        fd, path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        self.addCleanup(os.unlink, path)
+        with wave.open(path, "wb") as w:
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(bytes(4000))
+        await self.session.transcribe_file(path)
+        self.assertEqual(self.ws.sent[-1]["code"], "file.unreadable")
+
+    async def test_frames_that_arrive_after_eof_are_dropped(self):
+        # finish() drops the transcriber; without the guard the next frame would
+        # build a fresh one whose clock starts again at zero.
+        await self.session.start()
+        self.session.enqueue(bytes(320))
+        await self.session.finish()
+        self.session.enqueue(bytes(320))
+        self.assertTrue(self.session._inbox.empty())
+
+
+class ConnectionDispatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_second_file_job_is_refused_and_the_first_is_cancelled(self):
+        # The read loop keeps running while a file job does, which is what makes
+        # both the refusal and the disconnect-driven cancel possible.
+        rec = _FakeRecognizer()
+        path = _write_silence_wav(60)
+        self.addCleanup(os.unlink, path)
+        ws = _FakeWS([json.dumps({"type": "file", "path": path}),
+                      json.dumps({"type": "file", "path": path})])
+        await asr_server.handle_connection(ws, _FakeEngine(rec), None)
+        errors = [ev for ev in ws.sent if ev["type"] == "error"]
+        self.assertEqual([ev["code"] for ev in errors], ["file.failed"])
+        self.assertLess(rec.feeds, FileImportTests.SLICES)
+
+    async def test_cancel_answers_with_eof(self):
+        rec = _FakeRecognizer()
+        path = _write_silence_wav(60)
+        self.addCleanup(os.unlink, path)
+        ws = _FakeWS([json.dumps({"type": "file", "path": path}),
+                      json.dumps({"type": "cancel"})])
+        await asr_server.handle_connection(ws, _FakeEngine(rec), None)
+        self.assertEqual(ws.kinds()[-1], "eof")
+        self.assertLess(rec.feeds, FileImportTests.SLICES)
 
 
 if __name__ == "__main__":

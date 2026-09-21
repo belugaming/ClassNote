@@ -44,8 +44,8 @@ enum FileTranscriptionEvent: Sendable {
 
 protocol STTProvider: Sendable {
     /// Streams transcript events. The caller is expected to feed audio chunks into the provider.
-    /// For cloud chunked providers this will internally batch audio and call REST; for WhisperKit
-    /// it will run streaming inference.
+    /// For cloud chunked providers this will internally batch audio and call REST; the local
+    /// sidecar streams the audio over a WebSocket and runs inference as it arrives.
     func transcribe(audio: AsyncStream<AudioChunk>,
                     language: String?) -> AsyncThrowingStream<TranscriptEvent, Error>
 
@@ -57,10 +57,16 @@ protocol STTProvider: Sendable {
 }
 
 protocol TranslationProvider: Sendable {
+    /// - Parameter context: recent transcript lines, rendered as prior turns.
+    /// - Parameter glossary: the course's fixed renderings, already formatted as
+    ///   a prompt block, or empty. Kept separate from `context` on purpose: a
+    ///   glossary smuggled in there becomes a user turn and gets translated
+    ///   instead of obeyed.
     func translate(text: String,
                    sourceLanguage: String,
                    targetLanguage: String,
-                   context: [String]) -> AsyncThrowingStream<String, Error>
+                   context: [String],
+                   glossary: String) -> AsyncThrowingStream<String, Error>
 }
 
 struct ChatMessage: Sendable {
@@ -88,12 +94,24 @@ enum EngineError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .missingApiKey: return "API key is not configured. Please set it in Settings."
-        case .networkError(let m): return "Network error: \(m)"
-        case .decodingError(let m): return "Decoding error: \(m)"
-        case .httpError(let s, let b): return "HTTP \(s): \(b.prefix(200))"
-        case .unsupported(let m): return "Unsupported: \(m)"
+        case .missingApiKey: return L10n.t("engine.error.missingApiKey")
+        case .networkError(let m): return Self.localized("engine.error.networkError", m)
+        case .decodingError(let m): return Self.localized("engine.error.decodingError", m)
+        case .httpError(let s, let b): return Self.localized("engine.error.httpError", "\(s)", String(b.prefix(200)))
+        case .unsupported(let m): return Self.localized("engine.error.unsupported", m)
         }
+    }
+
+    /// Fills a localized template's `%@` placeholders left to right. These are
+    /// the only strings in the app that need arguments, so this stays local
+    /// rather than becoming a general L10n facility.
+    private static func localized(_ key: String, _ arguments: String...) -> String {
+        var out = L10n.t(key)
+        for argument in arguments {
+            guard let range = out.range(of: "%@") else { break }
+            out.replaceSubrange(range, with: argument)
+        }
+        return out
     }
 }
 
@@ -114,8 +132,6 @@ struct EngineFactory {
         switch backend {
         case .openAICompatible:
             return OpenAICompatibleSTT(config: config)
-        case .whisperKitLocal:
-            return OpenAICompatibleSTT(config: config)  // fallback until WhisperKit wired
         case .appleSpeech:
             return AppleSpeechSTT()
         case .funasr:
@@ -151,7 +167,18 @@ struct EngineFactory {
     }
 
     @MainActor
-    static func makeLLM(config: ApiConfig) -> LLMProvider {
-        OpenAICompatibleLLM(config: config)
+    static func makeLLM(config: ApiConfig, backend: LLMBackend = .openAICompatible) -> LLMProvider {
+        switch backend {
+        case .openAICompatible:
+            return OpenAICompatibleLLM(config: config)
+        #if os(macOS)
+        case .localMLX:
+            return LocalMLXLLM()
+        #else
+        case .localMLX:
+            // The sidecar is a Python process, so there is nothing to run on iOS.
+            return OpenAICompatibleLLM(config: config)
+        #endif
+        }
     }
 }

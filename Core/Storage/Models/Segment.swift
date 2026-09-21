@@ -1,6 +1,19 @@
 import Foundation
 import GRDB
 
+/// Why a segment's `textTranslated` is empty: never tried, or tried and lost.
+/// Without it a failed translation is indistinguishable from a line that has
+/// nothing to translate, and a retry has no way to find the gaps.
+enum TranslationState: Int, Codable, Sendable {
+    case notAttempted = 0
+    case ok = 1
+    case failed = 2
+}
+
+// Store the raw Int rather than letting the Codable machinery decide how an
+// enum should reach a column.
+extension TranslationState: DatabaseValueConvertible {}
+
 struct Segment: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Hashable, Sendable {
     var id: Int64?
     var sessionId: String
@@ -12,6 +25,9 @@ struct Segment: Codable, FetchableRecord, MutablePersistableRecord, Identifiable
     var isFinal: Bool
     var confidence: Double
     var version: Int64
+    // Defaulted and last, so every existing memberwise construction still
+    // compiles and a freshly captured segment starts out untranslated.
+    var translationState: TranslationState = .notAttempted
 
     enum CodingKeys: String, CodingKey {
         case id, confidence, version
@@ -22,6 +38,7 @@ struct Segment: Codable, FetchableRecord, MutablePersistableRecord, Identifiable
         case textOriginal = "text_original"
         case textTranslated = "text_translated"
         case isFinal = "is_final"
+        case translationState = "translation_state"
     }
 
     static let databaseTableName = "segment"

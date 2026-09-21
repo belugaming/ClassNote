@@ -419,7 +419,8 @@ final class SessionOrchestrator: ObservableObject {
             let stream = translator.translate(text: text,
                                                sourceLanguage: config.sourceLanguage,
                                                targetLanguage: config.targetLanguage,
-                                               context: ctx)
+                                               context: ctx,
+                                               glossary: "")
             do {
                 var accumulated = ""
                 for try await delta in stream {
@@ -459,7 +460,8 @@ final class SessionOrchestrator: ObservableObject {
             let stream = translator.translate(text: text,
                                                sourceLanguage: config.sourceLanguage,
                                                targetLanguage: config.targetLanguage,
-                                               context: ctx)
+                                               context: ctx,
+                                               glossary: "")
             do {
                 var accumulated = ""
                 for try await delta in stream {
@@ -487,7 +489,8 @@ final class SessionOrchestrator: ObservableObject {
             let stream = translator.translate(text: seg.textOriginal,
                                                sourceLanguage: config.sourceLanguage,
                                                targetLanguage: config.targetLanguage,
-                                               context: [])
+                                               context: [],
+                                               glossary: "")
             for try await delta in stream {
                 buf += delta
             }

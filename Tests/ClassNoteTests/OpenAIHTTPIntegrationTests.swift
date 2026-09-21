@@ -111,7 +111,8 @@ final class OpenAIHTTPIntegrationTests: XCTestCase {
         let stream = translator.translate(text: "Hello",
                                            sourceLanguage: "en",
                                            targetLanguage: "zh-Hans",
-                                           context: [])
+                                           context: [],
+                                           glossary: "")
         for try await chunk in stream { collected += chunk }
         XCTAssertEqual(collected, "你好")
     }

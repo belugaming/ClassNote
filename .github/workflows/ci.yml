@@ -126,8 +126,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install test dependencies
-        run: python -m pip install --quiet numpy websockets pyflakes
+      - name: Install test dependencies (the pinned set, minus the Apple-only wheels)
+        run: |
+          grep -vE '^(mlx|sherpa-onnx)' Scripts/requirements-nemotron.txt > /tmp/requirements-ci.txt
+          python -m pip install --quiet -r /tmp/requirements-ci.txt pyflakes
 
       - name: Syntax check sidecars
         run: |

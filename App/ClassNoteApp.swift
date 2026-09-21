@@ -15,7 +15,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // own, so the cap below is a backstop, not something we expect to hit.
         let done = DispatchSemaphore(value: 0)
         Task {
-            async let asr: Void = LocalASRWarmPool.shared.retire()
+            // force: a deferred retire would orphan a ~2 GB sidecar holding
+            // its port when the app quits mid-recording.
+            async let asr: Bool = LocalASRWarmPool.shared.retire(force: true)
             async let translator: Void = LocalMLXTranslatorProcess.shared.shutdown()
             _ = await (asr, translator)
             done.signal()

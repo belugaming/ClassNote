@@ -40,8 +40,9 @@ struct LocalASREnvironment {
 
     /// Bumped whenever the requirements files change in a way an existing venv
     /// cannot satisfy, so that install() runs again instead of the sidecar
-    /// failing on an import. 2: sherpa-onnx replaced mlx-audio.
-    static let requirementsGeneration = 2
+    /// failing on an import. 2: sherpa-onnx replaced mlx-audio. 3: pinned exact
+    /// versions, so a venv built from the floating set is a different program.
+    static let requirementsGeneration = 3
 
     private func installMarkerURL(engine: LocalASREngineKind) -> URL {
         venvURL.appendingPathComponent(".installed-\(engine.rawValue)-v\(Self.requirementsGeneration)")
@@ -68,15 +69,13 @@ struct LocalASREnvironment {
                             continuation.yield(InstallProgress(stage: stage, fraction: fraction))
                         }
                     }
-                    if !FileManager.default.fileExists(atPath: pythonBinURL.path) {
-                        try createVenv(systemPython, continuation)
-                    } else if !Self.pythonIsUsable(pythonBinURL.path) {
-                        // The venv was created with a too-old interpreter (e.g.
-                        // macOS 3.9) and can never satisfy nemotron-asr-mlx.
-                        // Rebuild it rather than failing pip forever.
-                        continuation.yield(InstallProgress(stage: L10n.t("localASR.creatingVenv"),
-                                                          fraction: nil))
-                        try FileManager.default.removeItem(at: venvURL)
+                    let venvExists = FileManager.default.fileExists(atPath: venvURL.path)
+                    if Self.needsRebuild(pythonBinPath: pythonBinURL.path, venvExists: venvExists) {
+                        if venvExists {
+                            continuation.yield(InstallProgress(stage: L10n.t("localASR.creatingVenv"),
+                                                              fraction: nil))
+                            try FileManager.default.removeItem(at: venvURL)
+                        }
                         try createVenv(systemPython, continuation)
                     }
                     continuation.yield(InstallProgress(stage: L10n.t("localASR.installDeps"),
@@ -88,8 +87,13 @@ struct LocalASREnvironment {
                     // sherpa-onnx and mlx-lm together pull a few hundred MB and
                     // can run for minutes. Stream pip's progress out so the UI
                     // can show which package is downloading instead of freezing.
+                    // --no-input so a prompt (a keyring unlock, an index
+                    // credential) can never park the install forever behind a
+                    // question nobody can see.
                     try Self.run(pythonBinURL.path,
-                                 ["-m", "pip", "install", "--progress-bar", "off", "-r", reqPath]) { line in
+                                 ["-m", "pip", "install", "--no-input",
+                                  "--disable-pip-version-check",
+                                  "--progress-bar", "off", "-r", reqPath]) { line in
                         guard let package = Self.installingPackageName(from: line) else { return }
                         continuation.yield(InstallProgress(
                             stage: "\(L10n.t("localASR.installDeps")) \(package)", fraction: nil))
@@ -106,22 +110,42 @@ struct LocalASREnvironment {
         }
     }
 
+    /// Whether the venv has to be thrown away and rebuilt rather than reused.
+    ///
+    /// A venv's `bin/python3` is a symlink to the interpreter it was built from.
+    /// If that interpreter is gone the link dangles, and `python -m venv` over
+    /// the existing directory will not repair it — `venv` skips any destination
+    /// that is already a symlink, exits 0, and pip then fails with a bare ENOENT
+    /// forever. So anything short of a usable interpreter means: remove the
+    /// directory and build a new one. `pythonIsUsable` covers missing, dangling
+    /// and too-old with one predicate.
+    ///
+    /// Split out from `install` so the decision is testable without touching the
+    /// real Application Support directory.
+    static func needsRebuild(pythonBinPath: String, venvExists: Bool) -> Bool {
+        guard venvExists else { return true }
+        return !pythonIsUsable(pythonBinPath)
+    }
+
     private func createVenv(_ systemPython: String,
                             _ continuation: AsyncThrowingStream<InstallProgress, Error>.Continuation) throws {
         continuation.yield(InstallProgress(stage: L10n.t("localASR.creatingVenv"), fraction: nil))
         try FileManager.default.createDirectory(at: venvURL, withIntermediateDirectories: true)
-        try Self.run(systemPython, ["-m", "venv", venvURL.path])
+        // --clear empties an existing environment first, so a directory that a
+        // failed removal left half there still converges.
+        try Self.run(systemPython, ["-m", "venv", "--clear", venvURL.path])
     }
 
-    /// Minimum interpreter version the dependency set supports: `mlx-audio`
-    /// requires Python >= 3.10.
+    /// Minimum interpreter version the pinned dependency set supports:
+    /// `websockets==17.1` and `numpy==2.4.6` both require Python >= 3.11 (see
+    /// Scripts/requirements-nemotron.txt). Raise this together with the pins.
     ///
     /// This read `(major: 10, minor: 0)` — i.e. "Python 10.0" — while
     /// `pythonVersion(of:)` returns `(3, 14)` for Python 3.14. Tuple comparison
     /// made `(3, anything) >= (10, 0)` false, so *every* Python 3 interpreter was
     /// rejected and the local engine could not be installed on any machine. See
     /// `PythonVersionGateTests`.
-    static let minimumPythonVersion = (major: 3, minor: 10)
+    static let minimumPythonVersion = (major: 3, minor: 11)
 
     /// Whether an interpreter reporting `version` can run the dependency set.
     /// Split out so the gate is testable without a real interpreter on disk.
@@ -129,7 +153,7 @@ struct LocalASREnvironment {
         version >= minimumPythonVersion
     }
 
-    /// Locates the newest usable Python 3.10+ interpreter. Searches way beyond
+    /// Locates the newest usable Python 3.11+ interpreter. Searches way beyond
     /// the obvious locations: macOS's built-in /usr/bin/python3 is 3.9 and must
     /// be rejected even though it exists.
     private static func findSystemPython() -> String? {

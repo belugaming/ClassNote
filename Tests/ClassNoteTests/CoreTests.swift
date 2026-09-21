@@ -134,7 +134,7 @@ final class DatabaseTests: XCTestCase {
         XCTAssertTrue(hits.contains(where: { $0.segment.id == id }))
 
         // Cleanup
-        try await SessionRepository.shared.delete(id: session.id)
+        try await SessionRepository.shared.delete(id: session.id, force: true)
         try await CourseRepository.shared.delete(id: course.id)
     }
 
@@ -156,7 +156,7 @@ final class DatabaseTests: XCTestCase {
         reloaded = try await SessionRepository.shared.get(id: session.id)
         XCTAssertNil(reloaded?.courseId)
 
-        try await SessionRepository.shared.delete(id: session.id)
+        try await SessionRepository.shared.delete(id: session.id, force: true)
         try await CourseRepository.shared.delete(id: sourceCourse.id)
         try await CourseRepository.shared.delete(id: targetCourse.id)
     }
@@ -239,7 +239,7 @@ final class DatabaseTests: XCTestCase {
         try await SessionRepository.shared.insert(saved)
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
-        try await SessionRepository.shared.delete(id: session.id)
+        try await SessionRepository.shared.delete(id: session.id, force: true)
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
     }
 
@@ -277,7 +277,7 @@ final class DatabaseTests: XCTestCase {
         XCTAssertEqual(loaded.map(\.front), ["What is ATP?", "Define osmosis"])
         XCTAssertEqual(loaded.map(\.sortOrder), [0, 1])
 
-        try await SessionRepository.shared.delete(id: session.id)
+        try await SessionRepository.shared.delete(id: session.id, force: true)
     }
 
     func testFlashcardsMarkdownExport() {
@@ -340,7 +340,7 @@ final class DatabaseTests: XCTestCase {
         let loaded = try await StudyToolResultRepository.shared.get(sessionId: session.id, toolId: "catch_up")
         XCTAssertEqual(loaded?.markdown, "# Catch up")
 
-        try await SessionRepository.shared.delete(id: session.id)
+        try await SessionRepository.shared.delete(id: session.id, force: true)
     }
 
     func testNoteDeleteRemovesCurrentAndVersions() async throws {
@@ -366,7 +366,7 @@ final class DatabaseTests: XCTestCase {
         XCTAssertNil(deletedNote)
         XCTAssertEqual(deletedVersions.count, 0)
 
-        try await SessionRepository.shared.delete(id: session.id)
+        try await SessionRepository.shared.delete(id: session.id, force: true)
     }
 
     func testQAMessagePersistenceAndDeletion() async throws {
@@ -401,7 +401,7 @@ final class DatabaseTests: XCTestCase {
         messages = try await QAMessageRepository.shared.all(sessionId: session.id)
         XCTAssertTrue(messages.isEmpty)
 
-        try await SessionRepository.shared.delete(id: session.id)
+        try await SessionRepository.shared.delete(id: session.id, force: true)
     }
 }
 
@@ -524,9 +524,11 @@ final class ShouldEmitTests: XCTestCase {
     }
 }
 
-/// Guards the config-loss bug: a stale in-memory `.default` (before
-/// `loadConfig()` finishes) used to be written to both the database and the
-/// UserDefaults backup, destroying the copy meant to recover from exactly that.
+/// Guards the config-loss bugs around the UserDefaults backup: the backup may
+/// only replace a row the user never saved (`configured_at` is NULL), and a row
+/// the user did save is authoritative even when it happens to equal the factory
+/// defaults. The premature `.default` write that once destroyed the backup is
+/// prevented upstream by `AppState.saveConfig`'s `hasLoadedConfig` guard.
 final class ApiConfigBackupTests: XCTestCase {
     override func setUp() async throws {
         try Database.shared.setup()
@@ -548,18 +550,23 @@ final class ApiConfigBackupTests: XCTestCase {
         XCTAssertEqual(backup?.apiKey, "sk-regression-test")
     }
 
-    func testSavingDefaultsDoesNotClobberBackup() async throws {
+    func testSavedConfigIsAuthoritativeEvenWhenItEqualsTheDefaults() async throws {
         var real = ApiConfig.default
         real.baseUrl = "https://example.test/v1"
-        real.apiKey = "sk-must-survive"
+        real.apiKey = "sk-old-provider"
         try await ApiConfigRepository.shared.save(real)
 
-        // An all-defaults save is what a premature write looks like.
-        try await ApiConfigRepository.shared.save(.default)
+        // Choosing the OpenAI preset again yields a config equal to the factory
+        // defaults except for the key. Provenance, not value, decides whether
+        // the backup may replace it — so the new key must win.
+        var back = ApiConfig.default
+        back.apiKey = "sk-new-key"
+        try await ApiConfigRepository.shared.save(back)
 
-        let backup = ApiConfigBackupStore.read()
-        XCTAssertEqual(backup?.apiKey, "sk-must-survive",
-                       "An all-defaults save must not overwrite the backup")
+        let loaded = try await ApiConfigRepository.shared.load()
+        XCTAssertEqual(loaded.baseUrl, ApiConfig.default.baseUrl)
+        XCTAssertEqual(loaded.apiKey, "sk-new-key",
+                       "A deliberately saved config must not be overwritten by an older backup")
     }
 
     func testLoadRestoresFromBackupWhenDatabaseIsDefaulted() async throws {
@@ -616,7 +623,13 @@ final class PipProgressParsingTests: XCTestCase {
 /// local engine could not be installed on any machine.
 final class PythonVersionGateTests: XCTestCase {
     func test_accepts_the_minimum_supported_version() {
-        XCTAssertTrue(LocalASREnvironment.isVersionSupported((major: 3, minor: 10)))
+        XCTAssertTrue(LocalASREnvironment.isVersionSupported((major: 3, minor: 11)))
+    }
+
+    func test_rejects_python_below_the_dependency_floor() {
+        // websockets 17 and numpy 2.4 both require 3.11; a 3.10 venv would pass
+        // the gate and then die in pip.
+        XCTAssertFalse(LocalASREnvironment.isVersionSupported((major: 3, minor: 10)))
     }
 
     func test_accepts_newer_python_3() {
@@ -625,7 +638,7 @@ final class PythonVersionGateTests: XCTestCase {
     }
 
     func test_rejects_the_system_python_that_ships_with_macos() {
-        // /usr/bin/python3 is 3.9 and cannot install mlx-audio.
+        // /usr/bin/python3 is 3.9 and cannot install the pinned dependency set.
         XCTAssertFalse(LocalASREnvironment.isVersionSupported((major: 3, minor: 9)))
         XCTAssertFalse(LocalASREnvironment.isVersionSupported((major: 2, minor: 7)))
     }
@@ -633,6 +646,6 @@ final class PythonVersionGateTests: XCTestCase {
     func test_minimum_is_a_python_3_version() {
         // Guards the shape of the constant itself, not just the comparison.
         XCTAssertEqual(LocalASREnvironment.minimumPythonVersion.major, 3)
-        XCTAssertEqual(LocalASREnvironment.minimumPythonVersion.minor, 10)
+        XCTAssertEqual(LocalASREnvironment.minimumPythonVersion.minor, 11)
     }
 }

@@ -1503,6 +1503,7 @@ final class SessionDetailViewModel: ObservableObject {
         let config = AppState.shared.apiConfig
         streamingBuffer = ""
         streamingHighlightId = highlightId
+        let llm = EngineFactory.makeLLM(config: config, backend: AppState.shared.llmBackend)
 
         let task = Task { [weak self] in
             guard let self else { return }
@@ -1512,7 +1513,8 @@ final class SessionDetailViewModel: ObservableObject {
                     rangeEndMs: range.end,
                     allSegments: segments,
                     preset: preset,
-                    config: config)
+                    config: config,
+                    llm: llm)
                 for try await delta in stream {
                     if Task.isCancelled { return }
                     self.streamingBuffer += delta

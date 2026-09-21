@@ -33,7 +33,6 @@ enum OpenAIChatClient {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    guard !config.apiKey.isEmpty else { throw EngineError.missingApiKey }
                     let base = config.baseUrl.hasSuffix("/") ? String(config.baseUrl.dropLast()) : config.baseUrl
                     guard let url = URL(string: base + "/chat/completions") else {
                         throw EngineError.networkError("Invalid base URL")
@@ -41,7 +40,13 @@ enum OpenAIChatClient {
                     var req = URLRequest(url: url)
                     req.httpMethod = "POST"
                     req.timeoutInterval = 120
-                    req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+                    // Loopback servers (Ollama, LM Studio, llama.cpp, vLLM
+                    // without --api-key) issue no token and reject one they
+                    // never issued, so an empty key is a valid configuration
+                    // rather than something to refuse before trying.
+                    if !config.apiKey.isEmpty {
+                        req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+                    }
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
 

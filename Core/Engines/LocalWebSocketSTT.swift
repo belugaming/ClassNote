@@ -70,12 +70,14 @@ final class LocalWebSocketSTT: STTProvider, Sendable {
                         language: String?) -> AsyncThrowingStream<FileTranscriptionEvent, Error> {
         let engine = self.engine
         let lang = language ?? self.language
+        let box = ConnectionBox()
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
                     let connection = try await LocalASRConnection.connect(engine: engine,
                                                                          language: lang,
                                                                          onProgress: self.onProgress)
+                    box.connection = connection
                     // The sidecar only reads 16 kHz mono WAV; AVFoundation here
                     // handles every container macOS can play (m4a, mp4, mov,
                     // mp3…), so the conversion happens on this side.
@@ -87,6 +89,9 @@ final class LocalWebSocketSTT: STTProvider, Sendable {
                             .appendingPathComponent("classnote-import-\(UUID().uuidString).wav")
                         try wav.write(to: wavURL)
                     } catch {
+                        // These paths never reach receiveLoop, so its defer
+                        // cannot clean up for them.
+                        await connection.close()
                         await LocalASRWarmPool.shared.endUse()
                         throw error
                     }
@@ -94,8 +99,14 @@ final class LocalWebSocketSTT: STTProvider, Sendable {
                     // Release the sidecar hold even if sending the request fails,
                     // otherwise its idle timer would never resume.
                     do {
+                        // Converting a two-hour lecture takes a while, and a
+                        // cancel that landed during it must not still hand the
+                        // sidecar a job: once the file command is in, the only
+                        // way to stop it is to ask it to stop.
+                        try Task.checkCancellation()
                         try await connection.sendFile(path: wavURL.path)
                     } catch {
+                        await connection.close()
                         await LocalASRWarmPool.shared.endUse()
                         throw error
                     }
@@ -117,10 +128,43 @@ final class LocalWebSocketSTT: STTProvider, Sendable {
                     continuation.finish(throwing: error)
                 }
             }
-            continuation.onTermination = { _ in
-                task.cancel()
+            continuation.onTermination = { reason in
                 // The sidecar is shared and stays warm; only this connection ends.
+                guard case .cancelled = reason, let connection = box.connection else {
+                    task.cancel()
+                    return
+                }
+                Task {
+                    // Best effort, and before the cancel: dropping the socket
+                    // only aborts the file job at the next slice boundary, and
+                    // a job we never told about it keeps a core pegged for the
+                    // rest of the lecture.
+                    try? await connection.sendCancel()
+                    task.cancel()
+                }
+                Task {
+                    // Backstop: `sendCancel` goes through an actor whose receive
+                    // is parked and out over a socket with a 600 s request
+                    // timeout, so a sidecar that has stopped draining must not be
+                    // able to hold the user's cancel for ten minutes.
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    task.cancel()
+                }
             }
         }
+    }
+}
+
+/// Carries the connection out of the setup task so `onTermination` can reach it.
+///
+/// `onTermination` has to be installed synchronously, before `connect()` has
+/// even been called, so it cannot capture the connection directly.
+private final class ConnectionBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: LocalASRConnection?
+
+    var connection: LocalASRConnection? {
+        get { lock.withLock { value } }
+        set { lock.withLock { value = newValue } }
     }
 }

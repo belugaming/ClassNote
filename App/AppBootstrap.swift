@@ -50,8 +50,12 @@ enum AppBootstrap {
         }
     }
 
+    /// `referencedSessionIds` is a safety net: the file name of a managed
+    /// recording *is* its session id, so a file that names a live row is never
+    /// an orphan even when that row's `audio_path` was lost.
     @discardableResult
     static func cleanupOrphanedRecordings(referencedPaths: Set<String>,
+                                          referencedSessionIds: Set<String> = [],
                                           recordingsRoot: URL = recordingsURL) -> Int {
         let fm = FileManager.default
         let root = recordingsRoot
@@ -66,6 +70,8 @@ enum AppBootstrap {
 
         var removed = 0
         for file in files where file.pathExtension.lowercased() == "m4a" {
+            let sessionId = file.deletingPathExtension().lastPathComponent
+            guard !referencedSessionIds.contains(sessionId) else { continue }
             guard normalizedManagedRecordingPath(file.path, recordingsRoot: root)
                 .map({ !referenced.contains($0) }) == true else { continue }
             do {

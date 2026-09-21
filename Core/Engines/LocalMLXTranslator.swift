@@ -14,6 +14,77 @@ enum LocalMLXTranslatorError: Error, LocalizedError {
     }
 }
 
+/// Where `huggingface_hub` keeps downloaded weights, and whether what it has is
+/// actually usable.
+///
+/// Shared by both MLX sidecars. The old probe ("the snapshots directory is not
+/// empty") reported a model as ready from the first second of a multi-hundred-MB
+/// download: `hf_hub_download` creates `snapshots/<revision>/` before the first
+/// byte arrives and parks the transfer in `blobs/<etag>.incomplete`.
+enum HuggingFaceCache {
+    /// Files a usable mlx-lm snapshot must contain besides the weights. The
+    /// tokenizer is deliberately not on the list: repos ship it as
+    /// tokenizer.json, tokenizer.model or a tiktoken file depending on the
+    /// family, and requiring one spelling would report a good model as missing.
+    static let requiredFiles = ["config.json"]
+
+    /// Honours the same environment variables `huggingface_hub` reads: a user
+    /// with HF_HOME set would otherwise be told "not installed" forever.
+    static var hubURL: URL {
+        let env = ProcessInfo.processInfo.environment
+        if let explicit = env["HUGGINGFACE_HUB_CACHE"], !explicit.isEmpty {
+            return URL(fileURLWithPath: explicit)
+        }
+        if let home = env["HF_HOME"], !home.isEmpty {
+            return URL(fileURLWithPath: home).appendingPathComponent("hub", isDirectory: true)
+        }
+        return URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".cache/huggingface/hub", isDirectory: true)
+    }
+
+    /// `huggingface_hub` maps `a/b` onto `models--a--b`.
+    static func repoURL(_ repo: String) -> URL {
+        hubURL.appendingPathComponent("models--" + repo.replacingOccurrences(of: "/", with: "--"),
+                                      isDirectory: true)
+    }
+
+    /// Whether one revision directory holds a complete model.
+    ///
+    /// `fileExists` resolves the pointer symlink, so a link whose blob never
+    /// landed reads as missing — which is exactly what we want.
+    static func snapshotIsComplete(at dir: URL) -> Bool {
+        let fm = FileManager.default
+        let names = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
+        guard names.contains(where: { $0.hasSuffix(".safetensors") }) else { return false }
+        return requiredFiles.allSatisfy { fm.fileExists(atPath: dir.appendingPathComponent($0).path) }
+    }
+
+    /// `revision` narrows the check to the pinned commit; nil accepts any
+    /// complete snapshot of the repo.
+    static func hasCompleteSnapshot(repo: String, revision: String? = nil) -> Bool {
+        let fm = FileManager.default
+        let root = repoURL(repo)
+        let blobs = (try? fm.contentsOfDirectory(atPath: root.appendingPathComponent("blobs").path)) ?? []
+        if blobs.contains(where: { $0.hasSuffix(".incomplete") }) { return false }
+        let snapshots = root.appendingPathComponent("snapshots", isDirectory: true)
+        if let revision {
+            return snapshotIsComplete(at: snapshots.appendingPathComponent(revision, isDirectory: true))
+        }
+        let revisions = (try? fm.contentsOfDirectory(atPath: snapshots.path)) ?? []
+        return revisions.contains { revision in
+            snapshotIsComplete(at: snapshots.appendingPathComponent(revision, isDirectory: true))
+        }
+    }
+
+    /// Something is cached for this repo, but not a usable snapshot: the
+    /// download was interrupted and re-entering it will resume from the
+    /// `.incomplete` blob.
+    static func hasPartialDownload(repo: String, revision: String? = nil) -> Bool {
+        FileManager.default.fileExists(atPath: repoURL(repo).path)
+            && !hasCompleteSnapshot(repo: repo, revision: revision)
+    }
+}
+
 /// Owns the single warm `translate_server.py` child process.
 ///
 /// Unlike the ASR sidecar this speaks newline-delimited JSON over a pipe rather
@@ -30,6 +101,8 @@ actor LocalMLXTranslatorProcess {
 
     private var process: Process?
     private var stdinPipe: Pipe?
+    private var stdoutPipe: Pipe?
+    private var stderrPipe: Pipe?
     private var pending: [Int: AsyncThrowingStream<String, Error>.Continuation] = [:]
     private var nextId = 1
     private var buffer = Data()
@@ -42,18 +115,23 @@ actor LocalMLXTranslatorProcess {
     /// Repo id kept in sync with `translate_server.py`'s DEFAULT_MODEL.
     static let modelRepo = "mlx-community/Hy-MT2-1.8B-4bit"
 
+    /// Commit to pin the download to, mirroring `--revision` on the sidecar.
+    /// nil means "whatever main points at" — the same default the script uses,
+    /// and the only sane value until a revision has actually been picked and
+    /// tested. Passing an empty string would look like a pin and fetch nothing.
+    static let modelRevision: String? = "e5c6fe56c7b3bc77fae5ae92db31f2178f1e6912"
+
     /// Whether the weights are already in the Hugging Face cache, so Settings can
     /// offer a download instead of silently stalling on first use while ~1 GB
-    /// comes down. `huggingface_hub` maps `a/b` onto `models--a--b`.
+    /// comes down.
     static var isModelDownloaded: Bool {
-        let dir = "models--" + modelRepo.replacingOccurrences(of: "/", with: "--")
-        let url = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".cache/huggingface/hub/\(dir)/snapshots", isDirectory: true)
-        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: url.path) else {
-            return false
-        }
-        // A snapshot dir exists only once a revision has been fully materialized.
-        return !entries.isEmpty
+        HuggingFaceCache.hasCompleteSnapshot(repo: modelRepo, revision: modelRevision)
+    }
+
+    /// True when the cache holds something for this repo but not a usable
+    /// snapshot — an interrupted download that `prewarm` will resume.
+    static var hasPartialDownload: Bool {
+        HuggingFaceCache.hasPartialDownload(repo: modelRepo, revision: modelRevision)
     }
 
     /// Starts the sidecar purely to download and load the model, so the user can
@@ -91,7 +169,11 @@ actor LocalMLXTranslatorProcess {
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: LocalASREnvironment.shared.pythonExecutablePath)
-        proc.arguments = [script, "--exit-with-parent", "\(getpid())"]
+        var arguments = [script, "--exit-with-parent", "\(getpid())"]
+        if let revision = Self.modelRevision {
+            arguments += ["--revision", revision]
+        }
+        proc.arguments = arguments
         var env = ProcessInfo.processInfo.environment
         env["PYTHONUNBUFFERED"] = "1"
         proc.environment = env
@@ -101,11 +183,16 @@ actor LocalMLXTranslatorProcess {
         proc.standardOutput = stdout
         proc.standardError = stderr
 
+        let activity = SidecarHandshake.ActivityClock()
         // mlx-lm and huggingface_hub write progress to stderr. If nothing drains
         // this pipe its buffer fills and Python blocks on write() forever.
         stderr.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            guard !data.isEmpty else { return }
+            // Also feeds the handshake watchdog: a ~1 GB download is otherwise
+            // silent on stdout for minutes at a time.
+            activity.touch()
+            guard let text = String(data: data, encoding: .utf8) else { return }
             NSLog("[translate_server stderr] \(text)")
         }
 
@@ -114,10 +201,33 @@ actor LocalMLXTranslatorProcess {
         } catch {
             throw LocalMLXTranslatorError.launchFailed(error.localizedDescription)
         }
+        SidecarRegistry.shared.register(proc.processIdentifier)
         self.process = proc
         self.stdinPipe = stdin
+        self.stdoutPipe = stdout
+        self.stderrPipe = stderr
 
-        try await Self.waitForReady(pipe: stdout, process: proc, onProgress: onProgress)
+        let leftover: Data
+        do {
+            leftover = try await SidecarHandshake.waitForReady(
+                pipe: stdout,
+                readyLine: "READY",
+                process: proc,
+                activity: activity,
+                stageMessage: { _, _ in L10n.t("localASR.stage.translation") },
+                onProgress: onProgress)
+        } catch {
+            // `ensureStarted`'s defer only clears the flag, so without this the
+            // failed child stays resident for the life of the app.
+            SidecarRegistry.shared.unregister(proc.processIdentifier)
+            await LocalASRProcessManager.terminateQuickly(proc, name: "translate_server")
+            stderr.fileHandleForReading.readabilityHandler = nil
+            self.process = nil
+            self.stdinPipe = nil
+            self.stdoutPipe = nil
+            self.stderrPipe = nil
+            throw Self.mapHandshakeFailure(error)
+        }
 
         // Only start routing responses once READY has been consumed, so the
         // handshake lines never reach the JSON parser.
@@ -126,37 +236,19 @@ actor LocalMLXTranslatorProcess {
             guard !data.isEmpty else { return }
             Task { await self?.ingest(data) }
         }
+        // Whatever shared a read with READY has to go through the parser before
+        // the handler above can see anything, or those bytes are lost and the
+        // request they belong to never completes.
+        if !leftover.isEmpty { ingest(leftover) }
     }
 
-    private static func waitForReady(pipe: Pipe,
-                                     process: Process,
-                                     onProgress: (@Sendable (String) -> Void)?) async throws {
-        let handle = pipe.fileHandleForReading
-        // A first run downloads ~1 GB of weights, so the deadline covers a stall
-        // rather than the whole download; visible progress extends it.
-        var deadline = Date().addingTimeInterval(180)
-        var pending = Data()
-
-        while Date() < deadline {
-            if !process.isRunning, pending.isEmpty {
-                throw LocalMLXTranslatorError.launchFailed(L10n.t("localASR.exitedEarly"))
-            }
-            let chunk = handle.availableData
-            if !chunk.isEmpty {
-                pending.append(chunk)
-                guard let text = String(data: pending, encoding: .utf8) else { continue }
-                for line in text.split(separator: "\n") where line.hasPrefix("STAGE ") {
-                    onProgress?(L10n.t("localASR.stage.translation"))
-                    deadline = Date().addingTimeInterval(180)
-                }
-                if text.contains("FATAL") {
-                    throw LocalMLXTranslatorError.launchFailed(L10n.t("localASR.modelLoadFailed"))
-                }
-                if text.contains("READY") { return }
-            }
-            try await Task.sleep(nanoseconds: 100_000_000)
+    private static func mapHandshakeFailure(_ error: Error) -> Error {
+        guard let failure = error as? SidecarHandshake.Failure else { return error }
+        switch failure {
+        case .modelLoadFailed: return LocalMLXTranslatorError.launchFailed(L10n.t("localASR.modelLoadFailed"))
+        case .exitedEarly: return LocalMLXTranslatorError.launchFailed(L10n.t("localASR.exitedEarly"))
+        case .stalled: return LocalMLXTranslatorError.readyTimeout
         }
-        throw LocalMLXTranslatorError.readyTimeout
     }
 
     /// Splits the stdout stream into lines and routes each response to its
@@ -215,12 +307,15 @@ actor LocalMLXTranslatorProcess {
     func shutdown() async {
         for (_, continuation) in pending { continuation.finish() }
         pending.removeAll()
-        guard let process, process.isRunning else {
-            self.process = nil
-            return
-        }
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+        stdoutPipe = nil
+        stderrPipe?.fileHandleForReading.readabilityHandler = nil
+        stderrPipe = nil
+        stdinPipe = nil
+        guard let process else { return }
         self.process = nil
-        self.stdinPipe = nil
+        SidecarRegistry.shared.unregister(process.processIdentifier)
+        guard process.isRunning else { return }
         await LocalASRProcessManager.terminateQuickly(process, name: "translate_server")
     }
 }
@@ -231,7 +326,10 @@ actor LocalMLXTranslatorProcess {
 /// cannot simply capture it. Assigning the handler twice instead does not work:
 /// the later assignment replaces the earlier one, so whichever cleanup was
 /// registered first silently stops running.
-private final class RequestHandle: @unchecked Sendable {
+///
+/// Internal rather than private so the LLM sidecar, which multiplexes requests
+/// the same way, can use it instead of carrying its own copy.
+final class RequestHandle: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Int?
 
@@ -243,10 +341,15 @@ private final class RequestHandle: @unchecked Sendable {
 
 /// `TranslationProvider` backed by the local MLX sidecar.
 struct LocalMLXTranslator: TranslationProvider {
+    /// `glossary` is ignored for the same reason `context` is: Hy-MT2 is a
+    /// sentence-level translation model with no instruction following, and
+    /// anything prepended to the sentence comes back translated rather than
+    /// applied.
     func translate(text: String,
                    sourceLanguage: String,
                    targetLanguage: String,
-                   context: [String]) -> AsyncThrowingStream<String, Error> {
+                   context: [String],
+                   glossary: String) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let handle = RequestHandle()
             let work = Task {

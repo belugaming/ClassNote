@@ -187,7 +187,8 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
                             wav: wav,
                             config: config,
                             language: language,
-                            prompt: promptCarry.isEmpty ? nil : promptCarry)
+                            prompt: promptCarry.isEmpty ? nil : promptCarry,
+                            fallbackDurationSec: Double(end - offset) / Double(bytesPerSecond))
                         for seg in segments {
                             let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
                             guard Self.shouldEmit(text, minChars: minEmitChars) else { continue }
@@ -248,7 +249,12 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
         return (String(data: data, encoding: .utf8) ?? "", data)
     }
 
-    static func postTranscriptionVerbose(wav: Data, config: ApiConfig, language: String?, prompt: String? = nil) async throws -> [VerboseSegment] {
+    /// - Parameter fallbackDurationSec: how long the audio in `wav` is. Used
+    ///   only for the synthetic segment the fallbacks below produce: a provider
+    ///   that ignores `verbose_json` gives no timings at all, and reporting
+    ///   0...0 collapses every imported segment onto its slice boundary.
+    static func postTranscriptionVerbose(wav: Data, config: ApiConfig, language: String?, prompt: String? = nil,
+                                         fallbackDurationSec: Double = 0) async throws -> [VerboseSegment] {
         let (resp, data) = try await postMultipart(wav: wav, config: config, language: language, verbose: true, prompt: prompt)
         if !(200..<300).contains(resp.statusCode) {
             throw EngineError.httpError(status: resp.statusCode,
@@ -260,23 +266,22 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
                 return segs
             }
             if let text = obj.text, !text.isEmpty {
-                return [VerboseSegment(id: 0, start: 0, end: 0, text: text)]
+                return [VerboseSegment(id: 0, start: 0, end: fallbackDurationSec, text: text)]
             }
         }
         // Fallback: provider may have ignored verbose_json and returned the
         // plain `{"text": ...}` shape.
         if let simple = try? JSONDecoder().decode(SimpleResponse.self, from: data),
            !simple.text.isEmpty {
-            return [VerboseSegment(id: 0, start: 0, end: 0, text: simple.text)]
+            return [VerboseSegment(id: 0, start: 0, end: fallbackDurationSec, text: simple.text)]
         }
         // Last resort: treat the response body as raw text.
         let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if raw.isEmpty { return [] }
-        return [VerboseSegment(id: 0, start: 0, end: 0, text: raw)]
+        return [VerboseSegment(id: 0, start: 0, end: fallbackDurationSec, text: raw)]
     }
 
     static func postMultipart(wav: Data, config: ApiConfig, language: String?, verbose: Bool, prompt: String? = nil) async throws -> (HTTPURLResponse, Data) {
-        guard !config.apiKey.isEmpty else { throw EngineError.missingApiKey }
         let comps = URLComponents(string: config.baseUrl.hasSuffix("/") ? config.baseUrl + "audio/transcriptions" : config.baseUrl + "/audio/transcriptions")
         guard let url = comps?.url else { throw EngineError.networkError("Invalid base URL") }
 
@@ -284,7 +289,12 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 60
-        req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        // Local servers issue no token and reject one they never issued, so an
+        // empty key is a valid configuration -- refusing here meant the user
+        // could never find out whether their Ollama endpoint worked.
+        if !config.apiKey.isEmpty {
+            req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        }
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
         var body = Data()

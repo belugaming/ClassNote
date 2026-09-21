@@ -1,11 +1,18 @@
 import Foundation
 
 actor HighlightExplanationService {
+    /// - Parameter llm: the chat engine to run this on. Passed in rather than
+    ///   built here so the explainer follows the notes/Q&A backend setting,
+    ///   including the local sidecar, which has no API key to be missing.
+    /// - Parameter courseContext: the course's own facts (glossary, instructor,
+    ///   notes), already rendered as a prompt block, or empty.
     func generate(rangeStartMs: Int64,
                   rangeEndMs: Int64,
                   allSegments: [Segment],
                   preset: PromptPreset,
-                  config: ApiConfig) -> AsyncThrowingStream<String, Error> {
+                  config: ApiConfig,
+                  llm: LLMProvider,
+                  courseContext: String = "") -> AsyncThrowingStream<String, Error> {
         let fullTranscript = Self.renderSegments(allSegments)
         let rangeSegments = allSegments.filter { seg in
             seg.startMs <= rangeEndMs && seg.endMs >= rangeStartMs
@@ -22,15 +29,15 @@ actor HighlightExplanationService {
         ===
         """
 
-        let system = HighlightPrompts.systemPrefix + "\n\n" + preset.systemBody
+        var system = HighlightPrompts.systemPrefix + "\n\n" + preset.systemBody
+        if !courseContext.isEmpty {
+            system = courseContext + "\n\n" + system
+        }
         let messages: [ChatMessage] = [
             .init(role: .system, content: system),
             .init(role: .user, content: userContent),
         ]
-        return OpenAIChatClient.chatStream(config: config,
-                                            messages: messages,
-                                            model: config.llmModel,
-                                            temperature: 0.3)
+        return llm.chat(messages: messages, model: config.llmModel, temperature: 0.3)
     }
 
     private static func renderSegments(_ segments: [Segment]) -> String {

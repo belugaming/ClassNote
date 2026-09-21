@@ -34,6 +34,8 @@ final class AppState: ObservableObject {
     @Published var translationEnabled: Bool = true
     @Published var sttBackend: SttBackend = .openAICompatible
     @Published var translationBackend: TranslationBackend = .openAICompatible
+    /// Which engine writes notes, answers questions and explains highlights.
+    @Published var llmBackend: LLMBackend = .openAICompatible
     @Published var interruptedSessions: [Session] = []
     @Published var microphoneDevices: [MicrophoneInputDevice] = []
     @AppStorage("preferredMicrophoneDeviceID") var preferredMicrophoneDeviceID: String = MicrophoneInputDevice.systemDefaultID
@@ -68,13 +70,20 @@ final class AppState: ObservableObject {
             // while hasLoadedConfig is still false keeps those handlers from
             // saving a half-applied state.
             self.apiConfig = cfg
-            var backend = SttBackend(rawValue: cfg.sttBackend) ?? .openAICompatible
-            // Fold the retired second local entry onto the canonical one, so a
-            // setting saved before the two engines merged doesn't leave the
-            // picker showing a value it no longer offers.
-            if backend == .nemotronStreaming { backend = .funasr }
+            let backend = SttBackend.resolve(cfg.sttBackend)
             self.sttBackend = backend
             self.translationBackend = TranslationBackend(rawValue: cfg.translationBackend) ?? .openAICompatible
+            self.llmBackend = LLMBackend(rawValue: cfg.llmBackend) ?? .openAICompatible
+            if cfg.sttBackend != backend.rawValue {
+                // Persist the fold, or the stored string stays unreadable
+                // forever and Settings fires a spurious save the first time it
+                // opens. saveConfig() short-circuits while hasLoadedConfig is
+                // false, so this has to go through the repository directly.
+                var migrated = cfg
+                migrated.sttBackend = backend.rawValue
+                self.apiConfig = migrated
+                try? await ApiConfigRepository.shared.save(migrated)
+            }
         }
         hasLoadedConfig = true
     }
@@ -140,8 +149,9 @@ final class AppState: ObservableObject {
         do {
             try await ApiConfigRepository.shared.save(cfg)
             self.apiConfig = try await ApiConfigRepository.shared.load()
-            self.sttBackend = SttBackend(rawValue: self.apiConfig.sttBackend) ?? .openAICompatible
+            self.sttBackend = SttBackend.resolve(self.apiConfig.sttBackend)
             self.translationBackend = TranslationBackend(rawValue: self.apiConfig.translationBackend) ?? .openAICompatible
+            self.llmBackend = LLMBackend(rawValue: self.apiConfig.llmBackend) ?? .openAICompatible
         } catch {
             setError("Save settings failed: \(error.localizedDescription)")
         }
@@ -490,7 +500,6 @@ extension Notification.Name {
 
 enum SttBackend: String, CaseIterable, Identifiable {
     case openAICompatible = "openai"
-    case whisperKitLocal = "whisperkit"
     case appleSpeech = "apple"
     // Both rawValues now drive the same sherpa-onnx sidecar. They are kept as
     // two cases only so a stored setting from an earlier build still decodes;
@@ -501,7 +510,6 @@ enum SttBackend: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .openAICompatible: return "OpenAI Compatible (Cloud)"
-        case .whisperKitLocal: return "WhisperKit (Local, macOS Apple Silicon)"
         case .appleSpeech: return L10n.t("settings.engines.sttBackend.apple")
         case .funasr, .nemotronStreaming: return "Local Nemotron (Streaming, Apple Silicon)"
         }
@@ -517,14 +525,46 @@ enum SttBackend: String, CaseIterable, Identifiable {
         allCases.filter { $0 != .nemotronStreaming }
     }
 
+    /// Decodes a stored rawValue, folding values that no longer name a real
+    /// backend onto the one they actually ran.
+    ///
+    /// `"whisperkit"` never had an implementation — it silently used the cloud
+    /// engine, which is where the nil-coalescing lands it. Both `loadConfig` and
+    /// `saveConfig` go through here: `saveConfig` used to skip the nemotron fold
+    /// and so republished a value the picker cannot display.
+    static func resolve(_ raw: String) -> SttBackend {
+        let backend = SttBackend(rawValue: raw) ?? .openAICompatible
+        return backend == .nemotronStreaming ? .funasr : backend
+    }
+
     /// True for backends backed by a local Python WebSocket sidecar process
     /// that may need first-run installation before it can be used.
     var isLocalSidecar: Bool {
         switch self {
         case .funasr, .nemotronStreaming: return true
-        case .openAICompatible, .whisperKitLocal, .appleSpeech: return false
+        case .openAICompatible, .appleSpeech: return false
         }
     }
+}
+
+/// Which engine writes notes, answers questions, makes flashcards and explains
+/// highlights. Separate from the translation backend: the useful setup is a
+/// small local translation model plus a cloud model for the long-form work, or
+/// the other way round on a machine with memory to spare.
+enum LLMBackend: String, CaseIterable, Identifiable {
+    case openAICompatible = "openai"
+    case localMLX = "mlx"
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .openAICompatible: return L10n.t("settings.engines.llmBackend.openai")
+        case .localMLX: return L10n.t("settings.engines.llmBackend.mlx")
+        }
+    }
+
+    /// True for backends backed by the local Python sidecar, which may need a
+    /// first-run install before it can be used.
+    var isLocalSidecar: Bool { self == .localMLX }
 }
 
 enum TranslationBackend: String, CaseIterable, Identifiable {

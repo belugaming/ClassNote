@@ -7,10 +7,13 @@ import Translation
 /// API, so the whole result is yielded at once.
 @available(macOS 15.0, iOS 18.0, *)
 final class AppleTranslationEngine: TranslationProvider, Sendable {
+    /// `glossary` is ignored: `TranslationSession.translate(_:)` takes a string
+    /// and nothing else, so there is no prompt to put it in.
     func translate(text: String,
                    sourceLanguage: String,
                    targetLanguage: String,
-                   context: [String]) -> AsyncThrowingStream<String, Error> {
+                   context: [String],
+                   glossary: String) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
