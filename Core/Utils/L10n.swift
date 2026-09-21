@@ -301,6 +301,8 @@ enum L10n {
         "settings.engines.stt": "Speech-to-text backend",
         "settings.engines.sttPicker": "STT engine",
         "settings.engines.sttBackend.apple": "macOS System (Local)",
+        "settings.engines.sttBackend.openai": "OpenAI Compatible (Cloud)",
+        "settings.engines.sttBackend.local": "Local Nemotron (Streaming, Apple Silicon)",
         "settings.engines.appleSpeechNote": "Uses Apple's on-device speech recognition. Language packs are downloaded automatically the first time you use a language.",
         "settings.engines.funasrNote": "Runs a local sherpa-onnx service on Apple Silicon with word-by-word streaming text and file import. Dependencies and the model install on first use. One model, NVIDIA Nemotron 3.5 (40 languages, with punctuation and casing), handles every language in a single pass — text appears about 200 ms after it is spoken.",
         "localASR.installing": "Setting up the local engine…",
@@ -483,6 +485,36 @@ enum L10n {
         "task.retranscribe.title": "Re-transcribe",
         "task.retranscribe.done": "Re-transcribe finished",
         "recovery.action.recoverAndRetranscribe": "Recover and re-transcribe",
+
+        // MARK: Settings, sidebar and menu wave -- presets that serve no STT,
+        // the course editor, delete confirmations and the notes/Q&A engine.
+        "settings.api.preset.noStt": "This provider serves chat models only. Keep transcription on Apple Speech or the local engine — its STT model field is not used.",
+        "settings.api.preset.noKeyNeeded": "This provider runs on your own machine and needs no API key.",
+        "settings.api.keyOptional": "Local servers usually need no key — leaving this blank is fine.",
+
+        "main.deleteSession.confirm.title": "Delete this session?",
+        "main.deleteSession.confirm.message": "“%@” and its transcript, notes and audio will be permanently removed.",
+        "main.deleteCourse.confirm.title": "Delete this course?",
+        "main.deleteCourse.confirm.message": "“%@” will be removed. Its sessions are kept, but they become unfiled.",
+
+        "main.editCourse": "Edit course…",
+        "course.field.name": "Course name",
+        "course.field.semester": "Term",
+        "course.field.instructor": "Instructor",
+        "course.field.glossary": "Glossary",
+        "course.field.notes": "Notes",
+        "course.field.glossary.help": "One term per line, e.g. `eigenvalue = 特征值`. Used when translating and when generating notes.",
+
+        "settings.engines.llmSection": "Notes & Q&A",
+        "settings.engines.llmBackendPicker": "Notes & Q&A engine",
+        "settings.engines.llmBackend.mlxNote": "Runs a general-purpose model on Apple Silicon, so notes, questions and flashcards need no API key. It downloads about 2.4 GB the first time, generates more slowly than the cloud, and shortens long transcripts to fit its context.",
+        "settings.engines.llmHelp": "Applies to notes, Q&A, flashcards, study tools and highlight explanations. Transcription and translation have their own engines.",
+        "settings.llm.notInstalled": "Language model not downloaded yet",
+        "settings.llm.ready": "Language model ready",
+        "settings.llm.download": "Download language model",
+        "settings.llm.downloading": "Preparing language model…",
+        "settings.llm.resume": "Resume download",
+        "settings.llm.partial": "Download was interrupted",
     ]
 
     private static let zh: [String: String] = [
@@ -733,6 +765,8 @@ enum L10n {
         "settings.engines.stt": "语音识别后端",
         "settings.engines.sttPicker": "语音识别引擎",
         "settings.engines.sttBackend.apple": "macOS 系统(本地)",
+        "settings.engines.sttBackend.openai": "OpenAI 兼容(云端)",
+        "settings.engines.sttBackend.local": "本地 Nemotron(流式，Apple 芯片)",
         "settings.engines.appleSpeechNote": "使用 Apple 系统自带的本地语音识别。首次使用某语言时会自动下载语言包。",
         "settings.engines.funasrNote": "在 Apple 芯片上运行本地 sherpa-onnx 服务，逐字流式出字，支持文件导入。首次使用会自动安装依赖并下载模型。所有语言由同一个模型 NVIDIA Nemotron 3.5（40 种语言，自带标点和大小写）单遍完成，字幕在说出后约 200 毫秒出现。",
         "localASR.installing": "正在准备本地引擎…",
@@ -914,6 +948,35 @@ enum L10n {
         "task.retranscribe.title": "重新转写",
         "task.retranscribe.done": "重新转写完成",
         "recovery.action.recoverAndRetranscribe": "恢复并重新转写",
+
+        // MARK: 设置、侧边栏与菜单
+        "settings.api.preset.noStt": "该供应商只提供对话模型，不提供语音转写。请将转写引擎切换为「系统语音识别」或本地引擎。",
+        "settings.api.preset.noKeyNeeded": "该服务运行在你自己的电脑上，不需要 API Key。",
+        "settings.api.keyOptional": "本地服务通常不需要 API Key，可以留空。",
+
+        "main.deleteSession.confirm.title": "删除该会话？",
+        "main.deleteSession.confirm.message": "“%@”及其逐字稿、笔记和录音将被永久删除。",
+        "main.deleteCourse.confirm.title": "删除该课程？",
+        "main.deleteCourse.confirm.message": "“%@”将被删除。其下的会话会保留，但变为未归类。",
+
+        "main.editCourse": "编辑课程…",
+        "course.field.name": "课程名称",
+        "course.field.semester": "学期",
+        "course.field.instructor": "授课教师",
+        "course.field.glossary": "术语表",
+        "course.field.notes": "备注",
+        "course.field.glossary.help": "每行一个术语，例如 `eigenvalue = 特征值`。翻译和生成笔记时会参考。",
+
+        "settings.engines.llmSection": "笔记与问答",
+        "settings.engines.llmBackendPicker": "笔记与问答引擎",
+        "settings.engines.llmBackend.mlxNote": "在 Apple 芯片上运行通用大模型，生成笔记、问答和卡片都不需要 API Key。首次使用约下载 2.4 GB，生成速度慢于云端，过长的逐字稿会被压缩以适配上下文。",
+        "settings.engines.llmHelp": "作用于笔记、问答、卡片、学习工具和重点讲解。转写与翻译各有独立的引擎设置。",
+        "settings.llm.notInstalled": "大模型尚未下载",
+        "settings.llm.ready": "大模型已就绪",
+        "settings.llm.download": "下载大模型",
+        "settings.llm.downloading": "正在准备大模型…",
+        "settings.llm.resume": "继续下载",
+        "settings.llm.partial": "下载未完成",
     ]
 }
 

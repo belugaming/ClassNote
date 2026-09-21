@@ -5,11 +5,17 @@ import UniformTypeIdentifiers
 /// per-course groups. Replaces the old three-column CourseListView +
 /// SessionListView split with a single two-column navigation structure.
 struct CourseSessionSidebarView: View {
+    @EnvironmentObject var appState: AppState
     @Binding var selectedSessionId: String?
     let totalSessionCount: Int
     let courses: [Course]
     let allSessions: [Session]
+    /// The session currently being recorded, if any. It stays visible and
+    /// movable, but deleting it would pull the .m4a out from under the writer
+    /// and cascade-delete the rows the pipeline is still inserting.
+    let recordingSessionId: String?
     let onCreateCourse: (String) -> Void
+    let onUpdateCourse: (Course) -> Void
     let onDeleteCourse: (String) -> Void
     let onStartSession: (String?) -> Void
     let onImport: ([URL], String?) -> Void
@@ -21,6 +27,9 @@ struct CourseSessionSidebarView: View {
     @State private var presentNewCourse = false
     @State private var newCourseName = ""
     @State private var importingCourseId: String?
+    @State private var editingCourse: Course?
+    @State private var sessionPendingDeletion: Session?
+    @State private var coursePendingDeletion: Course?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -66,6 +75,49 @@ struct CourseSessionSidebarView: View {
         }
         .sheet(isPresented: $presentNewCourse) {
             newCourseSheet
+        }
+        .sheet(item: $editingCourse) { course in
+            CourseEditorSheet(course: course) { updated in
+                onUpdateCourse(updated)
+                editingCourse = nil
+            }
+        }
+        .confirmationDialog(L10n.t("main.deleteSession.confirm.title"),
+                            isPresented: Binding(get: { sessionPendingDeletion != nil },
+                                                 set: { if !$0 { sessionPendingDeletion = nil } }),
+                            presenting: sessionPendingDeletion) { session in
+            Button(L10n.t("common.delete"), role: .destructive) {
+                // Clear the selection first, or the detail view spends a frame
+                // loading a row that is already gone.
+                if selectedSessionId == session.id { selectedSessionId = nil }
+                onDeleteSession(session.id)
+                sessionPendingDeletion = nil
+            }
+            Button(L10n.t("common.cancel"), role: .cancel) { sessionPendingDeletion = nil }
+        } message: { session in
+            Text(String(format: L10n.t("main.deleteSession.confirm.message"), session.title))
+        }
+        .confirmationDialog(L10n.t("main.deleteCourse.confirm.title"),
+                            isPresented: Binding(get: { coursePendingDeletion != nil },
+                                                 set: { if !$0 { coursePendingDeletion = nil } }),
+                            presenting: coursePendingDeletion) { course in
+            Button(L10n.t("common.delete"), role: .destructive) {
+                onDeleteCourse(course.id)
+                coursePendingDeletion = nil
+            }
+            Button(L10n.t("common.cancel"), role: .cancel) { coursePendingDeletion = nil }
+        } message: { course in
+            Text(String(format: L10n.t("main.deleteCourse.confirm.message"), course.name))
+        }
+        // The ⌘⇧N menu command only sets this flag; the sheet it is named after
+        // lives here, so this is where it has to be answered. `initial: true`
+        // consumes a request raised while no sidebar existed (window closed,
+        // Settings frontmost) — otherwise the flag would stay stuck at true and
+        // every later press would be a no-op true→true assignment.
+        .onChange(of: appState.presentNewCourseSheet, initial: true) { _, requested in
+            guard requested else { return }
+            presentNewCourse = true
+            appState.presentNewCourseSheet = false
         }
         .fileImporter(isPresented: Binding(get: { importingCourseId != nil || isImportingUnfiled },
                                             set: { if !$0 { importingCourseId = nil; isImportingUnfiled = false } }),
@@ -141,8 +193,13 @@ struct CourseSessionSidebarView: View {
                     Label(L10n.t("toolbar.newSession"), systemImage: "mic.circle.fill")
                 }
                 Divider()
+                Button {
+                    editingCourse = course
+                } label: {
+                    Label(L10n.t("main.editCourse"), systemImage: "pencil")
+                }
                 Button(role: .destructive) {
-                    onDeleteCourse(course.id)
+                    coursePendingDeletion = course
                 } label: {
                     Label(L10n.t("main.deleteCourse"), systemImage: "trash")
                 }
@@ -176,10 +233,11 @@ struct CourseSessionSidebarView: View {
         }
 
         Button(role: .destructive) {
-            onDeleteSession(session.id)
+            sessionPendingDeletion = session
         } label: {
             Label(L10n.t("main.deleteSession"), systemImage: "trash")
         }
+        .disabled(session.id == recordingSessionId)
     }
 
     private var newCourseSheet: some View {

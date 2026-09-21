@@ -176,28 +176,36 @@ struct ApiSettingsView: View {
     /// design language, and six arbitrary hues here made the first thing you see
     /// in Settings look like a swatch test. Which preset is active is shown by
     /// selection state instead, which is information the colours never conveyed.
-    private let providerPresets: [(label: String, base: String, stt: String, llm: String)] = [
-        ("OpenAI", "https://api.openai.com/v1", "whisper-1", "gpt-4o-mini"),
-        ("DeepSeek", "https://api.deepseek.com/v1", "whisper-1", "deepseek-chat"),
-        ("Groq", "https://api.groq.com/openai/v1", "whisper-large-v3", "llama-3.1-70b-versatile"),
-        ("硅基流动", "https://api.siliconflow.cn/v1", "FunAudioLLM/SenseVoiceSmall", "Qwen/Qwen2.5-7B-Instruct"),
-        ("Ollama", "http://localhost:11434/v1", "whisper-1", "llama3.1"),
-        ("LM Studio", "http://localhost:1234/v1", "whisper-1", "local-model"),
-    ]
+    ///
+    /// The table itself lives on `ApiConfig`, because the same rows answer
+    /// "does this endpoint need a key" for every engine — a question this screen
+    /// used to answer for itself and get wrong for loopback servers.
+    private var providerPresets: [ApiConfig.ProviderPreset] { ApiConfig.providerPresets }
+
+    /// The preset the stored base URL matches, if the user has not edited it.
+    private var activePreset: ApiConfig.ProviderPreset? {
+        providerPresets.first { $0.baseUrl == appState.apiConfig.baseUrl }
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
                 SettingsSection(title: L10n.t("settings.api.presets")) {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 8)], spacing: 8) {
-                        ForEach(providerPresets, id: \.label) { preset in
-                            let isActive = appState.apiConfig.baseUrl == preset.base
+                        ForEach(providerPresets) { preset in
+                            let isActive = appState.apiConfig.baseUrl == preset.baseUrl
                             Button {
                                 updateConfig(immediate: true) { config in
-                                    config.baseUrl = preset.base
-                                    config.sttModel = preset.stt
-                                    config.translationModel = preset.llm
-                                    config.llmModel = preset.llm
+                                    config.baseUrl = preset.baseUrl
+                                    // A provider that serves no transcription
+                                    // endpoint has no STT model to offer, and
+                                    // writing one only produces a 404 on the
+                                    // first recording. Leave the field alone.
+                                    if let sttModel = preset.sttModel {
+                                        config.sttModel = sttModel
+                                    }
+                                    config.translationModel = preset.chatModel
+                                    config.llmModel = preset.chatModel
                                 }
                             } label: {
                                 HStack(spacing: 6) {
@@ -224,6 +232,21 @@ struct ApiSettingsView: View {
                             .buttonStyle(.plain)
                         }
                     }
+
+                    if let active = activePreset {
+                        if active.sttModel == nil && appState.sttBackend == .openAICompatible {
+                            Label(L10n.t("settings.api.preset.noStt"), systemImage: "exclamationmark.triangle")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if !active.requiresApiKey {
+                            Label(L10n.t("settings.api.preset.noKeyNeeded"), systemImage: "info.circle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                 }
 
                 SettingsSection(title: L10n.t("settings.api.endpoint"),
@@ -235,6 +258,12 @@ struct ApiSettingsView: View {
                     LabeledRow(label: L10n.t("settings.api.key")) {
                         SecureField("sk-…", text: apiKeyBinding)
                             .textFieldStyle(.roundedBorder)
+                    }
+                    if !appState.apiConfig.requiresApiKey {
+                        Text(L10n.t("settings.api.keyOptional"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     if localNetworkDenied {
                         VStack(alignment: .leading, spacing: 6) {
@@ -270,6 +299,10 @@ struct ApiSettingsView: View {
                             TextField("en", text: sourceLanguageBinding)
                                 .textFieldStyle(.roundedBorder)
                                 .onSubmit { reloadEngineForLanguageChange() }
+                                // Committing a new language retires the warm
+                                // sidecar, which would kill the recording that
+                                // is streaming through it.
+                                .disabled(appState.isRecording && appState.sttBackend.isLocalSidecar)
                         }
                         LabeledRow(label: L10n.t("settings.api.target")) {
                             TextField("zh-Hans", text: targetLanguageBinding).textFieldStyle(.roundedBorder)
@@ -294,7 +327,7 @@ struct ApiSettingsView: View {
                             .frame(minWidth: 100)
                     }
                     .controlSize(.large)
-                    .disabled(appState.apiConfig.baseUrl.isEmpty || appState.apiConfig.apiKey.isEmpty)
+                    .disabled(appState.apiConfig.baseUrl.isEmpty || appState.apiConfig.isCloudCredentialMissing)
 
                     if !testStatus.isEmpty {
                         HStack(spacing: 4) {
@@ -443,18 +476,6 @@ struct ApiSettingsView: View {
     }
 }
 
-private struct LabeledRow<Content: View>: View {
-    let label: String
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(.caption.weight(.medium)).foregroundStyle(.secondary)
-            content
-        }
-    }
-}
-
 // MARK: - Engines
 
 struct EngineSettingsView: View {
@@ -471,6 +492,10 @@ struct EngineSettingsView: View {
                     }
                     .pickerStyle(.menu)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    // Switching engines retires the warm sidecar, and the live
+                    // pipeline is streaming through it: the recording would lose
+                    // its transcription for good, with no way back but stop/start.
+                    .disabled(appState.isRecording)
                     if appState.sttBackend == .appleSpeech {
                         Label(L10n.t("settings.engines.appleSpeechNote"), systemImage: "info.circle")
                             .font(.caption)
@@ -485,6 +510,12 @@ struct EngineSettingsView: View {
                         Label(L10n.t("settings.engines.nemotronNote"), systemImage: "arrow.down.circle")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                    }
+                    if appState.isRecording {
+                        Label(L10n.t("settings.engines.lockedWhileRecording"), systemImage: "lock")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     if appState.sttBackend.isLocalSidecar {
                         LocalEngineLatencyRow()
@@ -524,6 +555,25 @@ struct EngineSettingsView: View {
                         case .openAICompatible:
                             EmptyView()
                         }
+                    }
+                }
+
+                SettingsSection(title: L10n.t("settings.engines.llmSection"),
+                                footer: L10n.t("settings.engines.llmHelp")) {
+                    Picker(L10n.t("settings.engines.llmBackendPicker"), selection: $appState.llmBackend) {
+                        ForEach(LLMBackend.allCases) { backend in
+                            Text(backend.displayName).tag(backend)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    if appState.llmBackend == .localMLX {
+                        Label(L10n.t("settings.engines.llmBackend.mlxNote"), systemImage: "info.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        #if os(macOS)
+                        LocalLLMStatusRow()
+                        #endif
                     }
                 }
 
@@ -584,6 +634,12 @@ struct EngineSettingsView: View {
             guard appState.apiConfig.translationBackend != backend.rawValue else { return }
             var config = appState.apiConfig
             config.translationBackend = backend.rawValue
+            Task { await appState.saveConfig(config) }
+        }
+        .onChange(of: appState.llmBackend) { _, backend in
+            guard appState.apiConfig.llmBackend != backend.rawValue else { return }
+            var config = appState.apiConfig
+            config.llmBackend = backend.rawValue
             Task { await appState.saveConfig(config) }
         }
     }
@@ -778,6 +834,7 @@ extension LocalEngineStatusRow {
                         appState.isLocalEngineReady = false
                     }
                 }
+                .disabled(appState.isRecording)
             }
         }
     }
@@ -815,6 +872,7 @@ struct LocalTranslationStatusRow: View {
     @State private var stage = ""
     @State private var errorText = ""
     @State private var isReady = LocalMLXTranslatorProcess.isModelDownloaded
+    @State private var hasPartial = LocalMLXTranslatorProcess.hasPartialDownload
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -830,9 +888,15 @@ struct LocalTranslationStatusRow: View {
                     .font(.caption)
                     .foregroundStyle(.green)
             } else {
-                Label(L10n.t("settings.translation.notInstalled"), systemImage: "arrow.down.circle")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 4) {
+                    Label(L10n.t("settings.translation.notInstalled"), systemImage: "arrow.down.circle")
+                        .foregroundStyle(.orange)
+                    if hasPartial {
+                        Text(L10n.t("settings.translation.partial"))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .font(.caption)
             }
 
             if !errorText.isEmpty {
@@ -844,10 +908,22 @@ struct LocalTranslationStatusRow: View {
             }
 
             if !isReady {
-                Button(L10n.t("settings.translation.install")) { prepare() }
-                    .disabled(isPreparing)
+                Button(L10n.t(hasPartial ? "settings.translation.resume" : "settings.translation.install")) {
+                    prepare()
+                }
+                .disabled(isPreparing)
             }
         }
+        .onAppear { refreshInstallState() }
+    }
+
+    /// A `@State` initial value is evaluated once for the view's lifetime, so
+    /// without this the row keeps reporting whatever was true when the Engines
+    /// tab first appeared — including "ready" for a download that has since been
+    /// interrupted.
+    private func refreshInstallState() {
+        isReady = LocalMLXTranslatorProcess.isModelDownloaded
+        hasPartial = LocalMLXTranslatorProcess.hasPartialDownload
     }
 
     private func prepare() {
@@ -858,9 +934,92 @@ struct LocalTranslationStatusRow: View {
                 try await LocalMLXTranslatorProcess.shared.prewarm { text in
                     Task { @MainActor in stage = text }
                 }
+                // Trust a successful load over the file probe: a repo layout
+                // change must not make a working model look absent.
                 isReady = true
+                hasPartial = false
             } catch {
                 errorText = error.localizedDescription
+                refreshInstallState()
+            }
+            isPreparing = false
+        }
+    }
+}
+
+/// The same control for the notes/Q&A model.
+///
+/// A sibling rather than a generic row: the two sidecars share no protocol in
+/// Swift (each is its own actor with its own static probes), and the strings
+/// differ because one download is 1 GB and the other 2.4 GB.
+struct LocalLLMStatusRow: View {
+    @State private var isPreparing = false
+    @State private var stage = ""
+    @State private var errorText = ""
+    @State private var isReady = LocalMLXLLMProcess.isModelDownloaded
+    @State private var hasPartial = LocalMLXLLMProcess.hasPartialDownload
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if isPreparing {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(stage.isEmpty ? L10n.t("settings.llm.downloading") : stage)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            } else if isReady {
+                Label(L10n.t("settings.llm.ready"), systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label(L10n.t("settings.llm.notInstalled"), systemImage: "arrow.down.circle")
+                        .foregroundStyle(.orange)
+                    if hasPartial {
+                        Text(L10n.t("settings.llm.partial"))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .font(.caption)
+            }
+
+            if !errorText.isEmpty {
+                Text(errorText)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !isReady {
+                Button(L10n.t(hasPartial ? "settings.llm.resume" : "settings.llm.download")) {
+                    prepare()
+                }
+                .disabled(isPreparing)
+            }
+        }
+        .onAppear { refreshInstallState() }
+    }
+
+    private func refreshInstallState() {
+        isReady = LocalMLXLLMProcess.isModelDownloaded
+        hasPartial = LocalMLXLLMProcess.hasPartialDownload
+    }
+
+    private func prepare() {
+        isPreparing = true
+        errorText = ""
+        Task {
+            do {
+                try await LocalMLXLLMProcess.shared.prewarm { text in
+                    Task { @MainActor in stage = text }
+                }
+                isReady = true
+                hasPartial = false
+            } catch {
+                errorText = error.localizedDescription
+                refreshInstallState()
             }
             isPreparing = false
         }
@@ -884,6 +1043,9 @@ struct LocalEngineLatencyRow: View {
                 }
             }
             .pickerStyle(.segmented)
+            // Same reason as the engine picker: a new chunk size means a new
+            // model export, which means retiring the process mid-recording.
+            .disabled(appState.isRecording)
 
             Text(L10n.t("settings.engines.latency.note"))
                 .font(.caption)

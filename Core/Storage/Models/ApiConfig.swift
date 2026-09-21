@@ -8,7 +8,7 @@ struct ApiConfig: Codable, FetchableRecord, PersistableRecord, Hashable, Sendabl
     var sttModel: String
     var translationModel: String
     var llmModel: String
-    var sttBackend: String  // "openai" | "whisperkit" | "apple"
+    var sttBackend: String  // "openai" | "apple" | "funasr" (see SttBackend.resolve)
     var targetLanguage: String
     var sourceLanguage: String
     var translationBackend: String  // "openai" | "apple"

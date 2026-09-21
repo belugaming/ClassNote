@@ -251,3 +251,18 @@ struct SettingsSection<Content: View>: View {
         }
     }
 }
+
+/// Caption label above a control. Lives here rather than in Settings because the
+/// course editor builds the same field stack and duplicating it would let the two
+/// drift apart.
+struct LabeledRow<Content: View>: View {
+    let label: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(.caption.weight(.medium)).foregroundStyle(.secondary)
+            content
+        }
+    }
+}

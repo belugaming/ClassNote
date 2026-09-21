@@ -10,8 +10,9 @@ final class AppState: ObservableObject {
 
     @Published var isRecording: Bool = false
     @Published var currentSessionId: String? = nil
+    /// Raised by the ⌘⇧N menu command and lowered by the sidebar once it has
+    /// opened its new-course sheet.
     @Published var presentNewCourseSheet: Bool = false
-    @Published var presentPermissionsSheet: Bool = false
     @Published var apiConfig: ApiConfig = .default
     /// False until `loadConfig()` has read the stored config. `apiConfig` holds
     /// `.default` before that, so saving during this window would overwrite the
@@ -522,11 +523,6 @@ final class AppState: ObservableObject {
 
     /// Recovery banner's second action: stamp the interrupted session closed,
     /// then rebuild its transcript from the audio that was captured.
-    func recoverAndRetranscribe(_ session: Session) async {
-        await recoverInterruptedSession(session)
-        let refreshed = (try? await SessionRepository.shared.get(id: session.id)) ?? session
-        await retranscribe(session: refreshed)
-    }
 
     func saveTemporaryTranslationAsSession(courseId: String? = nil) async -> String? {
         guard orchestrator.isEphemeralTranslation,
@@ -662,9 +658,9 @@ enum SttBackend: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var displayName: String {
         switch self {
-        case .openAICompatible: return "OpenAI Compatible (Cloud)"
+        case .openAICompatible: return L10n.t("settings.engines.sttBackend.openai")
         case .appleSpeech: return L10n.t("settings.engines.sttBackend.apple")
-        case .funasr, .nemotronStreaming: return "Local Nemotron (Streaming, Apple Silicon)"
+        case .funasr, .nemotronStreaming: return L10n.t("settings.engines.sttBackend.local")
         }
     }
 

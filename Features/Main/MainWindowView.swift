@@ -6,6 +6,9 @@ struct MainWindowView: View {
     @State private var selectedSessionId: String? = nil
     @State private var searchText: String = ""
     @State private var showingSearchResults = false
+    /// Set when a search hit is clicked, so the detail view knows which segment
+    /// to scroll to. Carries a token, so clicking the same hit twice re-fires.
+    @State private var jumpTarget: SegmentJumpTarget?
     @State private var showingTaskCenter = false
     @State private var showingDiagnostics = false
     @State private var showingFirstLaunchGuide = false
@@ -21,7 +24,9 @@ struct MainWindowView: View {
                                       totalSessionCount: vm.totalSessionCount,
                                       courses: vm.courses,
                                       allSessions: vm.sessions(for: nil),
+                                      recordingSessionId: appState.isRecording ? appState.currentSessionId : nil,
                                       onCreateCourse: { vm.createCourse(name: $0) },
+                                      onUpdateCourse: { vm.updateCourse($0) },
                                       onDeleteCourse: { id in
                                           vm.deleteCourse(id: id)
                                       },
@@ -52,6 +57,22 @@ struct MainWindowView: View {
                                            selectedSessionId = interrupted.id
                                        }
                                    },
+                                   recoverAndRetranscribe: {
+                                       Task {
+                                           // Recovering is instant, re-transcribing takes minutes.
+                                           // Refresh and select before the long half, or the banner
+                                           // keeps its stale badge for the whole run and the
+                                           // selection jumps back here when the job finally ends.
+                                           await appState.recoverInterruptedSession(interrupted)
+                                           await vm.refresh()
+                                           selectedSessionId = interrupted.id
+                                           // Re-read the row that recovery just stamped closed, so
+                                           // the re-transcription sees the recovered state.
+                                           let refreshed = (try? await SessionRepository.shared.get(id: interrupted.id)) ?? interrupted
+                                           await appState.retranscribe(session: refreshed)
+                                           await vm.refresh()
+                                       }
+                                   },
                                    dismiss: {
                                        Task {
                                            await appState.dismissInterruptedSession(interrupted)
@@ -62,11 +83,19 @@ struct MainWindowView: View {
 
                 Group {
                     if showingSearchResults {
-                        SearchResultsView(query: searchText)
+                        SearchResultsView(query: searchText) { target in
+                            jumpTarget = target
+                            selectedSessionId = target.sessionId
+                            showingSearchResults = false
+                        }
                     } else if let sid = selectedSessionId {
-                        SessionDetailView(sessionId: sid)
+                        // .id(sid) gives every session its own view model, so a
+                        // generation started for one session can never publish
+                        // into the next one.
+                        SessionDetailView(sessionId: sid, jumpTarget: jumpTarget)
+                            .id(sid)
                     } else {
-                        MainEmptyStateView(isApiKeyMissing: appState.apiConfig.apiKey.isEmpty && appState.sttBackend == .openAICompatible,
+                        MainEmptyStateView(isCredentialMissing: appState.isMissingCloudCredentialForRecording,
                                            onStart: {
                                                Task { await vm.startSession(courseId: nil, source: .microphone) }
                                            },
@@ -85,6 +114,13 @@ struct MainWindowView: View {
         }
         .onChange(of: searchText) { _, newValue in
             if newValue.isEmpty { showingSearchResults = false }
+        }
+        // A jump belongs to the click that produced it. `onOpen` sets the target
+        // before it changes the selection, so this only ever clears one left over
+        // from an earlier search — otherwise re-opening that session normally
+        // would scroll to the old hit and force the transcript tab again.
+        .onChange(of: selectedSessionId) { _, newValue in
+            if let target = jumpTarget, target.sessionId != newValue { jumpTarget = nil }
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
@@ -191,8 +227,10 @@ struct MainWindowView: View {
         #endif
     }
 
+    /// A missing key only blocks recording when a cloud engine is part of it —
+    /// a fully local setup, or a keyless loopback endpoint, needs none.
     private var isEngineUnconfigured: Bool {
-        appState.apiConfig.apiKey.isEmpty && appState.sttBackend == .openAICompatible
+        appState.isMissingCloudCredentialForRecording
     }
 
     private var sourceBinding: Binding<AudioSourceKind> {
@@ -372,7 +410,10 @@ private struct FirstLaunchGuideStep {
 }
 
 struct MainEmptyStateView: View {
-    let isApiKeyMissing: Bool
+    /// True when recording would need a cloud key the app does not have. Not
+    /// "the key field is empty": a local engine, or a loopback endpoint, needs
+    /// no key and must not be blocked here.
+    let isCredentialMissing: Bool
     let onStart: () -> Void
     let onImport: () -> Void
 
@@ -409,7 +450,7 @@ struct MainEmptyStateView: View {
                 }
                 .controlSize(.large)
                 .prominentAccentButton()
-                .disabled(isApiKeyMissing)
+                .disabled(isCredentialMissing)
 
                 Button {
                     onImport()
@@ -420,7 +461,7 @@ struct MainEmptyStateView: View {
                 .controlSize(.large)
             }
 
-            if isApiKeyMissing {
+            if isCredentialMissing {
                 Label(L10n.t("toolbar.help.configureKey"), systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(Theme.warning)
@@ -438,6 +479,7 @@ struct MainEmptyStateView: View {
 private struct RecoveryBanner: View {
     let session: Session
     let recover: () -> Void
+    let recoverAndRetranscribe: () -> Void
     let dismiss: () -> Void
 
     var body: some View {
@@ -458,6 +500,14 @@ private struct RecoveryBanner: View {
                 dismiss()
             } label: {
                 Label(L10n.t("recovery.action.dismiss"), systemImage: "xmark")
+            }
+            // Recovering only stamps the session closed; whatever the crash
+            // cost its transcript is still missing, and the audio is right
+            // there. Offer both, with the cheap one as the default.
+            Button {
+                recoverAndRetranscribe()
+            } label: {
+                Label(L10n.t("recovery.action.recoverAndRetranscribe"), systemImage: "waveform.path.badge.plus")
             }
             Button {
                 recover()
@@ -518,16 +568,37 @@ final class MainWindowViewModel: ObservableObject {
         }
     }
 
+    func updateCourse(_ course: Course) {
+        Task {
+            do {
+                try await CourseRepository.shared.update(course)
+            } catch {
+                AppState.shared.setError(error.localizedDescription)
+            }
+            await refresh()
+        }
+    }
+
     func deleteCourse(id: String) {
         Task {
-            try? await CourseRepository.shared.delete(id: id)
+            do {
+                try await CourseRepository.shared.delete(id: id)
+            } catch {
+                AppState.shared.setError(error.localizedDescription)
+            }
             await refresh()
         }
     }
 
     func deleteSession(id: String) {
         Task {
-            try? await SessionRepository.shared.delete(id: id)
+            do {
+                // The repository refuses to delete a recording session; that
+                // refusal is the message the user needs, not a silent no-op.
+                try await SessionRepository.shared.delete(id: id)
+            } catch {
+                AppState.shared.setError(error.localizedDescription)
+            }
             await refresh()
         }
     }

@@ -89,13 +89,12 @@ struct ClassNoteApp: App {
         .defaultSize(width: 1240, height: 780)
         .commands {
             CommandGroup(replacing: .newItem) {
+                // The flag is answered by CourseSessionSidebarView, which owns
+                // the sheet this command is named after.
                 Button("New Course") { appState.presentNewCourseSheet = true }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("New Session") { appState.startNewSession() }
                     .keyboardShortcut("n", modifiers: .command)
-            }
-            CommandGroup(after: .appInfo) {
-                Button("Check Permissions…") { appState.presentPermissionsSheet = true }
             }
         }
 
