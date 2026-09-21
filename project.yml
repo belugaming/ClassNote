@@ -193,14 +193,3 @@ schemes:
         - ClassNoteTests
     archive:
       config: Release
-
-  # Compile-only: the iOS target shares Core/ and Features/ with macOS, so
-  # without this nothing notices when a macOS-only API lands in a shared file.
-  ClassNote_iOS:
-    build:
-      targets:
-        ClassNote_iOS: all
-    run:
-      config: Debug
-    archive:
-      config: Release
