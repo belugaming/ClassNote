@@ -165,6 +165,12 @@ final class AppState: ObservableObject {
             self.sttBackend = SttBackend.resolve(self.apiConfig.sttBackend)
             self.translationBackend = TranslationBackend(rawValue: self.apiConfig.translationBackend) ?? .openAICompatible
             self.llmBackend = LLMBackend(rawValue: self.apiConfig.llmBackend) ?? .openAICompatible
+        } catch is CancellationError {
+            // `ApiConfigRepository.save` runs its write in an unstructured task,
+            // so the settings have landed; only the read-back above is
+            // cancellable, and `SettingsView`'s debounced autosave task is
+            // cancelled on the next keystroke. Nothing failed — the next save
+            // refreshes the mirrored fields.
         } catch {
             setError("Save settings failed: \(error.localizedDescription)")
         }

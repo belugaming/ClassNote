@@ -308,6 +308,14 @@ actor SegmentRepository {
     /// row ids in insertion order. A re-transcription that fails halfway must not
     /// be able to leave the session with neither the old transcript nor a
     /// complete new one. The FTS delete/insert triggers keep the index in step.
+    ///
+    /// Deliberately *not* wrapped in an unstructured `Task` like the writes
+    /// above: cancelling a re-transcription must leave the previous transcript
+    /// in place, which is exactly what GRDB's rollback-on-cancellation does.
+    /// No test covers that rollback —
+    /// `testCancelledRetranscriptionLeavesTheSessionTranscribed` cancels inside
+    /// the segment stream, so `Task.checkCancellation()` in the orchestrator
+    /// throws before this call is ever reached.
     func replaceAll(sessionId: String, with segments: [Segment]) async throws -> [Int64] {
         try await Database.shared.dbPool.write { db -> [Int64] in
             try db.execute(sql: "DELETE FROM segment WHERE session_id=?", arguments: [sessionId])
@@ -404,6 +412,10 @@ actor HighlightRepository {
         }
     }
 
+    /// Runs inside an unstructured `Task`: the caller is the explanation
+    /// streaming task, which `SessionDetailViewModel.stream` cancels whenever a
+    /// new explanation starts. The text is already complete by the time we get
+    /// here, so cancellation must not roll the finished answer back.
     func updateExplanation(id: Int64,
                            rangeStartMs: Int64,
                            rangeEndMs: Int64,
@@ -411,18 +423,20 @@ actor HighlightRepository {
                            model: String,
                            markdown: String,
                            generatedAt: Int64) async throws {
-        try await Database.shared.dbPool.write { db in
-            try db.execute(sql: """
-                UPDATE highlight
-                SET range_start_ms=?, range_end_ms=?,
-                    explanation_md=?, explanation_prompt=?, explanation_model=?,
-                    explanation_generated_at=?
-                WHERE id=?
-                """,
-                arguments: [rangeStartMs, rangeEndMs,
-                            markdown, promptKey, model,
-                            generatedAt, id])
-        }
+        try await Task {
+            try await Database.shared.dbPool.write { db in
+                try db.execute(sql: """
+                    UPDATE highlight
+                    SET range_start_ms=?, range_end_ms=?,
+                        explanation_md=?, explanation_prompt=?, explanation_model=?,
+                        explanation_generated_at=?
+                    WHERE id=?
+                    """,
+                    arguments: [rangeStartMs, rangeEndMs,
+                                markdown, promptKey, model,
+                                generatedAt, id])
+            }
+        }.value
     }
 
     func updateRange(id: Int64, rangeStartMs: Int64, rangeEndMs: Int64) async throws {
@@ -669,13 +683,19 @@ actor ApiConfigRepository {
         var stored = cfg
         stored.id = 1
         let databaseConfig = stored
-        try await Database.shared.dbPool.write { db in
-            try databaseConfig.insert(db, onConflict: .replace)
-            // REPLACE is DELETE+INSERT and ApiConfig's CodingKeys do not cover
-            // configured_at, so the provenance stamp has to be rewritten after
-            // the insert, inside the same transaction.
-            try db.execute(sql: "UPDATE api_config SET configured_at=? WHERE id=1",
-                           arguments: [Int64(Date().timeIntervalSince1970 * 1000)])
-        }
+        // Unstructured, like the session and segment writes: `SettingsView`'s
+        // debounced autosave task is cancelled on the next keystroke and on
+        // disappear, and a settings save that reached the database has to stay
+        // there. The UserDefaults mirror above is already unconditional.
+        try await Task {
+            try await Database.shared.dbPool.write { db in
+                try databaseConfig.insert(db, onConflict: .replace)
+                // REPLACE is DELETE+INSERT and ApiConfig's CodingKeys do not
+                // cover configured_at, so the provenance stamp has to be
+                // rewritten after the insert, inside the same transaction.
+                try db.execute(sql: "UPDATE api_config SET configured_at=? WHERE id=1",
+                               arguments: [Int64(Date().timeIntervalSince1970 * 1000)])
+            }
+        }.value
     }
 }

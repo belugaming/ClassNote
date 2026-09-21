@@ -123,6 +123,11 @@ struct SearchResultsView: View {
         do {
             let rows = try await SegmentRepository.shared.searchFTS(query: q, limit: 200)
             self.results = rows.map { SearchHit(segment: $0.segment, sessionTitle: $0.sessionTitle) }
+        } catch is CancellationError {
+            // `.task(id: query)` cancels the previous search on every keystroke,
+            // and a cancelled GRDB read throws rather than running on to a
+            // discarded result. That is not a failure, and the newer search owns
+            // `results` by now, so leave both the banner and the list alone.
         } catch {
             AppState.shared.setError("Search failed: \(error.localizedDescription)")
             self.results = []
