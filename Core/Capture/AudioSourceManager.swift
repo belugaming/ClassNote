@@ -853,11 +853,16 @@ final class FileWriter: @unchecked Sendable {
             // atom. Both have to be set before startWriting().
             w.movieFragmentInterval = CMTime(seconds: 5, preferredTimescale: 600)
             w.initialMovieFragmentInterval = CMTime(seconds: 2, preferredTimescale: 600)
+            // AAC-LC's encoder only accepts a bit rate within the range it
+            // supports for the sample rate and channel count; 32 kbps is above
+            // the range for 16 kHz mono and made codec initialisation fail
+            // ("Cannot Encode Media"). 32 kbps is the usual figure for speech
+            // at this rate.
             let settings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
                 AVSampleRateKey: Double(sampleRate),
                 AVNumberOfChannelsKey: 1,
-                AVEncoderBitRateKey: 64_000
+                AVEncoderBitRateKey: 32_000
             ]
             // Do not pass the PCM source format as a hint while asking
             // AVAssetWriter to encode AAC. On newer macOS releases this can
