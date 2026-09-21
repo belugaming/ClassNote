@@ -6,6 +6,7 @@ on:
     tags-ignore: ["v*"]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -21,7 +22,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_26.2.app
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.2.app 2>/dev/null \
+            || sudo xcode-select -s "$(ls -d /Applications/Xcode_2*.app | sort -V | tail -1)"
+          xcodebuild -version
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -38,6 +42,7 @@ jobs:
 
       - name: Resolve Swift package dependencies
         run: |
+          mkdir -p build
           xcodebuild -resolvePackageDependencies \
             -project ClassNote.xcodeproj \
             -scheme ClassNote \
@@ -45,7 +50,8 @@ jobs:
 
       - name: Build (Debug, with tests)
         run: |
-          set -o pipefail
+          mkdir -p build
+          set +e
           xcodebuild -project ClassNote.xcodeproj \
                      -scheme ClassNote \
                      -configuration Debug \
@@ -53,18 +59,24 @@ jobs:
                      -derivedDataPath build/DerivedData \
                      -clonedSourcePackagesDirPath build/SourcePackages \
                      -skipMacroValidation \
-                     build-for-testing 2>&1 | tee build/xcodebuild-build.log | grep -E "error:|warning: .*(unused|never|deprecated|Sendable|actor)|BUILD|\*\* " || true
-          # Fail on real compiler errors even if the grep above swallowed the exit code.
-          if grep -qE "(error:|\*\* BUILD FAILED \*\*)" build/xcodebuild-build.log; then
-            echo "::group::Errors"
-            grep -nE "error:" build/xcodebuild-build.log | sort -u | head -200
+                     build-for-testing 2>&1 \
+            | tee build/xcodebuild-build.log \
+            | grep -E "^/.*:[0-9]+:[0-9]+: (error|warning):|^(ld|clang): error:|^\*\* "
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::group::Compiler errors"
+            grep -nE "^/.*:[0-9]+:[0-9]+: (error|fatal error):|^(ld|clang): error:|error: " \
+              build/xcodebuild-build.log | sort -u | head -200
             echo "::endgroup::"
-            exit 1
           fi
+          # Warning count is informational; strict-concurrency work tracks it.
+          echo "warnings: $(grep -cE '^/.*:[0-9]+:[0-9]+: warning:' build/xcodebuild-build.log || true)"
+          exit $status
 
       - name: Run unit + integration tests
         run: |
-          set -o pipefail
+          set +e
           xcodebuild -project ClassNote.xcodeproj \
                      -scheme ClassNote \
                      -configuration Debug \
@@ -73,16 +85,24 @@ jobs:
                      -clonedSourcePackagesDirPath build/SourcePackages \
                      -skipMacroValidation \
                      -resultBundlePath build/TestResults.xcresult \
-                     test-without-building 2>&1 | tee build/xcodebuild-test.log | grep -E "Test Case|Test Suite|error:|failed|passed|\*\* " || true
-          if grep -qE "\*\* TEST (EXECUTE )?FAILED \*\*" build/xcodebuild-test.log; then
+                     test-without-building 2>&1 \
+            | tee build/xcodebuild-test.log \
+            | grep -E "Test Case .* (passed|failed)|Test Suite .* (passed|failed)|error:|^\*\* "
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
             echo "::group::Failures"
             grep -nE "error:|failed" build/xcodebuild-test.log | head -200
             echo "::endgroup::"
-            exit 1
+            exit $status
           fi
-          grep -qE "\*\* TEST (EXECUTE )?SUCCEEDED \*\*" build/xcodebuild-test.log
+          # The exit status is authoritative; this only guards against a run where
+          # the bundle failed to load and zero tests executed.
+          executed=$(grep -cE "^Test Case .* passed" build/xcodebuild-test.log || true)
+          echo "tests passed: $executed"
+          [ "$executed" -gt 0 ]
 
-      - name: Upload logs
+      - name: Upload logs and result bundle
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -90,6 +110,7 @@ jobs:
           path: |
             build/xcodebuild-build.log
             build/xcodebuild-test.log
+            build/TestResults.xcresult
           if-no-files-found: ignore
 
   python:
@@ -110,8 +131,29 @@ jobs:
 
       - name: Syntax check sidecars
         run: |
-          python -m py_compile Scripts/asr_server.py Scripts/translate_server.py
-          python -m pyflakes Scripts/asr_server.py Scripts/translate_server.py Tests/PythonTests/*.py
+          python -m py_compile Scripts/*.py
+          python -m pyflakes Scripts/*.py Tests/PythonTests/*.py
 
       - name: Run tests
         run: python -m unittest discover -s Tests/PythonTests -v
+
+      - name: Report HuggingFace model revisions (informational)
+        continue-on-error: true
+        run: |
+          python -m pip install --quiet huggingface_hub
+          python - <<'EOF'
+          from huggingface_hub import HfApi
+          api = HfApi()
+          repos = [f"csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-{c}ms-int8-2026-06-11"
+                   for c in (80, 160, 320, 560, 1120)]
+          repos += ["csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12",
+                    "mlx-community/Hy-MT2-1.8B-4bit",
+                    "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+                    "mlx-community/Qwen3-8B-4bit"]
+          for r in repos:
+              try:
+                  info = api.model_info(r)
+                  print(f"{r} sha={info.sha} files={[s.rfilename for s in info.siblings][:10]}")
+              except Exception as e:
+                  print(f"{r} ERROR {type(e).__name__}: {e}")
+          EOF
