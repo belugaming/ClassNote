@@ -90,10 +90,13 @@ final class HuggingFaceCacheTests: XCTestCase {
         XCTAssertFalse(HuggingFaceCache.snapshotIsComplete(at: snapshot))
     }
 
-    func testWeightsWithoutTokenizerIsIncomplete() throws {
+    /// The tokenizer's file name differs between model families
+    /// (tokenizer.json, tokenizer.model, a tiktoken file), so it is deliberately
+    /// not required — config plus weights is what decides.
+    func testWeightsWithoutTokenizerIsStillComplete() throws {
         try write("config.json")
         try write("model.safetensors")
-        XCTAssertFalse(HuggingFaceCache.snapshotIsComplete(at: snapshot))
+        XCTAssertTrue(HuggingFaceCache.snapshotIsComplete(at: snapshot))
     }
 
     func testCompleteSnapshot() throws {
@@ -106,10 +109,9 @@ final class HuggingFaceCacheTests: XCTestCase {
     /// A pointer file whose blob never landed: `fileExists` resolves the symlink,
     /// so the snapshot must read as incomplete.
     func testDanglingPointerIsIncomplete() throws {
-        try write("config.json")
         try write("model.safetensors")
         try FileManager.default.createSymbolicLink(
-            atPath: snapshot.appendingPathComponent("tokenizer.json").path,
+            atPath: snapshot.appendingPathComponent("config.json").path,
             withDestinationPath: snapshot.appendingPathComponent("../blobs/missing").path)
         XCTAssertFalse(HuggingFaceCache.snapshotIsComplete(at: snapshot))
     }

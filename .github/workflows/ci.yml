@@ -102,7 +102,7 @@ jobs:
           echo "tests passed: $executed"
           [ "$executed" -gt 0 ]
 
-      - name: Upload logs and result bundle
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -110,7 +110,15 @@ jobs:
           path: |
             build/xcodebuild-build.log
             build/xcodebuild-test.log
-            build/TestResults.xcresult
+          if-no-files-found: ignore
+
+      # ~90 MB per run, so only when there is something to diagnose.
+      - name: Upload result bundle
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: build/TestResults.xcresult
           if-no-files-found: ignore
 
   python:
