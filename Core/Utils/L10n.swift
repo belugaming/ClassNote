@@ -13,11 +13,11 @@ enum L10n {
 
     static var override: LanguageOverride {
         get {
-            let raw = UserDefaults.standard.string(forKey: userOverrideKey) ?? "system"
+            let raw = AppEnvironment.defaults.string(forKey: userOverrideKey) ?? "system"
             return LanguageOverride(rawValue: raw) ?? .system
         }
         set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: userOverrideKey)
+            AppEnvironment.defaults.set(newValue.rawValue, forKey: userOverrideKey)
         }
     }
 

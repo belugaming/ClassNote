@@ -24,7 +24,7 @@ enum LocalEngineLatency: String, CaseIterable, Identifiable {
     static let `default`: LocalEngineLatency = .ms160
 
     static var current: LocalEngineLatency {
-        guard let raw = UserDefaults.standard.string(forKey: storageKey),
+        guard let raw = AppEnvironment.defaults.string(forKey: storageKey),
               let value = LocalEngineLatency(rawValue: raw) else { return .default }
         return value
     }

@@ -15,7 +15,7 @@ struct MainWindowView: View {
     #if os(iOS)
     @State private var showingSettings = false
     #endif
-    @AppStorage("hasCompletedFirstLaunchTutorial.v1") private var hasCompletedFirstLaunchTutorial = false
+    @AppStorage("hasCompletedFirstLaunchTutorial.v1", store: AppEnvironment.defaults) private var hasCompletedFirstLaunchTutorial = false
     private let launcher = RecordingLauncher()
 
     var body: some View {

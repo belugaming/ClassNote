@@ -91,8 +91,10 @@ final class DatabaseTests: XCTestCase {
         try Database.shared.setup()
         let course = Course.new(name: "Test Course")
         try await CourseRepository.shared.insert(course)
+        addTeardownBlock { try? await CourseRepository.shared.delete(id: course.id) }
         let session = Session.new(courseId: course.id, title: "Test session")
         try await SessionRepository.shared.insert(session)
+        addTeardownBlock { try? await SessionRepository.shared.delete(id: session.id, force: true) }
 
         let seg = Segment(id: nil, sessionId: session.id, startMs: 0, endMs: 1000,
                            speakerId: nil, textOriginal: "The quick brown fox jumps over the lazy dog",
@@ -103,10 +105,6 @@ final class DatabaseTests: XCTestCase {
 
         let hits = try await SegmentRepository.shared.searchFTS(query: "brown", limit: 10)
         XCTAssertTrue(hits.contains(where: { $0.segment.id == id }))
-
-        // Cleanup
-        try await SessionRepository.shared.delete(id: session.id, force: true)
-        try await CourseRepository.shared.delete(id: course.id)
     }
 
     func testSessionCanMoveBetweenCoursesAndUnfiled() async throws {
@@ -115,9 +113,14 @@ final class DatabaseTests: XCTestCase {
         let targetCourse = Course.new(name: "Target Course")
         try await CourseRepository.shared.insert(sourceCourse)
         try await CourseRepository.shared.insert(targetCourse)
+        addTeardownBlock {
+            try? await CourseRepository.shared.delete(id: sourceCourse.id)
+            try? await CourseRepository.shared.delete(id: targetCourse.id)
+        }
 
         let session = Session.new(courseId: sourceCourse.id, title: "Movable session")
         try await SessionRepository.shared.insert(session)
+        addTeardownBlock { try? await SessionRepository.shared.delete(id: session.id, force: true) }
 
         try await SessionRepository.shared.move(id: session.id, toCourseId: targetCourse.id)
         var reloaded = try await SessionRepository.shared.get(id: session.id)
@@ -126,14 +129,16 @@ final class DatabaseTests: XCTestCase {
         try await SessionRepository.shared.move(id: session.id, toCourseId: nil)
         reloaded = try await SessionRepository.shared.get(id: session.id)
         XCTAssertNil(reloaded?.courseId)
-
-        try await SessionRepository.shared.delete(id: session.id, force: true)
-        try await CourseRepository.shared.delete(id: sourceCourse.id)
-        try await CourseRepository.shared.delete(id: targetCourse.id)
     }
 
     func testApiConfigPersistence() async throws {
         try Database.shared.setup()
+        // Registered before the first write: an assertion does not abort the
+        // test, but any `try` below can, and the restore has to run either way.
+        addTeardownBlock {
+            try? await ApiConfigRepository.shared.save(.default)
+            ApiConfigBackupStore.clear()
+        }
         var c = try await ApiConfigRepository.shared.load()
         c.baseUrl = "https://example.test/v1"
         c.apiKey = "test-secret-key-do-not-keep"
@@ -151,7 +156,10 @@ final class DatabaseTests: XCTestCase {
         XCTAssertEqual(reloaded.sttModel, "test-stt-model")
         XCTAssertEqual(reloaded.translationModel, "test-translation-model")
         XCTAssertEqual(reloaded.llmModel, "test-llm-model")
+        // A rawValue no backend answers to any more: it must survive the round
+        // trip byte for byte and only be folded onto the cloud engine on decode.
         XCTAssertEqual(reloaded.sttBackend, "whisperkit")
+        XCTAssertEqual(SttBackend.resolve(reloaded.sttBackend), .openAICompatible)
         XCTAssertEqual(reloaded.targetLanguage, "ja")
         XCTAssertEqual(reloaded.sourceLanguage, "")
         XCTAssertEqual(reloaded.redactedKey, "test…keep")
@@ -160,14 +168,14 @@ final class DatabaseTests: XCTestCase {
             try String.fetchOne(db, sql: "SELECT api_key FROM api_config WHERE id=1") ?? ""
         }
         XCTAssertEqual(rawDatabaseKey, "test-secret-key-do-not-keep")
-
-        // Restore default
-        try await ApiConfigRepository.shared.save(.default)
-        ApiConfigBackupStore.clear()
     }
 
     func testApiConfigRestoresNonSecretFieldsFromBackup() async throws {
         try Database.shared.setup()
+        addTeardownBlock {
+            try? await ApiConfigRepository.shared.save(.default)
+            ApiConfigBackupStore.clear()
+        }
         var custom = ApiConfig.default
         custom.baseUrl = "https://backup.example.test/v1"
         custom.apiKey = "backup-key"
@@ -193,17 +201,19 @@ final class DatabaseTests: XCTestCase {
         XCTAssertEqual(restored.translationModel, "backup-translation")
         XCTAssertEqual(restored.llmModel, "backup-llm")
         XCTAssertEqual(restored.sttBackend, "whisperkit")
+        XCTAssertEqual(SttBackend.resolve(restored.sttBackend), .openAICompatible)
         XCTAssertEqual(restored.targetLanguage, "ko")
         XCTAssertEqual(restored.sourceLanguage, "auto")
-
-        try await ApiConfigRepository.shared.save(.default)
-        ApiConfigBackupStore.clear()
     }
 
     func testDeletingSessionRemovesManagedRecordingFile() async throws {
         try Database.shared.setup()
         let session = Session.new(courseId: nil, title: "Delete recording")
         let url = AppBootstrap.recordingURL(sessionId: session.id)
+        addTeardownBlock {
+            try? await SessionRepository.shared.delete(id: session.id, force: true)
+            try? FileManager.default.removeItem(at: url)
+        }
         try Data("audio".utf8).write(to: url)
         var saved = session
         saved.audioPath = url.path
@@ -236,6 +246,7 @@ final class DatabaseTests: XCTestCase {
         try Database.shared.setup()
         let session = Session.new(courseId: nil, title: "Flashcard source")
         try await SessionRepository.shared.insert(session)
+        addTeardownBlock { try? await SessionRepository.shared.delete(id: session.id, force: true) }
 
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         let cards = [
@@ -247,8 +258,6 @@ final class DatabaseTests: XCTestCase {
         let loaded = try await FlashcardRepository.shared.all(sessionId: session.id)
         XCTAssertEqual(loaded.map(\.front), ["What is ATP?", "Define osmosis"])
         XCTAssertEqual(loaded.map(\.sortOrder), [0, 1])
-
-        try await SessionRepository.shared.delete(id: session.id, force: true)
     }
 
     func testFlashcardsMarkdownExport() {
@@ -299,6 +308,7 @@ final class DatabaseTests: XCTestCase {
         try Database.shared.setup()
         let session = Session.new(courseId: nil, title: "Study tool source")
         try await SessionRepository.shared.insert(session)
+        addTeardownBlock { try? await SessionRepository.shared.delete(id: session.id, force: true) }
 
         let result = StudyToolResult(id: UUID().uuidString,
                                      sessionId: session.id,
@@ -310,14 +320,13 @@ final class DatabaseTests: XCTestCase {
 
         let loaded = try await StudyToolResultRepository.shared.get(sessionId: session.id, toolId: "catch_up")
         XCTAssertEqual(loaded?.markdown, "# Catch up")
-
-        try await SessionRepository.shared.delete(id: session.id, force: true)
     }
 
     func testNoteDeleteRemovesCurrentAndVersions() async throws {
         try Database.shared.setup()
         let session = Session.new(courseId: nil, title: "Note delete source")
         try await SessionRepository.shared.insert(session)
+        addTeardownBlock { try? await SessionRepository.shared.delete(id: session.id, force: true) }
 
         let note = Note(id: UUID().uuidString,
                         sessionId: session.id,
@@ -336,14 +345,13 @@ final class DatabaseTests: XCTestCase {
         let deletedVersions = try await NoteRepository.shared.versions(sessionId: session.id)
         XCTAssertNil(deletedNote)
         XCTAssertEqual(deletedVersions.count, 0)
-
-        try await SessionRepository.shared.delete(id: session.id, force: true)
     }
 
     func testQAMessagePersistenceAndDeletion() async throws {
         try Database.shared.setup()
         let session = Session.new(courseId: nil, title: "QA source")
         try await SessionRepository.shared.insert(session)
+        addTeardownBlock { try? await SessionRepository.shared.delete(id: session.id, force: true) }
 
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         let user = QAMessage(id: UUID().uuidString,
@@ -371,8 +379,6 @@ final class DatabaseTests: XCTestCase {
         try await QAMessageRepository.shared.deleteAll(sessionId: session.id)
         messages = try await QAMessageRepository.shared.all(sessionId: session.id)
         XCTAssertTrue(messages.isEmpty)
-
-        try await SessionRepository.shared.delete(id: session.id, force: true)
     }
 }
 

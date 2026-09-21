@@ -1,7 +1,12 @@
 import Foundation
 
 enum AppBootstrap {
+    /// Under test the host app must not touch the user's data: the test bundle
+    /// is injected into the real app, so this would otherwise open their
+    /// database and bind their global hotkeys on every ⌘U. Tests that need the
+    /// database call `Database.shared.setup()` themselves.
     static func run() {
+        guard !AppEnvironment.isRunningTests else { return }
         do {
             try Database.shared.setup()
         } catch {
@@ -12,17 +17,27 @@ enum AppBootstrap {
         #endif
     }
 
-    static var applicationSupportURL: URL {
+    /// The one place that answers "where does ClassNote keep its data" — the
+    /// database, the recordings, the venv and the provisioned interpreter all
+    /// hang off it, so redirecting it redirects them together. Resolved once:
+    /// whichever caller asks first fixes the path for the whole process, which
+    /// is what keeps a mid-run change from splitting the data across two roots.
+    static let applicationSupportURL: URL = {
+        if let override = AppEnvironment.dataDirectoryOverride { return ensuredDirectory(override) }
+        if AppEnvironment.isRunningTests { return ensuredDirectory(AppEnvironment.testDataDirectory) }
         let fm = FileManager.default
         let base = (try? fm.url(for: .applicationSupportDirectory,
                                 in: .userDomainMask,
                                 appropriateFor: nil,
                                 create: true)) ?? fm.temporaryDirectory
-        let dir = base.appendingPathComponent("ClassNote", isDirectory: true)
-        if !fm.fileExists(atPath: dir.path) {
-            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return ensuredDirectory(base.appendingPathComponent("ClassNote", isDirectory: true))
+    }()
+
+    private static func ensuredDirectory(_ url: URL) -> URL {
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         }
-        return dir
+        return url
     }
 
     static var recordingsURL: URL {

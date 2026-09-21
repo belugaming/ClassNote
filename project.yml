@@ -50,7 +50,7 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: ClassNote
-        CFBundleShortVersionString: "0.12.1"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleIconName: AppIcon
         CFBundleLocalizations:
           - en
@@ -119,7 +119,7 @@ targets:
       path: App/Info-iOS.plist
       properties:
         CFBundleDisplayName: ClassNote
-        CFBundleShortVersionString: "0.12.1"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleIconName: AppIcon
         CFBundleLocalizations:
           - en
@@ -180,7 +180,22 @@ schemes:
       config: Debug
     test:
       config: Debug
+      # Belt and braces for AppEnvironment.isRunningTests: the XCTest env vars
+      # are Xcode's to name, this one is ours.
+      environmentVariables:
+        CLASSNOTE_TEST_MODE: "1"
       targets:
         - ClassNoteTests
+    archive:
+      config: Release
+
+  # Compile-only: the iOS target shares Core/ and Features/ with macOS, so
+  # without this nothing notices when a macOS-only API lands in a shared file.
+  ClassNote_iOS:
+    build:
+      targets:
+        ClassNote_iOS: all
+    run:
+      config: Debug
     archive:
       config: Release

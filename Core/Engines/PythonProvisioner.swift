@@ -35,7 +35,7 @@ enum PythonProvisionError: Error, LocalizedError {
 /// exact release and verified by SHA-256 — this writes an executable to disk and
 /// then runs it, so an unpinned "latest" URL would mean trusting whatever that
 /// tag happens to point at later.
-struct PythonProvisioner {
+struct PythonProvisioner: Sendable {
     static let shared = PythonProvisioner()
 
     // Pinned release. Bump both fields together; the digest comes from the

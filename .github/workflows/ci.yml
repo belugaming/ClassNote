@@ -121,6 +121,78 @@ jobs:
           path: build/TestResults.xcresult
           if-no-files-found: ignore
 
+  ios:
+    name: iOS build
+    runs-on: macos-15
+    timeout-minutes: 45
+    # The iOS target shares Core/ and Features/ with macOS but has never been
+    # built in CI, so its exclusions are unverified. Make this blocking once it
+    # has been green for a run or two.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.2.app 2>/dev/null \
+            || sudo xcode-select -s "$(ls -d /Applications/Xcode_2*.app | sort -V | tail -1)"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: build/SourcePackages
+          key: spm-ios-${{ runner.os }}-${{ hashFiles('project.yml') }}
+          restore-keys: spm-ios-${{ runner.os }}-
+
+      - name: Resolve Swift package dependencies
+        run: |
+          mkdir -p build
+          xcodebuild -resolvePackageDependencies \
+            -project ClassNote.xcodeproj \
+            -scheme ClassNote_iOS \
+            -clonedSourcePackagesDirPath build/SourcePackages
+
+      - name: Build (Debug, iOS Simulator)
+        run: |
+          mkdir -p build
+          set +e
+          xcodebuild -project ClassNote.xcodeproj \
+                     -scheme ClassNote_iOS \
+                     -configuration Debug \
+                     -destination 'generic/platform=iOS Simulator' \
+                     -derivedDataPath build/DerivedData-iOS \
+                     -clonedSourcePackagesDirPath build/SourcePackages \
+                     -skipMacroValidation \
+                     CODE_SIGNING_ALLOWED=NO \
+                     build 2>&1 \
+            | tee build/xcodebuild-ios.log \
+            | grep -E "^/.*:[0-9]+:[0-9]+: (error|warning):|^(ld|clang): error:|^\*\* "
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::group::Compiler errors"
+            grep -nE "^/.*:[0-9]+:[0-9]+: (error|fatal error):|^(ld|clang): error:" \
+              build/xcodebuild-ios.log | sort -u | head -200
+            echo "::endgroup::"
+          fi
+          exit $status
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-ios-log
+          path: build/xcodebuild-ios.log
+          if-no-files-found: ignore
+
   python:
     name: Python sidecar tests
     runs-on: ubuntu-latest

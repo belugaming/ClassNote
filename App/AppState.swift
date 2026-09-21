@@ -39,7 +39,7 @@ final class AppState: ObservableObject {
     @Published var llmBackend: LLMBackend = .openAICompatible
     @Published var interruptedSessions: [Session] = []
     @Published var microphoneDevices: [MicrophoneInputDevice] = []
-    @AppStorage("preferredMicrophoneDeviceID") var preferredMicrophoneDeviceID: String = MicrophoneInputDevice.systemDefaultID
+    @AppStorage("preferredMicrophoneDeviceID", store: AppEnvironment.defaults) var preferredMicrophoneDeviceID: String = MicrophoneInputDevice.systemDefaultID
     @Published private var importOrchestrators: [String: SessionOrchestrator] = [:]
     /// Task Center ids for the running imports/re-transcriptions, keyed the same
     /// way, so the live window's own Cancel button can mark the task cancelled

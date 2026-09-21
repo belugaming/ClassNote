@@ -60,6 +60,11 @@ struct ClassNoteApp: App {
 
     init() {
         AppBootstrap.run()
+        // The test bundle is hosted by this app, so a bootstrap here would race
+        // every test: `loadConfig()` overwrites whatever config a test just set,
+        // `refreshMicrophoneDevices()` writes back a preference, and
+        // `preloadLocalEngine()` pulls ~650 MB of weights into memory.
+        guard !AppEnvironment.isRunningTests else { return }
         DispatchQueue.main.async {
             Task {
                 await AppState.shared.bootstrap()

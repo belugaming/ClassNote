@@ -147,16 +147,16 @@ enum ApiConfigBackupStore {
     private static let key = "classnote.apiConfig.backup.v1"
 
     static func read() -> ApiConfig? {
-        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        guard let data = AppEnvironment.defaults.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(ApiConfig.self, from: data)
     }
 
     static func save(_ config: ApiConfig) {
         guard let data = try? JSONEncoder().encode(config) else { return }
-        UserDefaults.standard.set(data, forKey: key)
+        AppEnvironment.defaults.set(data, forKey: key)
     }
 
     static func clear() {
-        UserDefaults.standard.removeObject(forKey: key)
+        AppEnvironment.defaults.removeObject(forKey: key)
     }
 }

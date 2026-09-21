@@ -302,8 +302,8 @@ struct SessionDetailView: View {
 
 struct TranscriptPane: View {
     @ObservedObject var vm: SessionDetailViewModel
-    @AppStorage("transcriptFontSize") private var transcriptFontSize: Double = 17
-    @AppStorage("transcriptCompactMode") private var compactMode: Bool = false
+    @AppStorage("transcriptFontSize", store: AppEnvironment.defaults) private var transcriptFontSize: Double = 17
+    @AppStorage("transcriptCompactMode", store: AppEnvironment.defaults) private var compactMode: Bool = false
     @State private var showingHighlightDetail = false
 
     var body: some View {

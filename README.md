@@ -23,9 +23,9 @@ macOS-native lecture recorder for US-bound study-abroad students. Records classr
 - Xcode 26+ / Swift 5.10+
 - `xcodegen` (`brew install xcodegen`)
 - An OpenAI-compatible API endpoint (OpenAI official, DeepSeek, Groq, SiliconFlow, Ollama, LM Studio, etc.) — not needed if you only use the local MLX engine
-- For the local ASR engine: an Apple Silicon Mac. **No Python setup required** — the app uses a system `python3` if one is 3.10 or newer, and otherwise downloads a self-contained CPython (pinned and SHA-256 verified) into Application Support. macOS's built-in `/usr/bin/python3` is 3.9 and has no `sherpa-onnx` wheel, so it is skipped.
+- For the local ASR engine: an Apple Silicon Mac. **No Python setup required** — the app uses a system `python3` if one is 3.11 or newer, and otherwise downloads a self-contained CPython (pinned and SHA-256 verified) into Application Support. macOS's built-in `/usr/bin/python3` is 3.9 and has no `sherpa-onnx` wheel, so it is skipped.
 
-  Install from **Settings → Engines**, which creates a venv under `~/Library/Application Support/ClassNote/pyenv/` and downloads the weights with progress:
+  Install from **Settings → Engines**, which creates a venv under `~/Library/Application Support/ClassNote/pyenv/` and downloads the weights with progress. The sidecar's direct dependencies are pinned to exact versions in `Scripts/requirements-*.txt`, so two machines installing a week apart get the same program:
 
   | model | role | size |
   |---|---|---|
@@ -50,7 +50,13 @@ The built `.app` lands in `~/Library/Developer/Xcode/DerivedData/ClassNote-*/Bui
 xcodebuild -project ClassNote.xcodeproj -scheme ClassNote -destination 'platform=macOS,arch=arm64' -skipMacroValidation test
 ```
 
-14 unit + integration tests cover DB schema + FTS, WAV encoder, VAD, transcript buffer, OpenAI-compatible HTTP (SSE + multipart) against a local mock server, and a full file-import → transcribe → translate → persist → search end-to-end flow.
+The Swift suite mixes unit, integration and per-bug regression tests: DB schema + FTS, WAV encoder, VAD, transcript buffer, OpenAI-compatible HTTP (SSE + multipart) against a local mock server, and a full file-import → transcribe → translate → persist → search end-to-end flow. It runs against a throwaway data directory and a throwaway `UserDefaults` suite, so it never touches your own recordings, database or API key.
+
+The Python sidecars have their own tests:
+
+```sh
+python3 -m unittest discover -s Tests/PythonTests
+```
 
 ## Configure
 
@@ -63,11 +69,11 @@ Your API key is stored only in the local SQLite DB, never transmitted except to 
 
 ## Roadmap
 
-See `.claude/plans/macos-crispy-cerf.md` for the full design doc, milestone split, and risk register.
+The design docs, specs and plans live under `docs/superpowers/`.
 
 - **v1** (this): record + real-time bilingual subtitles + AI notes + course organization + FTS search + highlights + video import.
 - **v1.1**: Speaker Diarization (FluidAudio), PPT-sync screenshots + OCR, personal vocabulary deck + Flashcards, knowledge-base QA.
-- **v2**: Local WhisperKit + MLX (fully offline), self-hosted sync server, iOS review companion.
+- **v2**: self-hosted sync server, iOS review companion.
 
 ## License
 

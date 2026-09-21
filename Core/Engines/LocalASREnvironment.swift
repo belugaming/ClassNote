@@ -27,7 +27,7 @@ enum LocalASREnvironmentError: Error, LocalizedError {
 
 /// Manages a dedicated venv under Application Support for local ASR sidecars.
 /// Keeps ClassNote's own dependency set isolated from any system Python.
-struct LocalASREnvironment {
+struct LocalASREnvironment: Sendable {
     static let shared = LocalASREnvironment()
 
     private var venvURL: URL {

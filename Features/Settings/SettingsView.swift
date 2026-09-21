@@ -69,10 +69,10 @@ struct SettingsView: View {
 struct AppearanceSettingsView: View {
     @EnvironmentObject var appState: AppState
     @State private var selection: L10n.LanguageOverride = L10n.override
-    @AppStorage("overlayCaptionDisplayMode") private var displayModeRaw = OverlayCaptionDisplayMode.bilingual.rawValue
-    @AppStorage("overlayCaptionTextSize") private var textSizeRaw = OverlayCaptionTextSize.medium.rawValue
-    @AppStorage("overlayCaptionRecentCount") private var recentCountRaw = OverlayCaptionRecentCount.two.rawValue
-    @AppStorage("overlayAlwaysOnTop") private var overlayAlwaysOnTop: Bool = true
+    @AppStorage("overlayCaptionDisplayMode", store: AppEnvironment.defaults) private var displayModeRaw = OverlayCaptionDisplayMode.bilingual.rawValue
+    @AppStorage("overlayCaptionTextSize", store: AppEnvironment.defaults) private var textSizeRaw = OverlayCaptionTextSize.medium.rawValue
+    @AppStorage("overlayCaptionRecentCount", store: AppEnvironment.defaults) private var recentCountRaw = OverlayCaptionRecentCount.two.rawValue
+    @AppStorage("overlayAlwaysOnTop", store: AppEnvironment.defaults) private var overlayAlwaysOnTop: Bool = true
 
     var body: some View {
         ScrollView {
@@ -1033,7 +1033,7 @@ struct LocalLLMStatusRow: View {
 /// model, so changing it downloads once and reloads the engine.
 struct LocalEngineLatencyRow: View {
     @EnvironmentObject var appState: AppState
-    @AppStorage(LocalEngineLatency.storageKey) private var raw = LocalEngineLatency.default.rawValue
+    @AppStorage(LocalEngineLatency.storageKey, store: AppEnvironment.defaults) private var raw = LocalEngineLatency.default.rawValue
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
