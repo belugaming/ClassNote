@@ -854,7 +854,7 @@ final class FileWriter: @unchecked Sendable {
             w.movieFragmentInterval = CMTime(seconds: 5, preferredTimescale: 600)
             w.initialMovieFragmentInterval = CMTime(seconds: 2, preferredTimescale: 600)
             // AAC-LC's encoder only accepts a bit rate within the range it
-            // supports for the sample rate and channel count; 32 kbps is above
+            // supports for the sample rate and channel count; 64 kbps is above
             // the range for 16 kHz mono and made codec initialisation fail
             // ("Cannot Encode Media"). 32 kbps is the usual figure for speech
             // at this rate.
