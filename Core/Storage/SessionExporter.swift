@@ -52,10 +52,13 @@ enum SessionExporter {
         lines.append("")
         lines.append("---")
         lines.append("")
-        for seg in input.segments {
-            let ts = formatTimecode(seg.startMs)
-            lines.append("**[\(ts)]** \(seg.textOriginal)")
-            let tr = seg.textTranslated.trimmingCharacters(in: .whitespacesAndNewlines)
+        // One paragraph per sentence: a line cut mid-sentence carries no
+        // translation of its own, the sentence's is on its last line.
+        for sentence in SentenceGroups.group(input.segments) {
+            guard let first = sentence.first, let last = sentence.last else { continue }
+            let ts = formatTimecode(first.startMs)
+            lines.append("**[\(ts)]** \(SentenceGroups.join(sentence.map(\.textOriginal)))")
+            let tr = last.textTranslated.trimmingCharacters(in: .whitespacesAndNewlines)
             if !tr.isEmpty {
                 lines.append("> \(tr)")
             }
@@ -124,12 +127,14 @@ enum SessionExporter {
     /// SRT subtitle format. Uses original on line 1 and translation (if any) on line 2.
     static func transcriptSRT(_ input: Input) -> String {
         var out = ""
-        for (i, seg) in input.segments.enumerated() {
-            let idx = i + 1
-            let start = srtTime(seg.startMs)
-            let end = srtTime(max(seg.endMs, seg.startMs + 1))
-            out += "\(idx)\n\(start) --> \(end)\n\(seg.textOriginal)\n"
-            let tr = seg.textTranslated.trimmingCharacters(in: .whitespacesAndNewlines)
+        // One cue per sentence, so each translation sits under the whole
+        // sentence it translates.
+        for (i, sentence) in SentenceGroups.group(input.segments).enumerated() {
+            guard let first = sentence.first, let last = sentence.last else { continue }
+            let start = srtTime(first.startMs)
+            let end = srtTime(max(last.endMs, first.startMs + 1))
+            out += "\(i + 1)\n\(start) --> \(end)\n\(SentenceGroups.join(sentence.map(\.textOriginal)))\n"
+            let tr = last.textTranslated.trimmingCharacters(in: .whitespacesAndNewlines)
             if !tr.isEmpty { out += "\(tr)\n" }
             out += "\n"
         }
@@ -163,12 +168,24 @@ enum SessionExporter {
 
     /// Bundle export: writes a directory at `folderURL` containing transcript.md,
     /// transcript.srt, notes.md (if available) and the audio file (if available).
-    static func writeBundle(_ input: Input, to folderURL: URL) throws {
+    /// `url` if nothing is there, else "name 2", "name 3"… beside it.
+    static func uniqueFolder(for url: URL) -> URL {
         let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return url }
+        let parent = url.deletingLastPathComponent()
+        let base = url.lastPathComponent
+        var n = 2
+        while fm.fileExists(atPath: parent.appendingPathComponent("\(base) \(n)").path) { n += 1 }
+        return parent.appendingPathComponent("\(base) \(n)", isDirectory: true)
+    }
+
+    @discardableResult
+    static func writeBundle(_ input: Input, to requestedURL: URL) throws -> URL {
+        let fm = FileManager.default
+        // Never delete what is there: choosing an existing folder in the save
+        // panel and confirming "Replace" used to wipe it, whatever it held.
+        let folderURL = uniqueFolder(for: requestedURL)
         do {
-            if fm.fileExists(atPath: folderURL.path) {
-                try fm.removeItem(at: folderURL)
-            }
             try fm.createDirectory(at: folderURL, withIntermediateDirectories: true)
 
             try transcriptMarkdown(input)
@@ -197,6 +214,7 @@ enum SessionExporter {
         } catch {
             throw ExportError.ioFailure(error.localizedDescription)
         }
+        return folderURL
     }
 
     /// Sensible default filename for a single-file export.

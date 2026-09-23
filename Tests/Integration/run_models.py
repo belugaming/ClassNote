@@ -59,7 +59,10 @@ def run_r2t2(wav_path, reference):
     events = []
     t0 = time.time()
     for i in range(0, len(pcm), frame):
-        events += t.feed(pcm[i:i + frame])
+        new = t.feed(pcm[i:i + frame])
+        for e in new:
+            print(f"[r2t2]   {time.time() - t0:6.1f}s {e['type']}: {e['text']}")
+        events += new
     events += t.finish()
     spent = time.time() - t0
     finals = [e for e in events if e["type"] == "final"]

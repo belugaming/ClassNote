@@ -278,6 +278,43 @@ final class DatabaseTests: XCTestCase {
         XCTAssertTrue(md.contains("**Back:** Energy carrier"))
     }
 
+    func testTranscriptExportsOneEntryPerSentence() {
+        let session = Session.new(courseId: nil, title: "Biology 101")
+        func line(_ id: Int64, _ text: String, _ translated: String, continues: Bool = false) -> Segment {
+            Segment(id: id, sessionId: session.id, startMs: id * 1000, endMs: id * 1000 + 900,
+                    speakerId: nil, textOriginal: text, textTranslated: translated, isFinal: true,
+                    confidence: 0, version: 1, continuesNext: continues)
+        }
+        let input = SessionExporter.Input(
+            session: session,
+            segments: [line(1, "First part of it,", "", continues: true),
+                       line(2, "and the rest.", "第一部分和其余部分。"),
+                       line(3, "Next.", "下一句。")],
+            note: nil, highlights: [], flashcards: [], studyToolResults: [])
+
+        let md = SessionExporter.transcriptMarkdown(input)
+        XCTAssertTrue(md.contains("**[00:01]** First part of it, and the rest.\n> 第一部分和其余部分。"))
+        let srt = SessionExporter.transcriptSRT(input)
+        XCTAssertTrue(srt.hasPrefix("1\n00:00:01,000 --> 00:00:02,900\nFirst part of it, and the rest.\n第一部分和其余部分。\n"))
+        XCTAssertTrue(srt.contains("2\n00:00:03,000"))
+    }
+
+    func testBundleExportNeverReplacesAnExistingFolder() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let target = dir.appendingPathComponent("Lecture")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        try "keep me".write(to: target.appendingPathComponent("mine.txt"), atomically: true, encoding: .utf8)
+
+        let session = Session.new(courseId: nil, title: "Lecture")
+        let input = SessionExporter.Input(session: session, segments: [], note: nil, highlights: [],
+                                          flashcards: [], studyToolResults: [])
+        let written = try SessionExporter.writeBundle(input, to: target)
+        XCTAssertEqual(written.lastPathComponent, "Lecture 2")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: target.appendingPathComponent("mine.txt").path))
+    }
+
     func testStreamingMarkdownPreviewStabilizesPartialMarkdown() {
         let partial = """
         - **目标

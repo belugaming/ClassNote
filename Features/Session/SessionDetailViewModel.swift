@@ -945,8 +945,8 @@ final class SessionDetailViewModel: ObservableObject {
         panel.allowedContentTypes = [.folder]
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        try SessionExporter.writeBundle(input, to: url)
-        NSWorkspace.shared.activateFileViewerSelecting([url])
+        let written = try SessionExporter.writeBundle(input, to: url)
+        NSWorkspace.shared.activateFileViewerSelecting([written])
     }
 
     private func formatTimecode(_ ms: Int64) -> String {

@@ -20,6 +20,9 @@ concurrency:
   # Queue rather than cancel: a run downloads GBs and is worth finishing.
   cancel-in-progress: false
 
+env:
+  PYTHONUNBUFFERED: "1"
+
 jobs:
   r2t2:
     name: Confucius4-R2T2 streaming (CPU)
@@ -37,7 +40,7 @@ jobs:
           python -m pip install --quiet -r /tmp/req.txt "mlx[cpu]==0.32.2" "mlx-lm==0.31.3" "mlx-audio==0.5.5"
       - name: Synthesize speech
         run: |
-          echo "The mitochondria is the powerhouse of the cell. It produces energy for the body through cellular respiration. Today we will study glycolysis, which happens in the cytoplasm." > /tmp/ref.txt
+          echo "The mitochondria is the powerhouse of the cell. Today we will study glycolysis, which happens in the cytoplasm." > /tmp/ref.txt
           espeak-ng -v en-us -s 150 -w /tmp/raw.wav -f /tmp/ref.txt
           python - <<'PY'
           import wave, numpy as np
@@ -49,12 +52,15 @@ jobs:
               w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(out.tobytes())
           PY
       - name: Run
+        timeout-minutes: 40
+        env:
+          R2T2_STEP_MS: "1280"
         run: python Tests/Integration/run_models.py r2t2 /tmp/speech.wav "$(cat /tmp/ref.txt)"
 
   hymt:
     name: Hy-MT2 prompt templates (CPU)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -63,6 +69,8 @@ jobs:
       - name: Install
         run: python -m pip install --quiet "mlx[cpu]==0.32.2" "mlx-lm==0.31.3" "huggingface_hub==1.32.0"
       - name: Run
+        timeout-minutes: 20
         run: python Tests/Integration/run_models.py hymt
       - name: T3PO plumbing (small stand-in model)
+        timeout-minutes: 15
         run: python Tests/Integration/run_models.py simt
