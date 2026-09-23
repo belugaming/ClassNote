@@ -119,11 +119,42 @@ def run_hymt():
                 assert tgt.lower() in out.lower(), f"glossary term {tgt!r} not used"
 
 
+def run_simt_plumbing():
+    """MLXSimulModel's prompt cache, logits processors and forced commit,
+    exercised with a small model of T3PO's architecture (Qwen2.5). T3PO itself
+    is 28 GB before conversion, too big for a CI runner; this checks the code
+    around it, not translation quality."""
+    from huggingface_hub import snapshot_download
+    import simt_server
+
+    path = snapshot_download("mlx-community/Qwen2.5-0.5B-Instruct-4bit")
+    model = simt_server.MLXSimulModel(path)
+    session = simt_server.SimulSession(model, "en2zh", terms=[["cell", "细胞"]])
+    lines = ["The cell membrane", "is selectively permeable.", "It controls what enters",
+             "and what leaves the cell."]
+    t0 = time.time()
+    for line in lines:
+        events = session.feed(line)
+        print(f"[simt] feed {line!r} -> {events} (cached {len(model.cached)} tokens)")
+    events = session.flush()
+    print(f"[simt] flush -> {events}; {time.time() - t0:.1f}s")
+    # The cache must track the prompt: a follow-up call reuses most of it.
+    before = len(model.cached)
+    prompt = simt_server.chat_prompt(simt_server.build_user_message(
+        "en2zh", session.history_text(), "next"))
+    out = model.complete(prompt, force=True, latency="low")
+    print(f"[simt] forced completion {out!r}, cache {before} -> {len(model.cached)}")
+    assert out.strip(), "a forced call must not come back empty"
+    assert len(model.cached) > 0
+
+
 if __name__ == "__main__":
     what = sys.argv[1]
     if what == "r2t2":
         run_r2t2(sys.argv[2], sys.argv[3])
     elif what == "hymt":
         run_hymt()
+    elif what == "simt":
+        run_simt_plumbing()
     else:
         raise SystemExit(f"unknown target {what}")

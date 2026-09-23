@@ -157,8 +157,14 @@ struct EngineFactory {
         #if os(macOS)
         case .localMLX:
             return LocalMLXTranslator()
+        case .t3po:
+            // T3PO translates a stream, not single sentences; the orchestrator
+            // drives it through `LocalSimulSession`. Anything that needs one
+            // sentence translated on its own (a draft line, a language pair
+            // T3PO does not cover) gets the local sentence model.
+            return LocalMLXTranslator()
         #else
-        case .localMLX:
+        case .localMLX, .t3po:
             // The sidecar is a Python process, so there is nothing to run on iOS.
             return OpenAICompatibleTranslator(config: config)
         #endif

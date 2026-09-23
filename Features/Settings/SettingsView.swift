@@ -552,7 +552,7 @@ struct EngineSettingsView: View {
                             #if os(macOS)
                             LocalTranslationStatusRow()
                             #endif
-                        case .openAICompatible:
+                        case .openAICompatible, .t3po:
                             EmptyView()
                         }
                     }

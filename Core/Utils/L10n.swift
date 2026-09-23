@@ -53,6 +53,14 @@ enum L10n {
     }
 
     private static let en: [String: String] = [
+        "simt.stage.load": "Loading T3PO into memory…",
+        "simt.stage.convert": "Converting T3PO to a 4-bit MLX model (about 8 GB)…",
+        "simt.stage.download": "Downloading Confucius4-T3PO (about 28 GB, first use only)…",
+        "simt.error.pair": "T3PO only translates between Chinese and English",
+        "simt.error.engine": "Local simultaneous translation failed",
+        "simt.error.timeout": "The local simultaneous translator did not start in time",
+        "simt.error.launch": "Could not start the local simultaneous translator",
+        "settings.engines.translationBackend.t3po": "Local T3PO (simultaneous, zh↔en)",
         // Common
         "common.cancel": "Cancel",
         "common.save": "Save",
@@ -520,6 +528,14 @@ enum L10n {
     ]
 
     private static let zh: [String: String] = [
+        "simt.stage.load": "正在把 T3PO 载入内存…",
+        "simt.stage.convert": "正在把 T3PO 转换为 4-bit MLX 模型（约 8 GB）…",
+        "simt.stage.download": "正在下载 Confucius4-T3PO（约 28 GB，仅首次）…",
+        "simt.error.pair": "T3PO 只支持中英互译",
+        "simt.error.engine": "本地同传翻译失败",
+        "simt.error.timeout": "本地同传引擎启动超时",
+        "simt.error.launch": "本地同传引擎启动失败",
+        "settings.engines.translationBackend.t3po": "本地 T3PO（同声传译，中英互译）",
         // 通用
         "common.cancel": "取消",
         "common.save": "保存",

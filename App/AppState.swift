@@ -353,8 +353,9 @@ final class AppState: ObservableObject {
         #if os(macOS)
         async let asr: Bool = LocalASRWarmPool.shared.retire(force: true)
         async let translator: Void = LocalMLXTranslatorProcess.shared.shutdown()
+        async let simul: Void = SimulTranslatorProcess.shared.shutdown()
         async let llm: Void = LocalMLXLLMProcess.shared.shutdown()
-        _ = await (asr, translator, llm)
+        _ = await (asr, translator, simul, llm)
         #else
         _ = await LocalASRWarmPool.shared.retire(force: true)
         #endif
@@ -732,16 +733,19 @@ enum TranslationBackend: String, CaseIterable, Identifiable {
     case openAICompatible = "openai"
     case appleTranslation = "apple"
     case localMLX = "mlx"
+    /// Confucius4-T3PO, local simultaneous translation (Chinese <-> English).
+    case t3po = "t3po"
     var id: String { rawValue }
     var displayName: String {
         switch self {
         case .openAICompatible: return L10n.t("settings.engines.translationBackend.openai")
         case .appleTranslation: return L10n.t("settings.engines.translationBackend.apple")
         case .localMLX: return L10n.t("settings.engines.translationBackend.mlx")
+        case .t3po: return L10n.t("settings.engines.translationBackend.t3po")
         }
     }
 
-    /// True for backends backed by the local Python sidecar, which may need a
+    /// True for backends backed by a local Python sidecar, which may need a
     /// first-run install before it can be used.
-    var isLocalSidecar: Bool { self == .localMLX }
+    var isLocalSidecar: Bool { self == .localMLX || self == .t3po }
 }

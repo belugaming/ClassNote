@@ -42,6 +42,12 @@ final class SessionOrchestrator: ObservableObject {
     /// translate a sentence the recording ended in the middle of.
     private var liveTranslator: TranslationProvider?
     private var liveConfig: ApiConfig?
+    /// The simultaneous translator (T3PO) for this recording or import, when
+    /// that is the selected backend and it covers the language pair. It
+    /// replaces sentence grouping: T3PO itself decides when it has heard
+    /// enough to translate.
+    private var simulSession: LocalSimulSession?
+    private var simulChecked = false
     /// The stop currently in flight, if any. Every start calls `stop()` first
     /// and the Stop button can be double-tapped, so the second caller has to
     /// *join* the first rather than skip it: the drain takes seconds, and both
@@ -325,6 +331,7 @@ final class SessionOrchestrator: ObservableObject {
                 if !replaceExisting, AppState.shared.translationEnabled {
                     // A file that ends mid-sentence still gets that sentence.
                     self.flushPendingSentence(translator: translator, config: config)
+                    await self.finishSimultaneous(timeout: .seconds(120))
                 }
                 if replaceExisting {
                     let ids = try await SegmentRepository.shared.replaceAll(sessionId: sessionId,
@@ -460,6 +467,7 @@ final class SessionOrchestrator: ObservableObject {
         }
         liveTranslator = nil
         liveConfig = nil
+        await finishSimultaneous(timeout: drainTimeout)
         await drainTranslations(timeout: drainTimeout)
 
         // Only a live recording's row is ours to close: an import writes its
@@ -480,6 +488,16 @@ final class SessionOrchestrator: ObservableObject {
         isEphemeralTranslation = false
         statusText = "Stopped"
         finishImportWaiters(with: CancellationError())
+    }
+
+    /// Lets T3PO translate what it was still holding, bounded like the other
+    /// drains: a wedged sidecar must not hold Stop.
+    private func finishSimultaneous(timeout: Duration) async {
+        guard let simul = simulSession else { return }
+        simulSession = nil
+        simulChecked = false
+        let finishing = Task { @MainActor in await simul.finish() }
+        await drain(finishing, timeout: timeout)
     }
 
     /// Awaits `task`, cancelling it only if it outstays `timeout`.
@@ -613,7 +631,7 @@ final class SessionOrchestrator: ObservableObject {
                 // lines of it already committed plus this one.
                 let polishedDraft = TranscriptTextPolisher.polish(event.text)
                 transcript.updateDraft(polishedDraft)
-                if AppState.shared.translationEnabled {
+                if AppState.shared.translationEnabled, simultaneousSession(config: config) == nil {
                     let sentence = SentenceGroups.join(pendingSentence.map(\.text) + [polishedDraft])
                     self.translateDraft(text: sentence, draft: polishedDraft,
                                         translator: translator, config: config)
@@ -684,6 +702,50 @@ final class SessionOrchestrator: ObservableObject {
     private func resetSentenceState() {
         pendingSentence.removeAll()
         sentenceHistory.removeAll()
+        simulSession = nil
+        simulChecked = false
+    }
+
+    /// The T3PO session for this recording, created on first use. Nil when
+    /// another backend is selected or the language pair is not Chinese <->
+    /// English, in which case sentences go to the sentence translator.
+    private func simultaneousSession(config: ApiConfig) -> LocalSimulSession? {
+        #if os(macOS)
+        if simulChecked { return simulSession }
+        simulChecked = true
+        guard AppState.shared.translationBackend == .t3po else { return nil }
+        let persist = persistTranslations
+        simulSession = LocalSimulSession(
+            source: config.sourceLanguage,
+            target: config.targetLanguage,
+            glossary: courseContext.translationGlossary,
+            onTranslation: { [weak self] rows, text in
+                self?.applySimultaneousTranslation(rows: rows, text: text, persist: persist)
+            },
+            onError: { error in
+                AppState.shared.setError("Translation error: \(error.localizedDescription)")
+            })
+        if simulSession == nil {
+            NSLog("[ClassNote] T3PO does not cover \(config.sourceLanguage) -> \(config.targetLanguage); using the sentence translator")
+        }
+        return simulSession
+        #else
+        return nil
+        #endif
+    }
+
+    /// A T3PO translation covering `rows`: it lands on the last of them, the
+    /// ones before are marked as covered by it.
+    private func applySimultaneousTranslation(rows: [Int64], text: String, persist: Bool) {
+        guard let last = rows.last else { return }
+        transcript.updateTranslation(rowId: last, translated: text)
+        guard persist else { return }
+        let leading = Array(rows.dropLast())
+        let task = Task {
+            try? await SegmentRepository.shared.updateTranslation(id: last, textTranslated: text, state: .ok)
+            try? await SegmentRepository.shared.markMerged(ids: leading)
+        }
+        translateTasks[last] = task
     }
 
     /// Takes one committed line. A line cut mid-sentence waits for the rest;
@@ -693,6 +755,10 @@ final class SessionOrchestrator: ObservableObject {
                                        continuesSentence: Bool,
                                        translator: TranslationProvider,
                                        config: ApiConfig) {
+        if let simul = simultaneousSession(config: config) {
+            simul.feed(rowId: rowId, text: text)
+            return
+        }
         pendingSentence.append((rowId, text))
         guard !continuesSentence else { return }
         flushPendingSentence(translator: translator, config: config)
@@ -856,6 +922,14 @@ final class SessionOrchestrator: ObservableObject {
                                    glossary: TranslationGlossary,
                                    failedOnly: Bool = false,
                                    onProgress: ((Int, Int) -> Void)? = nil) async throws -> Int {
+        #if os(macOS)
+        if AppState.shared.translationBackend == .t3po,
+           SimulTranslatorProcess.direction(source: config.sourceLanguage,
+                                            target: config.targetLanguage) != nil {
+            return await translateSimultaneously(segments, config: config,
+                                                 glossary: glossary, onProgress: onProgress)
+        }
+        #endif
         let groups = SentenceGroups.group(segments.filter { $0.id != nil && !$0.textOriginal.isEmpty })
         var jobs: [SentenceJob] = []
         var previous: [String] = []
@@ -921,6 +995,48 @@ final class SessionOrchestrator: ObservableObject {
         return (try? await translateOne(job, translator: translator, config: config,
                                         glossary: CourseContext(course: course).translationGlossary)) ?? false
     }
+
+    #if os(macOS)
+    /// A whole transcript through T3PO, line by line in order: its history is
+    /// what keeps the translation coherent, so it always runs over every line,
+    /// even when only some failed. Returns the number of errors.
+    private func translateSimultaneously(_ segments: [Segment],
+                                         config: ApiConfig,
+                                         glossary: TranslationGlossary,
+                                         onProgress: ((Int, Int) -> Void)?) async -> Int {
+        let lines = segments.filter { $0.id != nil && !$0.textOriginal.isEmpty }
+        guard !lines.isEmpty else {
+            onProgress?(0, 0)
+            return 0
+        }
+        var failures = 0
+        var covered = 0
+        var writes: [Task<Void, Never>] = []
+        onProgress?(0, lines.count)
+        guard let session = LocalSimulSession(
+            source: config.sourceLanguage, target: config.targetLanguage, glossary: glossary,
+            onTranslation: { rows, text in
+                covered += rows.count
+                onProgress?(min(covered, lines.count), lines.count)
+                guard let last = rows.last else { return }
+                let leading = Array(rows.dropLast())
+                writes.append(Task {
+                    try? await SegmentRepository.shared.updateTranslation(id: last, textTranslated: text,
+                                                                           state: .ok)
+                    try? await SegmentRepository.shared.markMerged(ids: leading)
+                })
+            },
+            onError: { _ in failures += 1 }) else { return lines.count }
+        for line in lines {
+            guard let id = line.id else { continue }
+            session.feed(rowId: id, text: line.textOriginal)
+        }
+        await session.finish()
+        for write in writes { await write.value }
+        onProgress?(lines.count, lines.count)
+        return failures
+    }
+    #endif
 
     /// One sentence of a batch translation.
     struct SentenceJob: Sendable {
