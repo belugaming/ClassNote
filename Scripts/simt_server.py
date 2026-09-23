@@ -318,16 +318,15 @@ class SimulSession:
         glossary = glossary_block(terms_in(self.terms, source), self.direction)
         prompt = chat_prompt(build_user_message(self.direction, self.history_text(),
                                                 source, glossary))
-        on_text = None
-        if on_partial is not None:
-            shown = [""]
+        shown = [""]
 
-            def on_text(raw):
-                text = partial_text(raw)
-                if text and text != shown[0]:
-                    shown[0] = text
-                    on_partial(text)
-        raw = self.model.complete(prompt, force=force, latency=self.latency, on_text=on_text)
+        def on_text(raw):
+            text = partial_text(raw)
+            if text and text != shown[0]:
+                shown[0] = text
+                on_partial(text)
+        raw = self.model.complete(prompt, force=force, latency=self.latency,
+                                  on_text=on_text if on_partial is not None else None)
         action, target = parse_response(raw)
         if action == "WAIT":
             return None
@@ -538,10 +537,8 @@ class Server:
             session = self.sessions.get(sid)
             if session is None:
                 return {"id": req_id, "error": f"unknown session {sid!r}"}
-            on_partial = None
-            if self.send is not None:
-                def on_partial(text):
-                    self.send({"id": req_id, "partial": text})
+            send = self.send
+            on_partial = (lambda text: send({"id": req_id, "partial": text})) if send else None
             if op == "feed":
                 return {"id": req_id, "events": session.feed(str(req.get("text") or ""), on_partial)}
             if op == "flush":
