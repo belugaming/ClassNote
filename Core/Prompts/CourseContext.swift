@@ -85,14 +85,17 @@ struct TranslationGlossary: Sendable, Equatable {
     var pairs: [(String, String)] {
         raw.split(whereSeparator: \.isNewline).compactMap { line -> (String, String)? in
             let text = String(line)
-            for separator in ["=", "->", "→", "：", ":"] {
-                guard let range = text.range(of: separator) else { continue }
-                let term = text[..<range.lowerBound].trimmingCharacters(in: .whitespaces)
-                let rendering = text[range.upperBound...].trimmingCharacters(in: .whitespaces)
-                guard !term.isEmpty, !rendering.isEmpty else { return nil }
-                return (term, rendering)
-            }
-            return nil
+            // The separator that comes first in the line, longest first where
+            // two start at the same place ("=>" before "=").
+            let separators = ["=>", "->", "=", "→", "：", ":"]
+            let found = separators.compactMap { text.range(of: $0) }
+                .min { $0.lowerBound < $1.lowerBound
+                    || ($0.lowerBound == $1.lowerBound && $0.upperBound > $1.upperBound) }
+            guard let range = found else { return nil }
+            let term = text[..<range.lowerBound].trimmingCharacters(in: .whitespaces)
+            let rendering = text[range.upperBound...].trimmingCharacters(in: .whitespaces)
+            guard !term.isEmpty, !rendering.isEmpty else { return nil }
+            return (term, rendering)
         }
     }
 }

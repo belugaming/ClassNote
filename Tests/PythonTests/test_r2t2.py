@@ -132,6 +132,20 @@ class StreamTests(unittest.TestCase):
         self.assertEqual(stream.detected_language, "French")
         self.assertTrue(model.calls[-1][3].startswith("language French<asr_text>"))
 
+    def test_silence_does_not_lock_auto_detect_onto_none(self):
+        model = ScriptedModel("", language="None")
+        model.total_s = 0.0
+        stream = R2T2Stream(model=model, language=None)
+        self.feed(stream, model, 1.0)
+        self.assertIsNone(stream.detected_language)
+
+    def test_a_reset_drops_the_audio_it_already_transcribed(self):
+        model, stream = self.make("abcdefghij")
+        self.feed(stream, model, 1.0)
+        stream.reset_text()
+        self.assertEqual(len(stream.audio), 0)
+        self.assertEqual(stream.pieces, [])
+
     def test_the_token_budget_grows_while_nothing_is_stable(self):
         model, stream = self.make("")
         self.feed(stream, model, 1.0)

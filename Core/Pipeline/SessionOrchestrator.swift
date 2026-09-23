@@ -497,7 +497,19 @@ final class SessionOrchestrator: ObservableObject {
         simulSession = nil
         simulChecked = false
         let finishing = Task { @MainActor in await simul.finish() }
-        await drain(finishing, timeout: timeout)
+        // Abandoning is what ends the wait: cancelling the task alone would
+        // not stop a request the sidecar never answers.
+        let watchdog = Task { @MainActor in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled else { return }
+            simul.abandon()
+        }
+        await withTaskCancellationHandler {
+            await finishing.value
+        } onCancel: {
+            Task { @MainActor in simul.abandon() }
+        }
+        watchdog.cancel()
     }
 
     /// Awaits `task`, cancelling it only if it outstays `timeout`.
@@ -702,6 +714,9 @@ final class SessionOrchestrator: ObservableObject {
     private func resetSentenceState() {
         pendingSentence.removeAll()
         sentenceHistory.removeAll()
+        // Only a live translation that is never saved turns this off, in
+        // runSTTStream; anything else starts out saving its translations.
+        persistTranslations = true
         simulSession = nil
         simulChecked = false
     }
@@ -978,13 +993,22 @@ final class SessionOrchestrator: ObservableObject {
             return false
         }
         let groups = SentenceGroups.group(segments.filter { $0.id != nil && !$0.textOriginal.isEmpty })
-        guard let index = groups.firstIndex(where: { $0.contains { $0.id == rowId } }) else {
+        guard var index = groups.firstIndex(where: { $0.contains { $0.id == rowId } }) else {
             return false
+        }
+        // T3PO stores one translation for everything it heard since its last
+        // one, which can span sentences: lines before this sentence marked
+        // `.merged` are covered by this sentence's translation. Retranslate
+        // them with it, or their text would lose its translation for good.
+        var lines = groups[index]
+        while index > 0, groups[index - 1].last?.translationState == .merged {
+            index -= 1
+            lines = groups[index] + lines
         }
         let context = groups[max(0, index - contextSentences)..<index]
             .map { SentenceGroups.join($0.map(\.textOriginal)) }
-        let job = SentenceJob(lines: groups[index],
-                              text: SentenceGroups.join(groups[index].map(\.textOriginal)),
+        let job = SentenceJob(lines: lines,
+                              text: SentenceGroups.join(lines.map(\.textOriginal)),
                               context: Array(context))
         return (try? await translateOne(job, translator: translator, config: config,
                                         glossary: CourseContext(course: course).translationGlossary)) ?? false

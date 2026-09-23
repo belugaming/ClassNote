@@ -101,6 +101,15 @@ class ProtocolTests(unittest.TestCase):
             SimulSession(ScriptedModel([]), "fr2de")
 
 
+class BoundaryTests(unittest.TestCase):
+    def test_latin_words_from_two_lines_stay_apart_in_zh2en(self):
+        model = ScriptedModel(["", "x"])
+        s = SimulSession(model, "zh2en")
+        s.feed("我们用 Python")
+        s.feed("NumPy 来算")
+        self.assertIn("Python NumPy", model.calls[-1][0])
+
+
 class ServerTests(unittest.TestCase):
     def test_request_loop(self):
         server = simt_server.Server(ScriptedModel(["", "你好世界"]))

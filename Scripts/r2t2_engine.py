@@ -215,8 +215,12 @@ class R2T2Stream:
         return self._step(flush=True)
 
     def reset_text(self):
-        """Forgets the committed prefix (a decoder loop); keeps the audio."""
+        """Starts afresh after a decoder loop. The audio goes too: decoding
+        the same window again with no prefix would commit, a second time,
+        everything already sent."""
         self.pieces.clear()
+        self.window_start += len(self.audio)
+        self.audio = np.zeros(0, np.float32)
         self.new_tokens = BASE_NEW_TOKENS
 
     # ---- internals ------------------------------------------------------
@@ -246,7 +250,9 @@ class R2T2Stream:
         if text is None:
             # Auto-detect has not produced its language header yet.
             return []
-        if not self.language and lang:
+        # Qwen3-ASR writes "language None" for audio without speech; locking
+        # onto that would force "no language" on the rest of the lecture.
+        if not self.language and lang and lang.lower() != "none" and text.strip():
             self.detected_language = lang
         if (lang or "") == "Chinese":
             text = _CJK_GAP_RE.sub("", text)

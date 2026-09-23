@@ -370,10 +370,11 @@ final class TranslationGlossaryTests: XCTestCase {
         矩阵：matrix
         no separator here
          = missing term
+        pipeline => 流水线
         """)
         let pairs = glossary.pairs
-        XCTAssertEqual(pairs.map(\.0), ["eigenvalue", "kernel", "矩阵"])
-        XCTAssertEqual(pairs.map(\.1), ["特征值", "核", "matrix"])
+        XCTAssertEqual(pairs.map(\.0), ["eigenvalue", "kernel", "矩阵", "pipeline"])
+        XCTAssertEqual(pairs.map(\.1), ["特征值", "核", "matrix", "流水线"])
     }
 
     func testRecognitionHintNamesTheCourseAndItsTerms() {

@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import traceback
@@ -161,12 +162,21 @@ def is_chinese(code: str) -> bool:
     return (code or "").strip().lower().split("-")[0] == "zh"
 
 
+def term_occurs(term: str, text: str) -> bool:
+    """Whether `term` is in `text` as a term, not inside another word: "RAM"
+    must not match "program". Latin terms need word boundaries; CJK has no
+    spaces, so there a substring is the best there is."""
+    if re.search(r"[A-Za-z0-9]", term):
+        pattern = r"(?<![A-Za-z0-9])" + re.escape(term) + r"(?![A-Za-z0-9])"
+        return re.search(pattern, text, re.IGNORECASE) is not None
+    return term in text
+
+
 def relevant_terms(text: str, terms) -> list[tuple[str, str]]:
     """Glossary pairs whose source term occurs in `text`, oriented source ->
     target. A student may have written the glossary either way round
     ("特征值 = eigenvalue" for an English lecture), so a pair whose right-hand
     side is the one in the sentence is flipped rather than dropped."""
-    lowered = text.lower()
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for pair in terms or []:
@@ -175,9 +185,9 @@ def relevant_terms(text: str, terms) -> list[tuple[str, str]]:
         a, b = (str(pair[0]).strip(), str(pair[1]).strip())
         if not a or not b:
             continue
-        if a.lower() in lowered:
+        if term_occurs(a, text):
             src, tgt = a, b
-        elif b.lower() in lowered:
+        elif term_occurs(b, text):
             src, tgt = b, a
         else:
             continue

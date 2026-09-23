@@ -119,7 +119,6 @@ GLOSSARY_HEADS = {
     + _GLOSSARY_HEAD_TAIL,
 }
 
-PUNCTUATION_END = frozenset({"。", "！", "？", "!", "?", "；", ";", "…", "～", "~"})
 LATIN_TOKEN = re.compile(r"^[A-Za-z0-9]+(?:[._'’-][A-Za-z0-9]+)*$")
 
 # Engine defaults from the reference CLI.
@@ -270,7 +269,10 @@ class SimulSession:
             return []
         if (self.direction == "zh2en" and self.buffer and incoming
                 and LATIN_TOKEN.match(self.buffer[-1] or "") and LATIN_TOKEN.match(incoming[0] or "")):
-            self.buffer[-1] += incoming.pop(0)
+            # Each chunk is a whole transcript line, so two Latin words
+            # meeting at the boundary are two words ("Python" + "NumPy"),
+            # not one word split by the recogniser. Keep them apart.
+            self.buffer.append(" ")
         self.buffer.extend(incoming)
         units = source_units(self.buffer, self.direction)
         if not units:
@@ -351,27 +353,41 @@ class MLXSimulModel:
             processors.append(latency_bias)
             processors += make_logits_processors(repetition_penalty=REPETITION_PENALTY)
         if force:
-            first = len(suffix)
+            # Counted rather than read off `tokens`: mlx-lm only appends to
+            # it after the prefill, so its length says nothing about which
+            # generated token this is.
+            calls = [0]
 
             def no_wait_on_first_token(tokens, logits):
                 # A forced call must commit: EOS is banned as the first token.
-                if tokens.shape[-1] <= first:
+                calls[0] += 1
+                if calls[0] == 1:
                     for tok in STOP_TOKEN_IDS:
                         logits[..., tok] = -mx.inf
                 return logits
             processors.append(no_wait_on_first_token)
 
         out: list[int] = []
-        for token, _ in generate_step(mx.array(suffix), self.model, max_tokens=MAX_NEW_TOKENS,
-                                      sampler=lambda x: mx.argmax(x, axis=-1),
-                                      logits_processors=processors or None,
-                                      prompt_cache=self.cache):
-            token = int(token)
-            if token in STOP_TOKEN_IDS:
-                break
-            out.append(token)
-        offset = self.cache[0].offset
-        self.cached = (ids + out)[:offset]
+        try:
+            for token, _ in generate_step(mx.array(suffix), self.model, max_tokens=MAX_NEW_TOKENS,
+                                          sampler=lambda x: mx.argmax(x, axis=-1),
+                                          logits_processors=processors or None,
+                                          prompt_cache=self.cache):
+                token = int(token)
+                if token in STOP_TOKEN_IDS:
+                    break
+                out.append(token)
+        finally:
+            # generate_step feeds each token into the cache before yielding
+            # it, so the stop token (and on an error, whatever was in flight)
+            # is in there too. Trim the cache back to exactly the tokens we
+            # record, or every call leaves one stale token between the shared
+            # prefix and the next suffix.
+            known = ids + out
+            extra = self.cache[0].offset - len(known)
+            if extra > 0:
+                trim_prompt_cache(self.cache, extra)
+            self.cached = known[:self.cache[0].offset]
         return self.tokenizer.decode(out)
 
 

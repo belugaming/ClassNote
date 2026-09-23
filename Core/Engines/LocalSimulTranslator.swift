@@ -163,12 +163,53 @@ actor SimulTranslatorProcess {
             throw error
         }
 
-        stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        // One ordered stream of stdout chunks, drained by one task: a Task per
+        // chunk may reach the actor out of order, and a JSON line split
+        // across two reads would then be reassembled wrongly and lost.
+        let (chunks, sink) = AsyncStream<Data>.makeStream()
+        stdout.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
-            Task { await self?.ingest(data) }
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                sink.finish()
+            } else {
+                sink.yield(data)
+            }
         }
         if !leftover.isEmpty { ingest(leftover) }
+        Task { [weak self] in
+            for await chunk in chunks { await self?.ingest(chunk) }
+            // stdout closed: the sidecar is gone, and nothing will answer.
+            await self?.processEnded()
+        }
+        proc.terminationHandler = { [weak self] _ in
+            Task { await self?.processEnded() }
+        }
+    }
+
+    /// Fails every request still waiting: a crashed sidecar (the 14B model
+    /// running out of memory, say) must not leave Stop or Quit waiting on an
+    /// answer that is never coming.
+    private func processEnded() {
+        failPending(SimulTranslatorError.engineError(L10n.t("localASR.exitedEarly")))
+        if let process, !process.isRunning {
+            SidecarRegistry.shared.unregister(process.processIdentifier)
+            self.process = nil
+            stdinPipe = nil
+            stdoutPipe = nil
+            stderrPipe?.fileHandleForReading.readabilityHandler = nil
+            stderrPipe = nil
+        }
+    }
+
+    private func failPending(_ error: Error) {
+        let waiting = pending
+        pending.removeAll()
+        for (_, continuation) in waiting { continuation.resume(throwing: error) }
+    }
+
+    private func cancelRequest(_ id: Int) {
+        pending.removeValue(forKey: id)?.resume(throwing: CancellationError())
     }
 
     private func ingest(_ data: Data) {
@@ -212,22 +253,29 @@ actor SimulTranslatorProcess {
         body["id"] = id
         guard var data = try? JSONSerialization.data(withJSONObject: body) else { return [] }
         data.append(UInt8(ascii: "\n"))
-        return try await withCheckedThrowingContinuation { continuation in
-            pending[id] = continuation
-            do {
-                try stdinPipe.fileHandleForWriting.write(contentsOf: data)
-            } catch {
-                pending[id] = nil
-                continuation.resume(throwing: error)
+        // Cancellable: Stop gives up on a request after a timeout, and that
+        // has to actually end the wait.
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                guard !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                pending[id] = continuation
+                do {
+                    try stdinPipe.fileHandleForWriting.write(contentsOf: data)
+                } catch {
+                    pending[id] = nil
+                    continuation.resume(throwing: error)
+                }
             }
+        } onCancel: {
+            Task { await self.cancelRequest(id) }
         }
     }
 
     func shutdown() async {
-        for (_, continuation) in pending {
-            continuation.resume(throwing: CancellationError())
-        }
-        pending.removeAll()
+        failPending(CancellationError())
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stdoutPipe = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
@@ -286,13 +334,24 @@ final class LocalSimulSession {
         queue.append((nil, nil))
         pump()
         await worker?.value
+        guard !abandoned else { return }
         _ = try? await SimulTranslatorProcess.shared.request(["op": "end", "session": id])
     }
 
+    /// Drops whatever is still queued and stops the request in flight. For a
+    /// stop that has run out of time.
+    func abandon() {
+        abandoned = true
+        queue.removeAll()
+        worker?.cancel()
+    }
+
+    private var abandoned = false
+
     private func pump() {
-        guard worker == nil else { return }
+        guard worker == nil, !abandoned else { return }
         worker = Task { @MainActor [weak self] in
-            while let self, !self.queue.isEmpty {
+            while let self, !self.queue.isEmpty, !Task.isCancelled {
                 let item = self.queue.removeFirst()
                 await self.process(item)
             }
@@ -326,6 +385,8 @@ final class LocalSimulSession {
                 waitingRows.removeAll()
                 onTranslation(rows, text)
             }
+        } catch is CancellationError {
+            // Abandoned by a stop that ran out of time.
         } catch {
             onError(error)
         }

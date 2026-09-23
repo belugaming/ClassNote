@@ -166,12 +166,15 @@ enum LocalModelCatalog {
     @MainActor
     static func delete(_ model: LocalModel) async throws {
         guard !AppState.shared.isRecording else { throw DeleteError.recording }
+        // An import still needs its engines; stopping one under it would just
+        // relaunch it and download the model that is being deleted.
+        guard !AppState.shared.hasActiveImports else { throw DeleteError.inUse }
         try await stopUsers(of: model)
-        for url in model.locations where FileManager.default.fileExists(atPath: url.path) {
-            try FileManager.default.removeItem(at: url)
-        }
         if model.role == .recognition || model.role == .punctuation || model.role == .runtime {
             AppState.shared.isLocalEngineReady = false
+        }
+        for url in model.locations where FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
         }
     }
 

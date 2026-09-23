@@ -137,6 +137,14 @@ class PromptTests(unittest.TestCase):
         self.assertIn("参考下面的翻译：\neigenvalue 翻译成 特征值\nmatrix 翻译成 矩阵\n", prompt)
         self.assertNotIn("kernel", prompt)
 
+    def test_a_latin_term_must_be_a_whole_word(self):
+        prompt = translate_server.build_instruction(
+            "This program uses a lot of memory.", "en", "zh", terms=[["RAM", "内存"]])
+        self.assertNotIn("RAM", prompt)
+        prompt = translate_server.build_instruction(
+            "It needs more RAM.", "en", "zh", terms=[["RAM", "内存"]])
+        self.assertIn("RAM 翻译成 内存", prompt)
+
     def test_malformed_terms_are_ignored(self):
         prompt = translate_server.build_instruction(
             "hello", "en", "zh", terms=[["hello"], "hello", ["", "x"], None])

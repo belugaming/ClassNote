@@ -249,6 +249,9 @@ final class AppState: ObservableObject {
     /// import's entry is dropped the moment it finishes, and a window that
     /// re-resolved to the shared orchestrator would start showing the live
     /// recording's transcript — with a Stop button that kills it.
+    /// Whether an import or re-transcription is running.
+    var hasActiveImports: Bool { !importOrchestrators.isEmpty }
+
     func orchestrator(for windowId: String) -> SessionOrchestrator? {
         if let worker = importOrchestrators[windowId] { return worker }
         return windowId == Self.liveWindowId ? orchestrator : nil
