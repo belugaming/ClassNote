@@ -16,7 +16,7 @@ on:
       - ".github/workflows/model-integration.yml"
 
 concurrency:
-  group: models-${{ github.ref }}
+  group: model-integration-${{ github.ref }}
   # Queue rather than cancel: a run downloads GBs and is worth finishing.
   cancel-in-progress: false
 
@@ -27,7 +27,9 @@ jobs:
   r2t2:
     name: Confucius4-R2T2 streaming (CPU)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # MLX's CPU build is slow (minutes per decode); these runs are about
+    # correctness, not speed.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -52,15 +54,16 @@ jobs:
               w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(out.tobytes())
           PY
       - name: Run
-        timeout-minutes: 40
+        timeout-minutes: 150
         env:
-          R2T2_STEP_MS: "1280"
+          # A few large steps: same algorithm, far fewer CPU decodes.
+          R2T2_STEP_MS: "3000"
         run: python Tests/Integration/run_models.py r2t2 /tmp/speech.wav "$(cat /tmp/ref.txt)"
 
   hymt:
     name: Hy-MT2 prompt templates (CPU)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -69,8 +72,20 @@ jobs:
       - name: Install
         run: python -m pip install --quiet "mlx[cpu]==0.32.2" "mlx-lm==0.31.3" "huggingface_hub==1.32.0"
       - name: Run
-        timeout-minutes: 20
+        timeout-minutes: 100
         run: python Tests/Integration/run_models.py hymt
-      - name: T3PO plumbing (small stand-in model)
-        timeout-minutes: 15
+
+  simt:
+    name: T3PO plumbing, small stand-in model (CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: python -m pip install --quiet "mlx[cpu]==0.32.2" "mlx-lm==0.31.3" "huggingface_hub==1.32.0"
+      - name: Run
+        timeout-minutes: 45
         run: python Tests/Integration/run_models.py simt

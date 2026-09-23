@@ -92,7 +92,9 @@ def run_hymt():
 
     path = translate_server.resolve_model_path(translate_server.DEFAULT_MODEL,
                                                translate_server.DEFAULT_REVISION)
+    t0 = time.time()
     model, tokenizer = load(path)
+    print(f"[hymt] loaded in {time.time() - t0:.1f}s")
     print("[hymt] chat template:", repr(getattr(tokenizer, "chat_template", ""))[:300])
 
     cases = [
@@ -109,10 +111,11 @@ def run_hymt():
     for case in cases:
         prompt = translate_server.build_prompt(tokenizer, case["text"], case["source"], case["target"],
                                                context=case.get("context"), terms=case.get("terms"))
+        t0 = time.time()
         out = generate(model, tokenizer, prompt, max_tokens=128,
                        sampler=make_sampler(temp=0.0),
                        logits_processors=make_logits_processors(repetition_penalty=1.05))
-        print(f"[hymt] {case['text']!r} -> {out!r}")
+        print(f"[hymt] ({time.time() - t0:.1f}s) {case['text']!r} -> {out!r}")
         assert out.strip(), "empty translation"
         if case.get("context"):
             # The background must be read, not translated along with the line.
