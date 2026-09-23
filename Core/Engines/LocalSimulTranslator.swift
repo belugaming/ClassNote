@@ -65,6 +65,8 @@ actor SimulTranslatorProcess {
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
     private var pending: [Int: CheckedContinuation<[SimulTranslationEvent], Error>] = [:]
+    /// Receives a request's translation while it is being generated.
+    private var partialHandlers: [Int: @Sendable (String) -> Void] = [:]
     private var nextId = 1
     private var buffer = Data()
     private var starting: Task<Void, Error>?
@@ -205,10 +207,12 @@ actor SimulTranslatorProcess {
     private func failPending(_ error: Error) {
         let waiting = pending
         pending.removeAll()
+        partialHandlers.removeAll()
         for (_, continuation) in waiting { continuation.resume(throwing: error) }
     }
 
     private func cancelRequest(_ id: Int) {
+        partialHandlers[id] = nil
         pending.removeValue(forKey: id)?.resume(throwing: CancellationError())
     }
 
@@ -219,9 +223,14 @@ actor SimulTranslatorProcess {
             buffer.removeSubrange(buffer.startIndex...idx)
             guard !lineData.isEmpty,
                   let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                  let id = obj["id"] as? Int,
-                  let continuation = pending.removeValue(forKey: id)
+                  let id = obj["id"] as? Int
             else { continue }
+            if let partial = obj["partial"] as? String {
+                partialHandlers[id]?(partial)
+                continue
+            }
+            partialHandlers[id] = nil
+            guard let continuation = pending.removeValue(forKey: id) else { continue }
             if let error = obj["error"] as? String {
                 continuation.resume(throwing: SimulTranslatorError.engineError(error))
                 continue
@@ -241,8 +250,10 @@ actor SimulTranslatorProcess {
         }
     }
 
-    /// Sends one request and waits for its answer.
-    func request(_ payload: [String: Any]) async throws -> [SimulTranslationEvent] {
+    /// Sends one request and waits for its answer. `onPartial` gets the
+    /// translation as it is generated, the whole text so far each time.
+    func request(_ payload: [String: Any],
+                 onPartial: (@Sendable (String) -> Void)? = nil) async throws -> [SimulTranslationEvent] {
         try await ensureStarted()
         guard let stdinPipe, isRunning else {
             throw SimulTranslatorError.launchFailed(L10n.t("localASR.exitedEarly"))
@@ -262,10 +273,12 @@ actor SimulTranslatorProcess {
                     return
                 }
                 pending[id] = continuation
+                partialHandlers[id] = onPartial
                 do {
                     try stdinPipe.fileHandleForWriting.write(contentsOf: data)
                 } catch {
                     pending[id] = nil
+                    partialHandlers[id] = nil
                     continuation.resume(throwing: error)
                 }
             }
@@ -298,6 +311,9 @@ actor SimulTranslatorProcess {
 @MainActor
 final class LocalSimulSession {
     typealias Handler = @MainActor (_ rowIds: [Int64], _ translation: String) -> Void
+    /// The translation of the lines waiting so far while it is generated,
+    /// shown on `rowId` (the last of them). "" takes it down again.
+    typealias PartialHandler = @MainActor (_ rowId: Int64, _ partial: String) -> Void
 
     private let id = UUID().uuidString
     private let direction: String
@@ -308,10 +324,17 @@ final class LocalSimulSession {
     private var worker: Task<Void, Never>?
     private var started = false
     private let onTranslation: Handler
+    private let onPartial: PartialHandler?
     private let onError: @MainActor (Error) -> Void
+    /// Bumped per request, so a partial that reaches the main actor after
+    /// its request's answer is dropped instead of covering the translation.
+    private var partialEpoch = 0
+    /// The row showing the request's partial translation, if any.
+    private var partialRow: Int64?
 
     init?(source: String, target: String, glossary: TranslationGlossary,
           onTranslation: @escaping Handler,
+          onPartial: PartialHandler? = nil,
           onError: @escaping @MainActor (Error) -> Void) {
         guard let direction = SimulTranslatorProcess.direction(source: source, target: target) else {
             return nil
@@ -319,6 +342,7 @@ final class LocalSimulSession {
         self.direction = direction
         self.terms = glossary.pairs.map { [$0.0, $0.1] }
         self.onTranslation = onTranslation
+        self.onPartial = onPartial
         self.onError = onError
     }
 
@@ -360,6 +384,8 @@ final class LocalSimulSession {
     }
 
     private func process(_ item: (rowId: Int64?, text: String?)) async {
+        var translated = false
+        defer { endPartial(translated: translated) }
         do {
             if !started {
                 _ = try await SimulTranslatorProcess.shared.request([
@@ -373,16 +399,17 @@ final class LocalSimulSession {
                 waitingRows.append(rowId)
                 events = try await SimulTranslatorProcess.shared.request([
                     "op": "feed", "session": id, "text": text,
-                ])
+                ], onPartial: beginPartial())
             } else {
                 events = try await SimulTranslatorProcess.shared.request([
                     "op": "flush", "session": id,
-                ])
+                ], onPartial: beginPartial())
             }
             for event in events {
                 guard case .translation(_, let text) = event, !waitingRows.isEmpty else { continue }
                 let rows = waitingRows
                 waitingRows.removeAll()
+                translated = true
                 onTranslation(rows, text)
             }
         } catch is CancellationError {
@@ -390,5 +417,31 @@ final class LocalSimulSession {
         } catch {
             onError(error)
         }
+    }
+
+    /// The handler for one request's partial translations, which show on the
+    /// last waiting row.
+    private func beginPartial() -> (@Sendable (String) -> Void)? {
+        partialEpoch += 1
+        let epoch = partialEpoch
+        partialRow = nil
+        guard onPartial != nil, let row = waitingRows.last else { return nil }
+        return { [weak self] text in
+            Task { @MainActor in
+                guard let self, epoch == self.partialEpoch, !self.abandoned else { return }
+                self.partialRow = row
+                self.onPartial?(row, text)
+            }
+        }
+    }
+
+    /// A request is over. If it showed a partial and did not end in a
+    /// translation (it waited, failed or was cancelled), take the partial
+    /// down: nothing replaces it otherwise.
+    private func endPartial(translated: Bool) {
+        partialEpoch += 1
+        defer { partialRow = nil }
+        guard !translated, let row = partialRow else { return }
+        onPartial?(row, "")
     }
 }
