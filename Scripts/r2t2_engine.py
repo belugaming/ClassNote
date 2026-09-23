@@ -38,7 +38,7 @@ SAMPLE_RATE = 16000
 MODEL_REPO = "mlx-community/Confucius4-R2T2-8bit"
 # Commit to download. None means "whatever main points at"; pinned from the CI
 # job that prints model_info(...).sha, as for every other model the app uses.
-MODEL_REVISION: str | None = None
+MODEL_REVISION: str | None = "2d6d997c3e09c65a65b1b2576b6b9b7728df8eab"
 
 # Rolling audio window (seconds). The reference implementation's values.
 WINDOW_MAX_S = 16

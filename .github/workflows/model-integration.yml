@@ -17,7 +17,8 @@ on:
 
 concurrency:
   group: models-${{ github.ref }}
-  cancel-in-progress: true
+  # Queue rather than cancel: a run downloads GBs and is worth finishing.
+  cancel-in-progress: false
 
 jobs:
   r2t2:

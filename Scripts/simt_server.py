@@ -47,7 +47,7 @@ from queue import Queue
 SOURCE_REPO = "netease-youdao/Confucius4-T3PO"
 # Commit to download; None means main. Pinned from the CI job that prints
 # model_info(...).sha for every repo the app uses.
-SOURCE_REVISION: str | None = None
+SOURCE_REVISION: str | None = "446e5dcca080740f2c2dc9d06a91ed66a9920410"
 Q_BITS = 4
 Q_GROUP_SIZE = 64
 SOURCE_ALLOW_PATTERNS = ["*.json", "*.safetensors", "*.txt", "*.jinja",

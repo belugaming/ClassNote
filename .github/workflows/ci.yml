@@ -159,7 +159,6 @@ jobs:
           repos += ["csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12",
                     "mlx-community/Hy-MT2-1.8B-4bit",
                     "mlx-community/Confucius4-R2T2-8bit",
-                    "mlx-community/Confucius4-R2T2-4bit",
                     "mlx-community/Confucius4-R2T2-bf16",
                     "netease-youdao/Confucius4-R2T2",
                     "netease-youdao/Confucius4-T3PO",
