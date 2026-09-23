@@ -302,6 +302,9 @@ class _FakeEngine:
         self.recognizer = recognizer
         self.punctuator = punctuator
 
+    def new_transcriber(self, language, context="", file=False):
+        return Transcriber(self, language)
+
 
 class _FakePunctuator:
     """Places marks by content position, the way the real one reports them:

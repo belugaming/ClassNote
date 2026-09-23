@@ -899,6 +899,29 @@ final class SessionOrchestrator: ObservableObject {
         return failed
     }
 
+    /// Retranslates the one sentence `rowId` belongs to, with the sentences
+    /// before it as context. Returns false if the translation did not land.
+    static func retranslateSentence(containing rowId: Int64, sessionId: String) async -> Bool {
+        let config = AppState.shared.apiConfig
+        let translator = EngineFactory.makeTranslator(config: config,
+                                                      backend: AppState.shared.translationBackend)
+        let course = try? await CourseRepository.shared.forSession(id: sessionId)
+        guard let segments = try? await SegmentRepository.shared.all(sessionId: sessionId) else {
+            return false
+        }
+        let groups = SentenceGroups.group(segments.filter { $0.id != nil && !$0.textOriginal.isEmpty })
+        guard let index = groups.firstIndex(where: { $0.contains { $0.id == rowId } }) else {
+            return false
+        }
+        let context = groups[max(0, index - contextSentences)..<index]
+            .map { SentenceGroups.join($0.map(\.textOriginal)) }
+        let job = SentenceJob(lines: groups[index],
+                              text: SentenceGroups.join(groups[index].map(\.textOriginal)),
+                              context: Array(context))
+        return (try? await translateOne(job, translator: translator, config: config,
+                                        glossary: CourseContext(course: course).translationGlossary)) ?? false
+    }
+
     /// One sentence of a batch translation.
     struct SentenceJob: Sendable {
         let lines: [Segment]

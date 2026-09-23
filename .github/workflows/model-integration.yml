@@ -1,0 +1,65 @@
+name: Model integration
+
+# Runs the sidecars' model code against the real weights, on MLX's CPU build.
+# Separate from CI: it downloads several GB, and it only needs to run when the
+# code that talks to a model changes.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "Scripts/r2t2_engine.py"
+      - "Scripts/asr_server.py"
+      - "Scripts/translate_server.py"
+      - "Scripts/simt_server.py"
+      - "Scripts/requirements-local.txt"
+      - "Tests/Integration/**"
+      - ".github/workflows/model-integration.yml"
+
+concurrency:
+  group: models-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  r2t2:
+    name: Confucius4-R2T2 streaming (CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq espeak-ng libportaudio2 > /dev/null
+          grep -vE '^(mlx|sherpa-onnx)' Scripts/requirements-local.txt > /tmp/req.txt
+          python -m pip install --quiet -r /tmp/req.txt "mlx[cpu]==0.32.2" "mlx-lm==0.31.3" "mlx-audio==0.5.5"
+      - name: Synthesize speech
+        run: |
+          echo "The mitochondria is the powerhouse of the cell. It produces energy for the body through cellular respiration. Today we will study glycolysis, which happens in the cytoplasm." > /tmp/ref.txt
+          espeak-ng -v en-us -s 150 -w /tmp/raw.wav -f /tmp/ref.txt
+          python - <<'PY'
+          import wave, numpy as np
+          with wave.open("/tmp/raw.wav") as w:
+              rate, data = w.getframerate(), np.frombuffer(w.readframes(w.getnframes()), np.int16)
+          idx = np.arange(0, len(data), rate / 16000.0)
+          out = np.interp(idx, np.arange(len(data)), data).astype(np.int16)
+          with wave.open("/tmp/speech.wav", "wb") as w:
+              w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(out.tobytes())
+          PY
+      - name: Run
+        run: python Tests/Integration/run_models.py r2t2 /tmp/speech.wav "$(cat /tmp/ref.txt)"
+
+  hymt:
+    name: Hy-MT2 prompt templates (CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: python -m pip install --quiet "mlx[cpu]==0.32.2" "mlx-lm==0.31.3" "huggingface_hub==1.32.0"
+      - name: Run
+        run: python Tests/Integration/run_models.py hymt

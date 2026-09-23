@@ -1787,31 +1787,12 @@ final class SessionDetailViewModel: ObservableObject {
               !segment.textOriginal.isEmpty,
               let sid = currentSessionId,
               !retryingSegmentIds.contains(rowId) else { return }
-        let config = AppState.shared.apiConfig
-        let translator = EngineFactory.makeTranslator(config: config,
-                                                      backend: AppState.shared.translationBackend)
-        let glossary = courseContext.translationGlossaryBlock
         retryingSegmentIds.insert(rowId)
         defer { retryingSegmentIds.remove(rowId) }
-        var buf = ""
-        do {
-            for try await delta in translator.translate(text: segment.textOriginal,
-                                                        sourceLanguage: config.sourceLanguage,
-                                                        targetLanguage: config.targetLanguage,
-                                                        context: [],
-                                                        glossary: glossary) {
-                buf += delta
-            }
-            try await SegmentRepository.shared.updateTranslation(id: rowId,
-                                                                 textTranslated: buf,
-                                                                 state: .ok)
-        } catch {
-            // Keep whatever arrived and leave the row marked, so the failed
-            // filter still finds it next time.
-            try? await SegmentRepository.shared.updateTranslation(id: rowId,
-                                                                  textTranslated: buf,
-                                                                  state: .failed)
-            AppState.shared.setError("Translation error: \(error.localizedDescription)")
+        // The whole sentence the line belongs to: a line cut mid-sentence has
+        // no translation of its own to retry.
+        if !(await SessionOrchestrator.retranslateSentence(containing: rowId, sessionId: sid)) {
+            AppState.shared.setError(L10n.t("detail.translation.retryFailed"))
         }
         guard currentSessionId == sid, let current = session, current.session.id == sid else { return }
         if let segs = try? await SegmentRepository.shared.all(sessionId: sid) {
