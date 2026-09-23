@@ -139,11 +139,18 @@ def run_simt_plumbing():
     lines = ["The cell membrane", "is selectively permeable.", "It controls what enters",
              "and what leaves the cell."]
     t0 = time.time()
+    partials, translations = [], []
     for line in lines:
-        events = session.feed(line)
+        events = session.feed(line, partials.append)
+        translations += [e["text"] for e in events if e["type"] == "translation"]
         print(f"[simt] feed {line!r} -> {events} (cached {len(model.cached)} tokens)")
-    events = session.flush()
+    events = session.flush(partials.append)
+    translations += [e["text"] for e in events if e["type"] == "translation"]
     print(f"[simt] flush -> {events}; {time.time() - t0:.1f}s")
+    print(f"[simt] {len(partials)} partial updates, last {partials[-1] if partials else None!r}")
+    if translations:
+        # Every translation streamed on its way out and ended where it landed.
+        assert partials and partials[-1] == translations[-1], "partials do not end in the translation"
     # The cache must track the prompt: a follow-up call reuses most of it.
     before = len(model.cached)
     prompt = simt_server.chat_prompt(simt_server.build_user_message(

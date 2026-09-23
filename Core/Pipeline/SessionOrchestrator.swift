@@ -736,6 +736,11 @@ final class SessionOrchestrator: ObservableObject {
             onTranslation: { [weak self] rows, text in
                 self?.applySimultaneousTranslation(rows: rows, text: text, persist: persist)
             },
+            onPartial: { [weak self] row, text in
+                // Display only: the finished translation replaces it and is
+                // what gets saved.
+                self?.transcript.updateTranslation(rowId: row, translated: text)
+            },
             onError: { error in
                 AppState.shared.setError("Translation error: \(error.localizedDescription)")
             })

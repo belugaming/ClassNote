@@ -24,6 +24,9 @@ Server -> client:
     READY / FATAL <msg>      (plain lines)
     {"id": 2, "events": [{"type": "translation", "source": "...", "text": "..."}]}
     {"id": 2, "events": [{"type": "wait"}]}
+    {"id": 2, "partial": "text so far"}   (zero or more, before the answer to
+                                           a feed/flush: the translation as it
+                                           is generated, whole each time)
     {"id": 2, "error": "..."}
 
 Weights: there is no MLX build of T3PO, so the first run downloads the
@@ -158,6 +161,21 @@ def parse_response(raw) -> tuple[str, str]:
     return ("TRANS", text) if text else ("WAIT", "")
 
 
+_MARKERS = ("WAIT", "TRANS")
+
+
+def partial_text(raw) -> str:
+    """What to show of a completion still being generated: the text so far
+    as parse_response would read it, or "" while it could still turn out to
+    be a WAIT (or a bare TRANS marker) rather than a translation."""
+    # A token cut mid-character decodes to U+FFFD until the rest arrives.
+    text = str(raw or "").replace("<|im_end|>", "").rstrip("\ufffd").strip()
+    bare = re.sub(r"[<>\s]", "", text).upper()
+    if not bare or any(m.startswith(bare) for m in _MARKERS):
+        return ""
+    return sanitize(_TRANS_PREFIX.sub("", text, count=1))
+
+
 def split_source(text: str, direction: str) -> list[str]:
     """Source units: whitespace words for English; for Chinese one unit per
     character, with runs of ASCII letters/digits kept whole."""
@@ -246,8 +264,14 @@ class SimulSession:
     """One lecture's translation state: committed (source, target) pairs and
     the source text heard since the last commit.
 
-    `model.complete(prompt, force, latency) -> str` is the only model call; a
-    forced call may not return empty (the engine must commit something).
+    `model.complete(prompt, force, latency, on_text) -> str` is the only
+    model call; a forced call may not return empty (the engine must commit
+    something). `on_text`, when given, is called with the decoded completion
+    so far as it grows.
+
+    `on_partial`, passed to feed/flush, receives the translation as it is
+    generated (the whole text so far each time); nothing is sent for a call
+    that ends up waiting.
     """
 
     def __init__(self, model, direction: str, latency: str = "native", terms=None):
@@ -263,7 +287,7 @@ class SimulSession:
     def history_text(self) -> str:
         return "".join(f"{s}¦{t}§" for s, t in self.history)
 
-    def feed(self, text: str) -> list[dict]:
+    def feed(self, text: str, on_partial=None) -> list[dict]:
         incoming = [t for t in split_source(text, self.direction) if t]
         if not incoming:
             return []
@@ -281,20 +305,29 @@ class SimulSession:
         if not force and self.direction == "zh2en" and LATIN_TOKEN.match(self.buffer[-1] or ""):
             # A trailing English word inside Chinese is often still being said.
             return []
-        return [self._translate(force=force) or {"type": "wait"}]
+        return [self._translate(force, on_partial) or {"type": "wait"}]
 
-    def flush(self) -> list[dict]:
+    def flush(self, on_partial=None) -> list[dict]:
         if not self.buffer or not source_units(self.buffer, self.direction):
             self.buffer.clear()
             return []
-        return [self._translate(force=True) or {"type": "wait"}]
+        return [self._translate(True, on_partial) or {"type": "wait"}]
 
-    def _translate(self, force: bool) -> dict | None:
+    def _translate(self, force: bool, on_partial=None) -> dict | None:
         source = join_source(self.buffer, self.direction)
         glossary = glossary_block(terms_in(self.terms, source), self.direction)
         prompt = chat_prompt(build_user_message(self.direction, self.history_text(),
                                                 source, glossary))
-        raw = self.model.complete(prompt, force=force, latency=self.latency)
+        on_text = None
+        if on_partial is not None:
+            shown = [""]
+
+            def on_text(raw):
+                text = partial_text(raw)
+                if text and text != shown[0]:
+                    shown[0] = text
+                    on_partial(text)
+        raw = self.model.complete(prompt, force=force, latency=self.latency, on_text=on_text)
         action, target = parse_response(raw)
         if action == "WAIT":
             return None
@@ -324,7 +357,7 @@ class MLXSimulModel:
         self.cache = make_prompt_cache(self.model)
         self.cached: list[int] = []
 
-    def complete(self, prompt: str, force: bool, latency: str) -> str:
+    def complete(self, prompt: str, force: bool, latency: str, on_text=None) -> str:
         import mlx.core as mx
         from mlx_lm.generate import generate_step
         from mlx_lm.models.cache import trim_prompt_cache
@@ -377,6 +410,10 @@ class MLXSimulModel:
                 if token in STOP_TOKEN_IDS:
                     break
                 out.append(token)
+                if on_text is not None:
+                    # Decoding the whole completion each time is a few dozen
+                    # tokens at most, and gets multi-token characters right.
+                    on_text(self.tokenizer.decode(out))
         finally:
             # generate_step feeds each token into the cache before yielding
             # it, so the stop token (and on an error, whatever was in flight)
@@ -478,9 +515,12 @@ class Server:
     """Owns the model and the sessions; runs every request on one thread,
     because MLX state is thread-affine and requests must stay in order."""
 
-    def __init__(self, model):
+    def __init__(self, model, send=None):
         self.model = model
         self.sessions: dict[str, SimulSession] = {}
+        # Where partial translations go (stdout in the real process); None
+        # sends none.
+        self.send = send
 
     def handle(self, req: dict) -> dict:
         req_id = req.get("id")
@@ -498,10 +538,14 @@ class Server:
             session = self.sessions.get(sid)
             if session is None:
                 return {"id": req_id, "error": f"unknown session {sid!r}"}
+            on_partial = None
+            if self.send is not None:
+                def on_partial(text):
+                    self.send({"id": req_id, "partial": text})
             if op == "feed":
-                return {"id": req_id, "events": session.feed(str(req.get("text") or ""))}
+                return {"id": req_id, "events": session.feed(str(req.get("text") or ""), on_partial)}
             if op == "flush":
-                return {"id": req_id, "events": session.flush()}
+                return {"id": req_id, "events": session.flush(on_partial)}
             return {"id": req_id, "error": f"unknown op {op!r}"}
         except Exception as exc:
             log(f"[simt] {traceback.format_exc()}")
@@ -535,7 +579,7 @@ def main():
             with contextlib.redirect_stdout(sys.stderr):
                 path = convert_model(args.model_dir, stage)
                 stage("load")
-                holder["server"] = Server(MLXSimulModel(path))
+                holder["server"] = Server(MLXSimulModel(path), send=emit)
         except Exception as exc:
             log(f"[fatal] {traceback.format_exc()}")
             failure.append(str(exc).splitlines()[0] if str(exc) else "load failed")

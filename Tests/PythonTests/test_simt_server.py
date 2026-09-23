@@ -21,9 +21,14 @@ class ScriptedModel:
         self.answers = list(answers)
         self.calls = []
 
-    def complete(self, prompt, force, latency):
+    def complete(self, prompt, force, latency, on_text=None):
         self.calls.append((prompt, force, latency))
-        return self.answers.pop(0) if self.answers else ""
+        answer = self.answers.pop(0) if self.answers else ""
+        if on_text is not None:
+            # As generation would: the completion so far, a character a time.
+            for i in range(1, len(answer) + 1):
+                on_text(answer[:i])
+        return answer
 
 
 class ProtocolTests(unittest.TestCase):
@@ -110,7 +115,49 @@ class BoundaryTests(unittest.TestCase):
         self.assertIn("Python NumPy", model.calls[-1][0])
 
 
+class PartialTests(unittest.TestCase):
+    def test_the_translation_arrives_as_it_grows(self):
+        seen = []
+        session = SimulSession(ScriptedModel(["细胞膜"]), "en2zh")
+        events = session.feed("The cell membrane", seen.append)
+        self.assertEqual(seen, ["细", "细胞", "细胞膜"])
+        self.assertEqual(events[0]["text"], "细胞膜")
+
+    def test_a_wait_sends_nothing(self):
+        seen = []
+        session = SimulSession(ScriptedModel(["", "<WAIT>"]), "en2zh")
+        session.feed("The cell", seen.append)
+        session.feed("membrane", seen.append)
+        self.assertEqual(seen, [])
+
+    def test_a_marker_is_held_until_it_cannot_be_one(self):
+        self.assertEqual(simt_server.partial_text("W"), "")
+        self.assertEqual(simt_server.partial_text("<TRA"), "")
+        self.assertEqual(simt_server.partial_text("Tra"), "")
+        self.assertEqual(simt_server.partial_text("Transport"), "Transport")
+        self.assertEqual(simt_server.partial_text("TRANS: 细胞"), "细胞")
+        self.assertEqual(simt_server.partial_text("We"), "We")
+        self.assertEqual(simt_server.partial_text("细\ufffd"), "细")
+        self.assertEqual(simt_server.partial_text("a¦b"), "a｜b")
+
+    def test_flush_streams_too(self):
+        seen = []
+        session = SimulSession(ScriptedModel(["", "你好"]), "en2zh")
+        session.feed("hello")
+        session.flush(seen.append)
+        self.assertEqual(seen, ["你", "你好"])
+
+
 class ServerTests(unittest.TestCase):
+    def test_partials_go_out_before_the_answer(self):
+        sent = []
+        server = simt_server.Server(ScriptedModel(["你好"]), send=sent.append)
+        server.handle({"id": 1, "op": "start", "session": "a", "direction": "en2zh"})
+        out = server.handle({"id": 2, "op": "flush", "session": "a"})
+        self.assertEqual(out, {"id": 2, "events": []})   # nothing held yet
+        server.handle({"id": 3, "op": "feed", "session": "a", "text": "hello " * 20})
+        self.assertEqual(sent, [{"id": 3, "partial": "你"}, {"id": 3, "partial": "你好"}])
+
     def test_request_loop(self):
         server = simt_server.Server(ScriptedModel(["", "你好世界"]))
         self.assertEqual(server.handle({"id": 1, "op": "start", "session": "a", "direction": "en2zh"}),
