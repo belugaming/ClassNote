@@ -1,0 +1,31 @@
+# Every local sidecar (asr_server.py, translate_server.py, simt_server.py,
+# llm_server.py) runs from one venv built from this file.
+#
+# Pinned exactly, to whatever was current on PyPI on 2026-09-23. Two machines
+# installing a week apart otherwise get different programs: mlx-lm in
+# particular has changed stream_generate's chunk shape between releases, and
+# the venv is built from this file on the user's machine, not shipped.
+#
+# To bump: pick the new versions, install them into a scratch venv on macOS
+# arm64, run a real recording plus a file import through the app, then edit
+# this file and bump LocalASREnvironment.requirementsGeneration so existing
+# venvs reinstall. Transitive dependencies are deliberately left unpinned --
+# pinning them without --require-hashes buys nothing, and pip refuses a
+# partially hashed file.
+
+# ASR: nemotron-3.5-asr-streaming through sherpa-onnx (ONNX Runtime, CPU).
+sherpa-onnx==1.13.8
+# Fetches weights from Hugging Face into ~/.cache/huggingface.
+huggingface_hub==1.32.0
+# numpy stays a minor behind: 2.5.x declares Requires-Python >=3.12, and
+# LocalASREnvironment accepts any interpreter from 3.11 up. 2.4.6 is the last
+# release that installs on 3.11, which is also what CI runs. Raise this only
+# together with the floor in LocalASREnvironment.minimumPythonVersion.
+numpy==2.4.6
+websockets==17.1
+# MLX: Hy-MT2 and Confucius4-T3PO translation, Qwen3 notes (mlx-lm), and the
+# Confucius4-R2T2 recogniser (mlx-audio's Qwen3-ASR model).
+mlx==0.32.2
+mlx-lm==0.31.3
+mlx-audio==0.5.5
+transformers==5.17.0

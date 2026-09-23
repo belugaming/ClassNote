@@ -69,6 +69,7 @@ actor LocalASRProcessManager {
         // --chunk-ms selects which nemotron export the sidecar loads; each
         // chunk size is a separate ~650 MB model file.
         var arguments = [scriptPath, "--port", "\(port)",
+                         "--engine", engine.sidecarEngine,
                          "--chunk-ms", LocalEngineLatency.current.rawValue]
         // The model is multilingual, so this is only the default language hint
         // for connections that do not send their own `config` frame.

@@ -12,12 +12,7 @@ enum GlobalShortcuts {
     static func register() {
         KeyboardShortcuts.onKeyDown(for: .toggleRecording) {
             Task { @MainActor in
-                let app = AppState.shared
-                if app.isRecording {
-                    app.stopRecording()
-                } else {
-                    app.startNewSession(source: .microphone)
-                }
+                RecordingLauncher.toggle(AppState.shared)
             }
         }
         KeyboardShortcuts.onKeyDown(for: .markHighlight) {
@@ -32,7 +27,7 @@ enum GlobalShortcuts {
         }
         KeyboardShortcuts.onKeyDown(for: .toggleOverlay) {
             Task { @MainActor in
-                NotificationCenter.default.post(name: .toggleOverlay, object: nil)
+                WindowRouter.shared.toggleOverlay()
             }
         }
     }

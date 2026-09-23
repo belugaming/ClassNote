@@ -1,7 +1,16 @@
 import Foundation
 
+/// Which recogniser the local ASR sidecar runs.
+///
+/// `funasr` and `nemotron` are historical names for the same sherpa-onnx
+/// nemotron engine, kept because stored settings still carry them.
 enum LocalASREngineKind: String, Equatable {
     case funasr, nemotron
+    /// NetEase Youdao's Confucius4-R2T2 (Qwen3-ASR 1.7B, append-only streaming).
+    case r2t2
+
+    /// The value `asr_server.py --engine` takes.
+    var sidecarEngine: String { self == .r2t2 ? "r2t2" : "nemotron" }
 }
 
 struct InstallProgress: Sendable {
@@ -38,22 +47,25 @@ struct LocalASREnvironment: Sendable {
         venvURL.appendingPathComponent("bin/python3")
     }
 
-    /// Bumped whenever the requirements files change in a way an existing venv
+    /// Bumped whenever the requirements file changes in a way an existing venv
     /// cannot satisfy, so that install() runs again instead of the sidecar
     /// failing on an import. 2: sherpa-onnx replaced mlx-audio. 3: pinned exact
     /// versions, so a venv built from the floating set is a different program.
-    static let requirementsGeneration = 3
+    /// 4: one requirements file for every sidecar, adding mlx-audio (R2T2).
+    static let requirementsGeneration = 4
 
-    private func installMarkerURL(engine: LocalASREngineKind) -> URL {
-        venvURL.appendingPathComponent(".installed-\(engine.rawValue)-v\(Self.requirementsGeneration)")
+    private var installMarkerURL: URL {
+        venvURL.appendingPathComponent(".installed-v\(Self.requirementsGeneration)")
     }
 
-    func isReady(engine: LocalASREngineKind) -> Bool {
+    /// Whether the venv is built. Every local sidecar shares it, so the engine
+    /// no longer matters; the parameter stays so call sites read naturally.
+    func isReady(engine: LocalASREngineKind = .funasr) -> Bool {
         guard FileManager.default.fileExists(atPath: pythonBinURL.path) else { return false }
-        return FileManager.default.fileExists(atPath: installMarkerURL(engine: engine).path)
+        return FileManager.default.fileExists(atPath: installMarkerURL.path)
     }
 
-    func install(engine: LocalASREngineKind) -> AsyncThrowingStream<InstallProgress, Error> {
+    func install(engine: LocalASREngineKind = .funasr) -> AsyncThrowingStream<InstallProgress, Error> {
         AsyncThrowingStream { continuation in
             Task {
                 do {
@@ -80,7 +92,7 @@ struct LocalASREnvironment: Sendable {
                     }
                     continuation.yield(InstallProgress(stage: L10n.t("localASR.installDeps"),
                                                       fraction: nil))
-                    let reqPath = Bundle.main.path(forResource: "requirements-\(engine.rawValue)", ofType: "txt")
+                    let reqPath = Bundle.main.path(forResource: "requirements-local", ofType: "txt")
                     guard let reqPath else {
                         throw LocalASREnvironmentError.pipInstallFailed("缺少 requirements 文件")
                     }
@@ -98,7 +110,7 @@ struct LocalASREnvironment: Sendable {
                         continuation.yield(InstallProgress(
                             stage: "\(L10n.t("localASR.installDeps")) \(package)", fraction: nil))
                     }
-                    FileManager.default.createFile(atPath: installMarkerURL(engine: engine).path,
+                    FileManager.default.createFile(atPath: installMarkerURL.path,
                                                    contents: nil)
                     continuation.yield(InstallProgress(stage: L10n.t("localASR.installDone"),
                                                       fraction: 1.0))
@@ -138,7 +150,7 @@ struct LocalASREnvironment: Sendable {
 
     /// Minimum interpreter version the pinned dependency set supports:
     /// `websockets==17.1` and `numpy==2.4.6` both require Python >= 3.11 (see
-    /// Scripts/requirements-nemotron.txt). Raise this together with the pins.
+    /// Scripts/requirements-local.txt). Raise this together with the pins.
     ///
     /// This read `(major: 10, minor: 0)` — i.e. "Python 10.0" — while
     /// `pythonVersion(of:)` returns `(3, 14)` for Python 3.14. Tuple comparison

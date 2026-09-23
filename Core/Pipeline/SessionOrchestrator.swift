@@ -29,10 +29,25 @@ final class SessionOrchestrator: ObservableObject {
     private var draftTranslateTask: Task<Void, Never>?
     private var tickerTask: Task<Void, Never>?
     private var ephemeralRowId: Int64 = 0
-    /// Maps engine-local segment IDs (from local streaming ASR engines that
-    /// emit revision events) to their corresponding database rowId, so we can
-    /// apply the revised text to the correct row when a 2-pass correction arrives.
-    private var engineSegmentToRowId: [Int64: Int64] = [:]
+    /// Lines of the sentence still being spoken, waiting for the line that
+    /// ends it. Translation works on whole sentences; see `SentenceGroups`.
+    private var pendingSentence: [(rowId: Int64, text: String)] = []
+    /// The last few sentences sent to translation, oldest first: the context
+    /// the next one is translated with.
+    private var sentenceHistory: [String] = []
+    /// Whether finished sentences are written back to the database. False for a
+    /// live translation that is never saved.
+    private var persistTranslations = true
+    /// The translator and config the live pipeline runs with, kept so Stop can
+    /// translate a sentence the recording ended in the middle of.
+    private var liveTranslator: TranslationProvider?
+    private var liveConfig: ApiConfig?
+    /// The simultaneous translator (T3PO) for this recording or import, when
+    /// that is the selected backend and it covers the language pair. It
+    /// replaces sentence grouping: T3PO itself decides when it has heard
+    /// enough to translate.
+    private var simulSession: LocalSimulSession?
+    private var simulChecked = false
     /// The stop currently in flight, if any. Every start calls `stop()` first
     /// and the Stop button can be double-tapped, so the second caller has to
     /// *join* the first rather than skip it: the drain takes seconds, and both
@@ -61,7 +76,8 @@ final class SessionOrchestrator: ObservableObject {
 
     private func makeSTTProvider(config: ApiConfig, backend: SttBackend) -> STTProvider {
         if let sttProviderOverride { return sttProviderOverride }
-        return EngineFactory.makeSTT(config: config, backend: backend)
+        return EngineFactory.makeSTT(config: config, backend: backend,
+                                     hint: courseContext.recognitionHint)
     }
 
     /// Starts a new session, opens audio capture, begins STT/translation pipeline.
@@ -83,7 +99,7 @@ final class SessionOrchestrator: ObservableObject {
         self.isEphemeralTranslation = false
         self.statusText = "Starting capture…"
         self.transcript.reset()
-        self.engineSegmentToRowId.removeAll()
+        self.resetSentenceState()
         self.engineTimeOffsetMs = 0
         self.currentTimestampMs = 0
         self.ephemeralRowId = 0
@@ -149,7 +165,7 @@ final class SessionOrchestrator: ObservableObject {
         self.isEphemeralTranslation = true
         self.statusText = "Live translation only"
         self.transcript.reset()
-        self.engineSegmentToRowId.removeAll()
+        self.resetSentenceState()
         self.engineTimeOffsetMs = 0
         self.currentTimestampMs = 0
         self.ephemeralRowId = 0
@@ -228,7 +244,7 @@ final class SessionOrchestrator: ObservableObject {
         self.isEphemeralTranslation = false
         self.statusText = "Importing \(sourceLabel)"
         self.transcript.reset()
-        self.engineSegmentToRowId.removeAll()
+        self.resetSentenceState()
         self.engineTimeOffsetMs = 0
         self.currentTimestampMs = 0
         self.ephemeralRowId = 0
@@ -280,7 +296,8 @@ final class SessionOrchestrator: ObservableObject {
                                            textTranslated: "",
                                            isFinal: true,
                                            confidence: 0,
-                                           version: 1)
+                                           version: 1,
+                                           continuesNext: event.continuesSentence)
                         let rowId: Int64
                         if replaceExisting {
                             // Not committed yet, so the live view gets the same
@@ -294,12 +311,16 @@ final class SessionOrchestrator: ObservableObject {
                         self.transcript.appendFinal(rowId: rowId,
                                                     startMs: event.startMs,
                                                     endMs: event.endMs,
-                                                    original: polishedText)
+                                                    original: polishedText,
+                                                    continuesNext: event.continuesSentence)
                         self.currentTimestampMs = event.endMs
                         lastEndMs = max(lastEndMs, event.endMs)
                         if !replaceExisting, AppState.shared.translationEnabled {
-                            self.translate(rowId: rowId, text: polishedText,
-                                           translator: translator, config: config)
+                            self.enqueueForTranslation(rowId: rowId,
+                                                       text: polishedText,
+                                                       continuesSentence: event.continuesSentence,
+                                                       translator: translator,
+                                                       config: config)
                         }
                     }
                 }
@@ -307,6 +328,11 @@ final class SessionOrchestrator: ObservableObject {
                 // consuming task is cancelled rather than throwing, so ask the
                 // task directly instead of reading "the loop ended" as success.
                 try Task.checkCancellation()
+                if !replaceExisting, AppState.shared.translationEnabled {
+                    // A file that ends mid-sentence still gets that sentence.
+                    self.flushPendingSentence(translator: translator, config: config)
+                    await self.finishSimultaneous(timeout: .seconds(120))
+                }
                 if replaceExisting {
                     let ids = try await SegmentRepository.shared.replaceAll(sessionId: sessionId,
                                                                              with: buffered)
@@ -320,7 +346,7 @@ final class SessionOrchestrator: ObservableObject {
                         _ = try await self.translateSegments(committed,
                                                              translator: translator,
                                                              config: config,
-                                                             glossary: self.courseContext.translationGlossaryBlock)
+                                                             glossary: self.courseContext.translationGlossary)
                     }
                 }
                 try await SessionRepository.shared.setEnded(sessionId,
@@ -434,6 +460,14 @@ final class SessionOrchestrator: ObservableObject {
         let stt = sttTask
         sttTask = nil
         await drain(stt, timeout: drainTimeout)
+        // Whatever the engine flushed last may have been a line cut mid
+        // sentence; nothing will come to finish it now.
+        if let translator = liveTranslator, let config = liveConfig {
+            flushPendingSentence(translator: translator, config: config)
+        }
+        liveTranslator = nil
+        liveConfig = nil
+        await finishSimultaneous(timeout: drainTimeout)
         await drainTranslations(timeout: drainTimeout)
 
         // Only a live recording's row is ours to close: an import writes its
@@ -454,6 +488,28 @@ final class SessionOrchestrator: ObservableObject {
         isEphemeralTranslation = false
         statusText = "Stopped"
         finishImportWaiters(with: CancellationError())
+    }
+
+    /// Lets T3PO translate what it was still holding, bounded like the other
+    /// drains: a wedged sidecar must not hold Stop.
+    private func finishSimultaneous(timeout: Duration) async {
+        guard let simul = simulSession else { return }
+        simulSession = nil
+        simulChecked = false
+        let finishing = Task { @MainActor in await simul.finish() }
+        // Abandoning is what ends the wait: cancelling the task alone would
+        // not stop a request the sidecar never answers.
+        let watchdog = Task { @MainActor in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled else { return }
+            simul.abandon()
+        }
+        await withTaskCancellationHandler {
+            await finishing.value
+        } onCancel: {
+            Task { @MainActor in simul.abandon() }
+        }
+        watchdog.cancel()
     }
 
     /// Awaits `task`, cancelling it only if it outstays `timeout`.
@@ -537,9 +593,9 @@ final class SessionOrchestrator: ObservableObject {
                         return
                     }
                     self.statusText = L10n.t("live.engineReconnecting")
-                    // Engine-local segment ids and the engine clock both restart
-                    // at 0 on a new connection.
-                    self.engineSegmentToRowId.removeAll()
+                    // The engine clock restarts at 0 on a new connection. A
+                    // sentence left open stays pending: its rest arrives on
+                    // the new connection.
                     self.engineTimeOffsetMs = self.currentTimestampMs
                     if backend.isLocalSidecar, attempt >= 2 {
                         // Twice in a row means the process is wedged, not the
@@ -561,6 +617,9 @@ final class SessionOrchestrator: ObservableObject {
         let stt = makeSTTProvider(config: config, backend: backend)
         let translator = EngineFactory.makeTranslator(config: config,
                                                       backend: AppState.shared.translationBackend)
+        liveTranslator = translator
+        liveConfig = config
+        persistTranslations = persistSegments
         // Feed all chunks (including short silences) to STT — it does its own
         // silence-aware sentence buffering. A naive VAD pre-filter would prevent
         // it from seeing the trailing silence that signals "end of sentence".
@@ -577,62 +636,17 @@ final class SessionOrchestrator: ObservableObject {
             if !AppState.shared.localEngineStatus.isEmpty {
                 AppState.shared.localEngineStatus = ""
             }
-            // 2-pass correction from a local streaming engine (FunASR):
-            // replaces the text of a segment we already committed as
-            // final. Must be checked before the isFinal guard below,
-            // since revision events themselves report isFinal == true.
-            if event.isRevision, let segId = event.engineSegmentId {
-                if let rowId = self.engineSegmentToRowId[segId] {
-                    let polishedText = TranscriptTextPolisher.polish(event.text)
-                    let shouldRetranslate = AppState.shared.translationEnabled
-                    transcript.reviseFinal(rowId: rowId, newText: polishedText)
-                    var existingTranslation = ""
-                    if shouldRetranslate {
-                        // The existing translation was produced from the
-                        // streaming draft — which is exactly the text pass 2
-                        // just corrected. Keeping it would pair a fixed
-                        // transcript with a translation of the broken one.
-                        let old = self.translateTasks[rowId]
-                        self.translateTasks[rowId] = nil
-                        old?.cancel()
-                        // Await it: a cancelled translation persists what it
-                        // got as `.failed`, and that write must not land after
-                        // the replacement's `.ok`.
-                        await old?.value
-                        // appendTranslationDelta appends, so the stale text has
-                        // to go before the new stream starts.
-                        transcript.updateTranslation(rowId: rowId, translated: "")
-                    } else {
-                        existingTranslation = transcript.translatedText(rowId: rowId)
-                    }
-                    if persistSegments {
-                        try? await SegmentRepository.shared.updateText(id: rowId,
-                                                                        textOriginal: polishedText,
-                                                                        textTranslated: existingTranslation,
-                                                                        isFinal: true)
-                    }
-                    if shouldRetranslate {
-                        self.translate(rowId: rowId,
-                                       text: polishedText,
-                                       translator: translator,
-                                       config: config,
-                                       persistTranslation: persistSegments)
-                    }
-                }
-                continue
-            }
 
             guard event.isFinal else {
-                // Volatile/in-progress result — only the on-device
-                // Apple engines emit these. Show it as a live draft
-                // line and, if translation is on, kick off a debounced
-                // translation of the draft so the translated line
-                // keeps pace with the still-changing original instead
-                // of waiting for the sentence to be committed.
+                // The line still being spoken. If translation is on, the
+                // draft translation covers the whole sentence so far: the
+                // lines of it already committed plus this one.
                 let polishedDraft = TranscriptTextPolisher.polish(event.text)
                 transcript.updateDraft(polishedDraft)
-                if AppState.shared.translationEnabled {
-                    self.translateDraft(text: polishedDraft, translator: translator, config: config)
+                if AppState.shared.translationEnabled, simultaneousSession(config: config) == nil {
+                    let sentence = SentenceGroups.join(pendingSentence.map(\.text) + [polishedDraft])
+                    self.translateDraft(text: sentence, draft: polishedDraft,
+                                        translator: translator, config: config)
                 }
                 continue
             }
@@ -652,7 +666,8 @@ final class SessionOrchestrator: ObservableObject {
                                    textTranslated: "",
                                    isFinal: event.isFinal,
                                    confidence: 0,
-                                   version: 1)
+                                   version: 1,
+                                   continuesNext: event.continuesSentence)
                 do {
                     rowId = try await SegmentRepository.shared.insert(seg)
                 } catch {
@@ -671,7 +686,8 @@ final class SessionOrchestrator: ObservableObject {
                     transcript.appendFinal(rowId: fallbackId,
                                            startMs: event.startMs,
                                            endMs: event.endMs,
-                                           original: polishedText)
+                                           original: polishedText,
+                                           continuesNext: event.continuesSentence)
                     continue
                 }
             } else {
@@ -681,34 +697,123 @@ final class SessionOrchestrator: ObservableObject {
             transcript.appendFinal(rowId: rowId,
                                    startMs: event.startMs,
                                    endMs: event.endMs,
-                                   original: polishedText)
-            if let segId = event.engineSegmentId {
-                self.engineSegmentToRowId[segId] = rowId
-            }
+                                   original: polishedText,
+                                   continuesNext: event.continuesSentence)
             if AppState.shared.translationEnabled {
-                self.translate(rowId: rowId,
-                               text: polishedText,
-                               translator: translator,
-                               config: config,
-                               persistTranslation: persistSegments)
+                self.enqueueForTranslation(rowId: rowId,
+                                           text: polishedText,
+                                           continuesSentence: event.continuesSentence,
+                                           translator: translator,
+                                           config: config)
             }
         }
     }
 
     // MARK: - Translation
 
+    private func resetSentenceState() {
+        pendingSentence.removeAll()
+        sentenceHistory.removeAll()
+        // Only a live translation that is never saved turns this off, in
+        // runSTTStream; anything else starts out saving its translations.
+        persistTranslations = true
+        simulSession = nil
+        simulChecked = false
+    }
+
+    /// The T3PO session for this recording, created on first use. Nil when
+    /// another backend is selected or the language pair is not Chinese <->
+    /// English, in which case sentences go to the sentence translator.
+    private func simultaneousSession(config: ApiConfig) -> LocalSimulSession? {
+        if simulChecked { return simulSession }
+        simulChecked = true
+        guard AppState.shared.translationBackend == .t3po else { return nil }
+        let persist = persistTranslations
+        simulSession = LocalSimulSession(
+            source: config.sourceLanguage,
+            target: config.targetLanguage,
+            glossary: courseContext.translationGlossary,
+            onTranslation: { [weak self] rows, text in
+                self?.applySimultaneousTranslation(rows: rows, text: text, persist: persist)
+            },
+            onError: { error in
+                AppState.shared.setError("Translation error: \(error.localizedDescription)")
+            })
+        if simulSession == nil {
+            NSLog("[ClassNote] T3PO does not cover \(config.sourceLanguage) -> \(config.targetLanguage); using the sentence translator")
+        }
+        return simulSession
+    }
+
+    /// A T3PO translation covering `rows`: it lands on the last of them, the
+    /// ones before are marked as covered by it.
+    private func applySimultaneousTranslation(rows: [Int64], text: String, persist: Bool) {
+        guard let last = rows.last else { return }
+        transcript.updateTranslation(rowId: last, translated: text)
+        guard persist else { return }
+        let leading = Array(rows.dropLast())
+        let task = Task {
+            try? await SegmentRepository.shared.updateTranslation(id: last, textTranslated: text, state: .ok)
+            try? await SegmentRepository.shared.markMerged(ids: leading)
+        }
+        translateTasks[last] = task
+    }
+
+    /// Takes one committed line. A line cut mid-sentence waits for the rest;
+    /// the line that ends a sentence sends the whole sentence to translation.
+    private func enqueueForTranslation(rowId: Int64,
+                                       text: String,
+                                       continuesSentence: Bool,
+                                       translator: TranslationProvider,
+                                       config: ApiConfig) {
+        if let simul = simultaneousSession(config: config) {
+            simul.feed(rowId: rowId, text: text)
+            return
+        }
+        pendingSentence.append((rowId, text))
+        guard !continuesSentence else { return }
+        flushPendingSentence(translator: translator, config: config)
+    }
+
+    /// Translates whatever sentence is pending, finished or not.
+    private func flushPendingSentence(translator: TranslationProvider, config: ApiConfig) {
+        let lines = pendingSentence
+        pendingSentence.removeAll()
+        guard let last = lines.last else { return }
+        let text = SentenceGroups.join(lines.map(\.text))
+        guard !text.isEmpty else { return }
+        let context = Array(sentenceHistory.suffix(Self.contextSentences))
+        sentenceHistory.append(text)
+        if sentenceHistory.count > 8 { sentenceHistory.removeFirst(sentenceHistory.count - 8) }
+        translate(rowId: last.rowId,
+                  leadingRowIds: lines.dropLast().map(\.rowId),
+                  text: text,
+                  context: context,
+                  translator: translator,
+                  config: config,
+                  persistTranslation: persistTranslations)
+    }
+
+    /// How many preceding sentences a translation sees. Enough to resolve
+    /// "it" and "this" across a sentence boundary.
+    static let contextSentences = 2
+
+    /// Translates one sentence. Its translation lands on `rowId`, the line that
+    /// ends it; `leadingRowIds` are the lines before it in the same sentence,
+    /// marked `.merged` once the translation is in.
     private func translate(rowId: Int64,
+                           leadingRowIds: [Int64],
                            text: String,
+                           context: [String],
                            translator: TranslationProvider,
                            config: ApiConfig,
-                           persistTranslation: Bool = true) {
-        let glossary = courseContext.translationGlossaryBlock
+                           persistTranslation: Bool) {
+        let glossary = courseContext.translationGlossary
         let task = Task { @MainActor [transcript] in
-            let ctx = transcript.recent(4)
             let stream = translator.translate(text: text,
                                                sourceLanguage: config.sourceLanguage,
                                                targetLanguage: config.targetLanguage,
-                                               context: ctx,
+                                               context: context,
                                                glossary: glossary)
             // Hoisted above the `do` so both catches can persist the part that
             // did arrive. Ephemeral rows have synthetic negative ids that match
@@ -723,6 +828,7 @@ final class SessionOrchestrator: ObservableObject {
                     try? await SegmentRepository.shared.updateTranslation(id: rowId,
                                                                            textTranslated: accumulated,
                                                                            state: .ok)
+                    try? await SegmentRepository.shared.markMerged(ids: leadingRowIds)
                 }
             } catch is CancellationError {
                 // Stop() cancels in-flight translations; keep what arrived and
@@ -745,53 +851,53 @@ final class SessionOrchestrator: ObservableObject {
         translateTasks[rowId] = task
     }
 
-    /// Translates the in-progress draft line so the translation keeps pace
-    /// with the still-changing original instead of only starting once the
-    /// sentence is committed. Debounced: STT emits a new draft on every
-    /// partial result (multiple times per second while speaking), and
-    /// translating every single one would spam the engine and show a
-    /// flickering, constantly-restarted translation. Waiting for a short
-    /// pause in the draft's growth means we only translate text that's
-    /// already stopped changing for a moment — still well before the
-    /// sentence is finalized.
-    private func translateDraft(text: String, translator: TranslationProvider, config: ApiConfig) {
+    /// Translates the sentence being spoken so the translation keeps pace
+    /// instead of only starting once the sentence is committed. Debounced: the
+    /// engine emits a new draft several times a second, and translating every
+    /// one would keep the translator permanently busy with text about to
+    /// change.
+    ///
+    /// `text` is the whole sentence so far; `draft` is the draft line it was
+    /// built for, which is what a late result is checked against.
+    private func translateDraft(text: String, draft: String,
+                                translator: TranslationProvider, config: ApiConfig) {
         draftTranslateTask?.cancel()
         guard !text.isEmpty else { return }
-        let glossary = courseContext.translationGlossaryBlock
+        let glossary = courseContext.translationGlossary
+        let context = Array(sentenceHistory.suffix(Self.contextSentences))
         draftTranslateTask = Task { @MainActor [transcript] in
             do {
-                try await Task.sleep(nanoseconds: 250_000_000)
+                try await Task.sleep(nanoseconds: 350_000_000)
             } catch {
                 return
             }
             guard !Task.isCancelled else { return }
-            let ctx = transcript.recent(4)
             let stream = translator.translate(text: text,
                                                sourceLanguage: config.sourceLanguage,
                                                targetLanguage: config.targetLanguage,
-                                               context: ctx,
+                                               context: context,
                                                glossary: glossary)
             do {
                 var accumulated = ""
                 for try await delta in stream {
                     guard !Task.isCancelled else { return }
                     accumulated += delta
-                    transcript.updateDraftTranslation(accumulated, forDraft: text)
+                    transcript.updateDraftTranslation(accumulated, forDraft: draft)
                 }
             } catch {
                 // A draft translation failing (or being superseded by a
                 // newer draft mid-stream) isn't worth surfacing as a user
-                // facing error — the final-segment translation will retry.
+                // facing error — the sentence's own translation will retry.
             }
         }
     }
 
     // MARK: - Retranslate / Resummarize helpers
 
-    /// Retranslates a session. `failedOnly` covers just the segments whose
+    /// Retranslates a session. `failedOnly` covers just the sentences whose
     /// translation never landed (a network error, or a stream cancelled by
     /// Stop); the full pass stays available for a language or model change.
-    /// Returns how many segments are still untranslated afterwards.
+    /// Returns how many sentences are still untranslated afterwards.
     @discardableResult
     func retranslateSession(sessionId: String,
                             failedOnly: Bool = false,
@@ -800,33 +906,50 @@ final class SessionOrchestrator: ObservableObject {
         let translator = EngineFactory.makeTranslator(config: config,
                                                       backend: AppState.shared.translationBackend)
         let course = try? await CourseRepository.shared.forSession(id: sessionId)
-        let segs: [Segment]
-        if failedOnly {
-            segs = try await SegmentRepository.shared.untranslated(sessionId: sessionId)
-        } else {
-            segs = try await SegmentRepository.shared.all(sessionId: sessionId)
-        }
+        let segs = try await SegmentRepository.shared.all(sessionId: sessionId)
         return try await translateSegments(segs,
                                            translator: translator,
                                            config: config,
-                                           glossary: CourseContext(course: course).translationGlossaryBlock,
+                                           glossary: CourseContext(course: course).translationGlossary,
+                                           failedOnly: failedOnly,
                                            onProgress: onProgress)
     }
 
-    /// Translates `segments` with bounded concurrency, collecting per-segment
-    /// failures instead of aborting the run. Returns the number that failed.
+    /// Translates `segments` sentence by sentence, with bounded concurrency,
+    /// collecting failures instead of aborting the run. Returns the number of
+    /// sentences that failed.
     ///
-    /// 4 at a time: a 90-minute lecture is ~600 segments and serial round-trips
+    /// `failedOnly` skips sentences whose lines are all settled. Grouping
+    /// always runs over the whole list, so a retried sentence is still
+    /// translated whole and with the sentences before it as context.
+    ///
+    /// 4 at a time: a 90-minute lecture is ~600 lines and serial round-trips
     /// make a retry unusable, while more would upset cloud rate limits and the
     /// single-worker MLX sidecar.
     @discardableResult
     private func translateSegments(_ segments: [Segment],
                                    translator: TranslationProvider,
                                    config: ApiConfig,
-                                   glossary: String,
+                                   glossary: TranslationGlossary,
+                                   failedOnly: Bool = false,
                                    onProgress: ((Int, Int) -> Void)? = nil) async throws -> Int {
-        let todo = segments.filter { $0.id != nil && !$0.textOriginal.isEmpty }
-        guard !todo.isEmpty else {
+        if AppState.shared.translationBackend == .t3po,
+           SimulTranslatorProcess.direction(source: config.sourceLanguage,
+                                            target: config.targetLanguage) != nil {
+            return await translateSimultaneously(segments, config: config,
+                                                 glossary: glossary, onProgress: onProgress)
+        }
+        let groups = SentenceGroups.group(segments.filter { $0.id != nil && !$0.textOriginal.isEmpty })
+        var jobs: [SentenceJob] = []
+        var previous: [String] = []
+        for group in groups {
+            let text = SentenceGroups.join(group.map(\.textOriginal))
+            let context = Array(previous.suffix(Self.contextSentences))
+            previous.append(text)
+            if failedOnly && group.allSatisfy({ $0.translationState.isSettled }) { continue }
+            jobs.append(SentenceJob(lines: group, text: text, context: context))
+        }
+        guard !jobs.isEmpty else {
             onProgress?(0, 0)
             return 0
         }
@@ -834,27 +957,23 @@ final class SessionOrchestrator: ObservableObject {
         var failed = 0
         try await withThrowingTaskGroup(of: Bool.self) { group in
             var next = 0
-            while next < min(4, todo.count) {
-                let segment = todo[next]
+            while next < min(4, jobs.count) {
+                let job = jobs[next]
                 group.addTask {
-                    try await Self.translateOne(segment: segment,
-                                                translator: translator,
-                                                config: config,
-                                                glossary: glossary)
+                    try await Self.translateOne(job, translator: translator,
+                                                config: config, glossary: glossary)
                 }
                 next += 1
             }
             while let ok = try await group.next() {
                 done += 1
                 if !ok { failed += 1 }
-                onProgress?(done, todo.count)
-                if next < todo.count {
-                    let segment = todo[next]
+                onProgress?(done, jobs.count)
+                if next < jobs.count {
+                    let job = jobs[next]
                     group.addTask {
-                        try await Self.translateOne(segment: segment,
-                                                    translator: translator,
-                                                    config: config,
-                                                    glossary: glossary)
+                        try await Self.translateOne(job, translator: translator,
+                                                    config: config, glossary: glossary)
                     }
                     next += 1
                 }
@@ -863,39 +982,120 @@ final class SessionOrchestrator: ObservableObject {
         return failed
     }
 
-    /// One segment's translation, off the main actor. Returns false when the
+    /// Retranslates the one sentence `rowId` belongs to, with the sentences
+    /// before it as context. Returns false if the translation did not land.
+    static func retranslateSentence(containing rowId: Int64, sessionId: String) async -> Bool {
+        let config = AppState.shared.apiConfig
+        let translator = EngineFactory.makeTranslator(config: config,
+                                                      backend: AppState.shared.translationBackend)
+        let course = try? await CourseRepository.shared.forSession(id: sessionId)
+        guard let segments = try? await SegmentRepository.shared.all(sessionId: sessionId) else {
+            return false
+        }
+        let groups = SentenceGroups.group(segments.filter { $0.id != nil && !$0.textOriginal.isEmpty })
+        guard var index = groups.firstIndex(where: { $0.contains { $0.id == rowId } }) else {
+            return false
+        }
+        // T3PO stores one translation for everything it heard since its last
+        // one, which can span sentences: lines before this sentence marked
+        // `.merged` are covered by this sentence's translation. Retranslate
+        // them with it, or their text would lose its translation for good.
+        var lines = groups[index]
+        while index > 0, groups[index - 1].last?.translationState == .merged {
+            index -= 1
+            lines = groups[index] + lines
+        }
+        let context = groups[max(0, index - contextSentences)..<index]
+            .map { SentenceGroups.join($0.map(\.textOriginal)) }
+        let job = SentenceJob(lines: lines,
+                              text: SentenceGroups.join(lines.map(\.textOriginal)),
+                              context: Array(context))
+        return (try? await translateOne(job, translator: translator, config: config,
+                                        glossary: CourseContext(course: course).translationGlossary)) ?? false
+    }
+
+    /// A whole transcript through T3PO, line by line in order: its history is
+    /// what keeps the translation coherent, so it always runs over every line,
+    /// even when only some failed. Returns the number of errors.
+    private func translateSimultaneously(_ segments: [Segment],
+                                         config: ApiConfig,
+                                         glossary: TranslationGlossary,
+                                         onProgress: ((Int, Int) -> Void)?) async -> Int {
+        let lines = segments.filter { $0.id != nil && !$0.textOriginal.isEmpty }
+        guard !lines.isEmpty else {
+            onProgress?(0, 0)
+            return 0
+        }
+        var failures = 0
+        var covered = 0
+        var writes: [Task<Void, Never>] = []
+        onProgress?(0, lines.count)
+        guard let session = LocalSimulSession(
+            source: config.sourceLanguage, target: config.targetLanguage, glossary: glossary,
+            onTranslation: { rows, text in
+                covered += rows.count
+                onProgress?(min(covered, lines.count), lines.count)
+                guard let last = rows.last else { return }
+                let leading = Array(rows.dropLast())
+                writes.append(Task {
+                    try? await SegmentRepository.shared.updateTranslation(id: last, textTranslated: text,
+                                                                           state: .ok)
+                    try? await SegmentRepository.shared.markMerged(ids: leading)
+                })
+            },
+            onError: { _ in failures += 1 }) else { return lines.count }
+        for line in lines {
+            guard let id = line.id else { continue }
+            session.feed(rowId: id, text: line.textOriginal)
+        }
+        await session.finish()
+        for write in writes { await write.value }
+        onProgress?(lines.count, lines.count)
+        return failures
+    }
+
+    /// One sentence of a batch translation.
+    struct SentenceJob: Sendable {
+        let lines: [Segment]
+        let text: String
+        let context: [String]
+    }
+
+    /// One sentence's translation, off the main actor. Returns false when the
     /// translation did not land, so the caller can report a partial run.
-    nonisolated private static func translateOne(segment: Segment,
+    nonisolated private static func translateOne(_ job: SentenceJob,
                                                  translator: TranslationProvider,
                                                  config: ApiConfig,
-                                                 glossary: String) async throws -> Bool {
-        guard let sid = segment.id else { return true }
+                                                 glossary: TranslationGlossary) async throws -> Bool {
+        guard let last = job.lines.last?.id else { return true }
+        let leading = job.lines.dropLast().compactMap(\.id)
         var buf = ""
         do {
-            let stream = translator.translate(text: segment.textOriginal,
+            let stream = translator.translate(text: job.text,
                                                sourceLanguage: config.sourceLanguage,
                                                targetLanguage: config.targetLanguage,
-                                               context: [],
+                                               context: job.context,
                                                glossary: glossary)
             for try await delta in stream {
                 buf += delta
             }
             guard !buf.isEmpty else {
-                try? await SegmentRepository.shared.updateTranslation(id: sid,
+                try? await SegmentRepository.shared.updateTranslation(id: last,
                                                                        textTranslated: buf,
                                                                        state: .failed)
                 return false
             }
-            try? await SegmentRepository.shared.updateTranslation(id: sid,
+            try? await SegmentRepository.shared.updateTranslation(id: last,
                                                                    textTranslated: buf,
                                                                    state: .ok)
+            try? await SegmentRepository.shared.markMerged(ids: leading)
             return true
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            // One bad segment must not abort the rest — that is exactly the
+            // One bad sentence must not abort the rest — that is exactly the
             // failure this pass exists to clean up.
-            try? await SegmentRepository.shared.updateTranslation(id: sid,
+            try? await SegmentRepository.shared.updateTranslation(id: last,
                                                                    textTranslated: buf,
                                                                    state: .failed)
             return false
@@ -920,8 +1120,7 @@ extension TranscriptEvent {
                                text: text,
                                isFinal: isFinal,
                                speakerId: speakerId,
-                               engineSegmentId: engineSegmentId,
-                               isRevision: isRevision)
+                               continuesSentence: continuesSentence)
     }
 }
 

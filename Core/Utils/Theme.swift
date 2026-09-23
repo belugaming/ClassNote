@@ -1,39 +1,35 @@
 import SwiftUI
 
-/// Centralized design tokens. Keeps the app visually coherent and makes the
-/// "let me change ALL the corner radii" kind of edit a one-liner.
+/// Design tokens. The app follows the system: the user's accent color,
+/// system materials and semantic text colors, so it looks at home in light and
+/// dark mode and next to every other Mac app. What is ours is a small palette
+/// with a job each: translation text, recording, success/warning.
 enum Theme {
     // MARK: - Colors
 
-    /// Minimal editorial style: monochrome accent, no color-coded chrome.
-    static let accent = Color.primary
-    /// Label color for controls filled with `accent`. Because `accent` is
-    /// `Color.primary` (white in dark mode), prominent buttons must use the
-    /// inverse color for their label or the text disappears.
-    #if os(macOS)
-    static let onAccent = Color(nsColor: .windowBackgroundColor)
-    #else
-    static let onAccent = Color(uiColor: .systemBackground)
-    #endif
-    static let accentSoft = Color.primary.opacity(0.08)
-    static let accentMuted = Color.secondary
-    #if os(macOS)
+    /// The user's system accent color.
+    static let accent = Color.accentColor
+    static let accentSoft = Color.accentColor.opacity(0.12)
+    static let onAccent = Color.white
+
     static let surface = Color(nsColor: .controlBackgroundColor)
     static let surfaceElevated = Color(nsColor: .textBackgroundColor)
-    #else
-    static let surface = Color(uiColor: .secondarySystemBackground)
-    static let surfaceElevated = Color(uiColor: .systemBackground)
-    #endif
-    static let chrome = Color.primary.opacity(0.055)
-    static let hairline = Color.primary.opacity(0.08)
+    static let windowBackground = Color(nsColor: .windowBackgroundColor)
+    static let hairline = Color.primary.opacity(0.09)
+    static let chrome = Color.primary.opacity(0.05)
+    static let rowHover = Color.primary.opacity(0.045)
 
-    /// Translation color in overlay + transcript. Warm purple that reads as
-    /// distinct from English text (white/black) without leaning blue or green.
-    static let translation = Color(red: 0.58, green: 0.28, blue: 0.88)
+    /// Translation text. Teal, so it reads as a second voice next to the
+    /// original in both appearances without competing with the accent.
+    static let translation = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(red: 0.42, green: 0.80, blue: 0.78, alpha: 1)
+            : NSColor(red: 0.05, green: 0.50, blue: 0.50, alpha: 1)
+    })
 
-    static let recording = Color(red: 0.95, green: 0.30, blue: 0.30)
-    static let success = Color(red: 0.20, green: 0.62, blue: 0.38)
-    static let warning = Color(red: 0.82, green: 0.48, blue: 0.12)
+    static let recording = Color(nsColor: .systemRed)
+    static let success = Color(nsColor: .systemGreen)
+    static let warning = Color(nsColor: .systemOrange)
 
     // MARK: - Metrics
 
@@ -43,11 +39,12 @@ enum Theme {
 
     static let cardPadding: CGFloat = 14
     static let gridSpacing: CGFloat = 12
+    static let sectionSpacing: CGFloat = 22
+    static let pagePadding: CGFloat = 24
 
-    /// Gap between sections on a settings-style page.
-    static let sectionSpacing: CGFloat = 24
-    /// Outer padding for a scrollable settings page.
-    static let pagePadding: CGFloat = 22
+    /// Reading width for long text (transcripts, notes): lines much longer
+    /// than this are tiring to follow.
+    static let readingWidth: CGFloat = 760
 }
 
 enum OverlayCaptionDisplayMode: String, CaseIterable, Identifiable {
@@ -168,12 +165,7 @@ extension String {
     }
 }
 
-/// Card chrome used everywhere (settings sections, session rows, transcript bubbles).
-///
-/// `filled` used to be accepted and then ignored -- every card rendered as a bare
-/// hairline rectangle over the window background, which is what made dense
-/// screens like Settings read as unfinished. Cards now actually get a surface,
-/// and `filled: false` opts back out for places that sit on their own background.
+/// A quiet surface for grouped content.
 struct CardBackground: ViewModifier {
     var radius: CGFloat = Theme.cornerMedium
     var filled: Bool = true
@@ -186,25 +178,21 @@ struct CardBackground: ViewModifier {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .stroke(Theme.hairline, lineWidth: 1)
+                    .strokeBorder(Theme.hairline, lineWidth: 1)
             )
     }
 }
 
-/// Outlined pill used for status labels. Only `Theme.recording` keeps a
-/// filled/colored treatment — everything else stays monochrome to avoid
-/// turning every list into a wall of colored badges.
+/// Small status label.
 struct PillStyle: ViewModifier {
     var color: Color
     func body(content: Content) -> some View {
-        let isRecording = color == Theme.recording
         content
             .font(.caption.weight(.medium))
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(Capsule().fill(isRecording ? color.opacity(0.14) : Color.clear))
-            .overlay(Capsule().stroke(isRecording ? Color.clear : color.opacity(0.5), lineWidth: 1))
-            .foregroundStyle(isRecording ? color : Color.secondary)
+            .background(Capsule().fill(color.opacity(0.14)))
+            .foregroundStyle(color)
     }
 }
 
@@ -213,20 +201,9 @@ extension View {
         modifier(CardBackground(radius: radius, filled: filled))
     }
     func pill(_ color: Color) -> some View { modifier(PillStyle(color: color)) }
-    /// Monochrome filled button: `accent` fill with the inverse label color.
-    func prominentAccentButton() -> some View {
-        buttonStyle(.borderedProminent)
-            .tint(Theme.accent)
-            .foregroundStyle(Theme.onAccent)
-    }
 }
 
-/// Standard section container with a title — replaces Form's default ugly frame.
-///
-/// The title was previously uppercased at `.subheadline` weight, which at that
-/// size turns CJK into loose, hard-to-scan runs (uppercasing does nothing to
-/// Chinese but the tracking still reads as shouty). It is now a normal-case
-/// headline, which works in both scripts.
+/// A titled group on a settings-style page.
 struct SettingsSection<Content: View>: View {
     let title: String
     var footer: String? = nil
@@ -236,7 +213,6 @@ struct SettingsSection<Content: View>: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .font(.headline)
-                .foregroundStyle(.primary)
             VStack(alignment: .leading, spacing: 12) { content }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(Theme.cardPadding)
@@ -252,9 +228,7 @@ struct SettingsSection<Content: View>: View {
     }
 }
 
-/// Caption label above a control. Lives here rather than in Settings because the
-/// course editor builds the same field stack and duplicating it would let the two
-/// drift apart.
+/// Caption label above a control.
 struct LabeledRow<Content: View>: View {
     let label: String
     @ViewBuilder var content: Content
@@ -264,5 +238,41 @@ struct LabeledRow<Content: View>: View {
             Text(label).font(.caption.weight(.medium)).foregroundStyle(.secondary)
             content
         }
+    }
+}
+
+/// A centered placeholder for an empty list or pane.
+struct EmptyStateView: View {
+    let systemImage: String
+    let title: String
+    var message: String? = nil
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.system(size: 38, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text(title)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.secondary)
+            if let message {
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+            }
+        }
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// "mm:ss" or "h:mm:ss".
+enum TimeLabel {
+    static func string(ms: Int64) -> String {
+        let s = Int(max(0, ms) / 1000)
+        let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%02d:%02d", m, sec)
     }
 }

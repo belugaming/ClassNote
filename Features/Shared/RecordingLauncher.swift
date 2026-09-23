@@ -1,23 +1,9 @@
 import SwiftUI
 
-/// Shared "how do I start a recording" model for the menu bar and the toolbar.
-///
-/// Both surfaces used to spell out the same seven fixed combinations -- record
-/// mic / system / mixed, transcribe-only mic, and translate-only mic / system /
-/// mixed -- as seven separate buttons, each duplicated in both places and each
-/// given its own ad-hoc tint. That is really only two independent choices, so
-/// this expresses them as two:
-///
-///   * **source**  microphone / system audio / both
-///   * **intent**  keep it as a session, or a temporary translation that is
-///                 never written to the library
-///
-/// Translation on/off stays where it already lived, on `AppState`.
+/// Whether a recording is kept in the library or is a live translation that is
+/// thrown away when it stops (unless saved explicitly).
 enum RecordingIntent: String, CaseIterable, Identifiable {
-    /// Saved into the library as a session.
     case keep
-    /// Live translation only; nothing is persisted unless the user explicitly
-    /// saves it afterwards.
     case temporary
 
     var id: String { rawValue }
@@ -37,64 +23,61 @@ enum RecordingIntent: String, CaseIterable, Identifiable {
     }
 }
 
-extension AudioSourceKind {
-    /// Short label for pickers. `displayName` is a long English-only sentence
-    /// used elsewhere, so it is unsuitable here.
-    var shortTitle: String {
-        switch self {
-        case .microphone: return L10n.t("session.source.mic")
-        case .system: return L10n.t("session.source.system")
-        case .mixed: return L10n.t("session.source.mixed")
-        case .file: return L10n.t("session.source.file")
-        }
+/// The remembered recording choices. An observable object rather than
+/// `@AppStorage` inside a plain struct, which never told any view it changed,
+/// so the menu checkmarks and hints went stale.
+@MainActor
+final class RecordingPreferences: ObservableObject {
+    static let shared = RecordingPreferences()
+
+    private let defaults = AppEnvironment.defaults
+
+    @Published var source: AudioSourceKind {
+        didSet { defaults.set(source.rawValue, forKey: "preferredRecordingSource") }
+    }
+    @Published var intent: RecordingIntent {
+        didSet { defaults.set(intent.rawValue, forKey: "preferredRecordingIntent") }
     }
 
-    var icon: String {
-        switch self {
-        case .microphone: return "mic"
-        case .system: return "speaker.wave.2"
-        case .mixed: return "person.wave.2"
-        case .file: return "doc"
-        }
+    private init() {
+        source = AudioSourceKind(rawValue: defaults.string(forKey: "preferredRecordingSource") ?? "")
+            .flatMap { $0 == .file ? nil : $0 } ?? .microphone
+        intent = RecordingIntent(rawValue: defaults.string(forKey: "preferredRecordingIntent") ?? "") ?? .keep
     }
-
-    /// The three sources a live recording can actually use.
-    static var liveCases: [AudioSourceKind] { [.microphone, .system, .mixed] }
 }
 
-/// Persisted launch preferences plus the single entry point that starts a
-/// recording, so the menu bar and the toolbar cannot drift apart.
+/// The one entry point that starts a recording, so the toolbar, the menu bar,
+/// ⌘N and the global shortcut all honour the same choices.
 @MainActor
-struct RecordingLauncher {
-    @AppStorage("preferredRecordingSource", store: AppEnvironment.defaults) private var sourceRaw = AudioSourceKind.microphone.rawValue
-    @AppStorage("preferredRecordingIntent", store: AppEnvironment.defaults) private var intentRaw = RecordingIntent.keep.rawValue
-
-    var source: AudioSourceKind {
-        get { AudioSourceKind(rawValue: sourceRaw) ?? .microphone }
-        nonmutating set { sourceRaw = newValue.rawValue }
-    }
-
-    var intent: RecordingIntent {
-        get { RecordingIntent(rawValue: intentRaw) ?? .keep }
-        nonmutating set { intentRaw = newValue.rawValue }
-    }
-
-    /// Starts (or stops) a recording using the current preferences.
-    func toggle(_ appState: AppState) {
+enum RecordingLauncher {
+    /// Starts a recording with the remembered choices, into `courseId`, or
+    /// stops the one running.
+    static func toggle(_ appState: AppState, courseId: String? = nil) {
         if appState.isRecording {
             appState.stopRecording()
             return
         }
-        switch intent {
+        start(appState, courseId: courseId)
+    }
+
+    /// Starts one, and does nothing if one is already running: a "new
+    /// recording" button must never end the recording in progress.
+    static func start(_ appState: AppState, courseId: String? = nil) {
+        guard !appState.isRecording else {
+            WindowRouter.shared.openLive(windowId: AppState.liveWindowId)
+            return
+        }
+        let prefs = RecordingPreferences.shared
+        switch prefs.intent {
         case .keep:
-            appState.startNewSession(source: source)
+            Task { _ = await appState.startNewSession(courseId: courseId, source: prefs.source) }
         case .temporary:
-            appState.startEphemeralTranslation(source: source)
+            appState.startEphemeralTranslation(source: prefs.source)
         }
     }
 }
 
-/// Source + intent pickers, shared by both surfaces.
+/// Source, intent and translation choices, as compact controls.
 struct RecordingOptionsView: View {
     @Binding var source: AudioSourceKind
     @Binding var intent: RecordingIntent
@@ -120,19 +103,13 @@ struct RecordingOptionsView: View {
 
             Toggle(L10n.t("record.translation"), isOn: $translationEnabled)
                 .toggleStyle(.switch)
-                .tint(Theme.accent)
                 .controlSize(.small)
         }
     }
 }
 
-/// The same three choices, rendered for a `Menu`.
-///
-/// `RecordingOptionsView` cannot be reused inside a menu: AppKit renders menu
-/// content itself, so a `.segmented` picker collapses into a bare row of icons
-/// and `.labelsHidden()` strips the title that would otherwise become the
-/// section header — which is exactly what a menu needs. Inline pickers are the
-/// native idiom here: each renders as a titled group of checkmarked items.
+/// The same choices, rendered for a `Menu`: inline pickers become titled
+/// groups of checkmarked items, which is how a menu says "pick one".
 struct RecordingOptionsMenuContent: View {
     @Binding var source: AudioSourceKind
     @Binding var intent: RecordingIntent

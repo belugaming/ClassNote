@@ -294,8 +294,12 @@ actor LocalMLXTranslatorProcess {
         return id
     }
 
-    fileprivate func request(id: Int, text: String, source: String, target: String) {
-        send(["id": id, "text": text, "source": source, "target": target])
+    fileprivate func request(id: Int, text: String, source: String, target: String,
+                             context: [String], terms: [[String]]) {
+        var payload: [String: Any] = ["id": id, "text": text, "source": source, "target": target]
+        if !context.isEmpty { payload["context"] = context }
+        if !terms.isEmpty { payload["terms"] = terms }
+        send(payload)
     }
 
     fileprivate func cancel(id: Int) {
@@ -340,17 +344,19 @@ final class RequestHandle: @unchecked Sendable {
 }
 
 /// `TranslationProvider` backed by the local MLX sidecar.
+///
+/// `context` and `glossary` go to the sidecar as data, not text: it puts them
+/// into Hy-MT2's own background-information and terminology templates, which
+/// the model was trained to read rather than translate. (Prepending them to
+/// the sentence, as an earlier version tried, got them translated too.)
 struct LocalMLXTranslator: TranslationProvider {
-    /// `glossary` is ignored for the same reason `context` is: Hy-MT2 is a
-    /// sentence-level translation model with no instruction following, and
-    /// anything prepended to the sentence comes back translated rather than
-    /// applied.
     func translate(text: String,
                    sourceLanguage: String,
                    targetLanguage: String,
                    context: [String],
-                   glossary: String) -> AsyncThrowingStream<String, Error> {
-        AsyncThrowingStream { continuation in
+                   glossary: TranslationGlossary) -> AsyncThrowingStream<String, Error> {
+        let terms = glossary.pairs.map { [$0.0, $0.1] }
+        return AsyncThrowingStream { continuation in
             let handle = RequestHandle()
             let work = Task {
                 do {
@@ -365,13 +371,12 @@ struct LocalMLXTranslator: TranslationProvider {
                 }
                 let id = await LocalMLXTranslatorProcess.shared.register(continuation)
                 handle.id = id
-                // `context` is deliberately unused: Hy-MT2 is a sentence-level
-                // translation model, and prepending neighbouring lines made it
-                // translate them too rather than use them as context.
                 await LocalMLXTranslatorProcess.shared.request(id: id,
                                                                text: text,
                                                                source: sourceLanguage,
-                                                               target: targetLanguage)
+                                                               target: targetLanguage,
+                                                               context: context,
+                                                               terms: terms)
             }
             continuation.onTermination = { reason in
                 work.cancel()

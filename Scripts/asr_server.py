@@ -9,7 +9,7 @@ WebSocket protocol
 Client -> server:
   * binary frames -- raw Int16LE mono PCM at 16 kHz
   * text frames (JSON):
-      {"type": "config", "language": "zh"}
+      {"type": "config", "language": "zh", "context": "..."}
       {"type": "eof"}                       flush and finalize the live stream
       {"type": "file", "path": "/abs.wav"}  transcribe a whole 16 kHz mono WAV
       {"type": "cancel"}                    stop a running file job
@@ -18,7 +18,10 @@ Server -> client (JSON text frames), all carrying the same envelope so the
 Swift decoder can treat them uniformly:
   {"type": "status",   "stage": "ready"}
   {"type": "partial",  "segmentId", "startMs", "endMs", "text"}
-  {"type": "final",    ...}     the segment's text once it is closed
+  {"type": "final",    ..., "sentenceEnd"}
+                                the segment's text once it is closed;
+                                sentenceEnd is false when the line was only
+                                broken for length and its sentence goes on
   {"type": "progress", "completed", "total"}
   {"type": "eof"}
   {"type": "error",    "code", "message"}
@@ -26,9 +29,15 @@ Swift decoder can treat them uniformly:
 ``code`` is one of ERROR_CODES; the app localizes on it, so ``message`` is a
 developer-facing detail (a path, an exception) and never a UI string.
 
-Engine
-------
-A single pass: NVIDIA nemotron-3.5-asr-streaming-0.6b, a cache-aware
+Engines
+-------
+``--engine nemotron`` (the default) or ``--engine r2t2``. The second is NetEase
+Youdao's Confucius4-R2T2, a Qwen3-ASR-1.7B fine-tune whose committed text is
+only ever appended to; it runs on MLX (see r2t2_engine.py and R2T2Transcriber
+below) and speaks exactly the same protocol. A ``config`` frame may carry
+``"context"`` -- the course name and terms -- which R2T2 takes as its prompt.
+
+nemotron is a single pass: NVIDIA nemotron-3.5-asr-streaming-0.6b, a cache-aware
 FastConformer transducer covering 40 languages, run through sherpa-onnx on the
 CPU. The chunk size is fixed at export time, so each latency setting is its own
 ONNX export; at 160 ms a word reaches the screen roughly 200 ms after it is
@@ -297,7 +306,13 @@ def ends_sentence(text: str) -> bool:
 
 def find_cut(tokens, held_ms: int) -> int | None:
     """Where to close the segment made of `tokens`, as a count of tokens to
-    commit, or None to keep it open.
+    commit, or None to keep it open. See `find_cut_kind`."""
+    return find_cut_kind(tokens, held_ms)[0]
+
+
+def find_cut_kind(tokens, held_ms: int) -> tuple[int | None, bool]:
+    """Where to close the segment made of `tokens`, and whether the cut ends a
+    sentence (False for a soft cut, whose line continues into the next one).
 
     Checks, in order: the last finished sentence anywhere in the segment (the
     punctuation usually arrives glued to the next sentence's first word, and a
@@ -308,28 +323,28 @@ def find_cut(tokens, held_ms: int) -> int | None:
     """
     n = len(tokens)
     if n == 0:
-        return None
+        return None, False
 
     for i in range(n - 1, -1, -1):
         piece = tokens[i].rstrip()
         if piece and piece[-1] in SENTENCE_END_CHARS and ends_sentence(tokens_to_text(tokens[: i + 1])):
-            return i + 1
+            return i + 1, True
 
     if held_ms < SOFT_CUT_MS:
-        return None
+        return None, False
 
     for i in range(n - 1, 0, -1):
         piece = tokens[i].rstrip()
         if piece and piece[-1] in CLAUSE_END_CHARS:
-            return i + 1
+            return i + 1, False
     # A word boundary: the last token that starts a new word (leading space).
     # CJK has no spaces, so a run of CJK tokens falls through to "everything",
     # which is fine -- any character boundary is a word boundary there.
     for i in range(n - 1, 0, -1):
         if tokens[i].startswith((" ", "▁")):
-            return i
+            return i, False
     log(f"[sentence] soft cut after {held_ms}ms (no boundary found)")
-    return n
+    return n, False
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +574,12 @@ class Engine:
         self.punctuator: Punctuator | None = None
         self.model_dir = None
 
+    def new_transcriber(self, language: str | None, context: str = "",
+                        file: bool = False) -> "Transcriber":
+        """A stream for one connection or one file. nemotron takes no prompt,
+        and decodes a file exactly as it does live audio."""
+        return Transcriber(self, language)
+
     @property
     def repo(self) -> str:
         return MODEL_REPO.format(chunk=self.chunk_ms)
@@ -732,6 +753,9 @@ class Transcriber:
         self.punctuator = self.engine.punctuator if self._punctuator_fits(self.language) else None
         self._marks_for = None
 
+    def set_context(self, context: str):
+        """nemotron takes no text prompt."""
+
     @staticmethod
     def _punctuator_fits(language: str | None) -> bool:
         """The punctuation model covers Chinese and English; with auto-detect
@@ -825,11 +849,12 @@ class Transcriber:
         if closing or not tokens:
             return events
 
-        cut = self._find_cut(tokens, marks)
+        cut, sentence_end = self._find_cut(tokens, marks)
         if cut is None and self._in_pause():
-            cut = len(tokens)
+            cut, sentence_end = len(tokens), True
         if cut:
-            events += self._commit(tokens, cut, result, timestamps, marks)
+            events += self._commit(tokens, cut, result, timestamps, marks,
+                                   sentence_end=sentence_end)
             # Whatever remains after the cut is the start of the next segment;
             # report it right away so the screen never goes blank mid-word.
             rest, rest_ts = self._segment_tokens(result)
@@ -844,20 +869,21 @@ class Transcriber:
                     events.append(self._event("partial", self.partial_text))
         return events
 
-    def _find_cut(self, tokens, marks) -> int | None:
-        """Where to close the open segment, preferring the punctuation model's
-        sentence ends, then its clause marks once the soft cut is due, then the
-        ASR model's own marks and word boundaries (`find_cut`)."""
+    def _find_cut(self, tokens, marks) -> tuple[int | None, bool]:
+        """Where to close the open segment, and whether that ends a sentence.
+        Prefers the punctuation model's sentence ends, then its clause marks
+        once the soft cut is due, then the ASR model's own marks and word
+        boundaries (`find_cut_kind`)."""
         if marks:
             ends = content_ends(tokens)
             cut = cut_from_marks(tokens, marks, SENT_MARK_KINDS, ends)
             if cut is not None:
-                return cut
+                return cut, True
             if self.held_ms >= SOFT_CUT_MS:
                 cut = cut_from_marks(tokens, marks, CLAUSE_MARK_KINDS, ends)
                 if cut is not None:
-                    return cut
-        return find_cut(tokens, self.held_ms)
+                    return cut, False
+        return find_cut_kind(tokens, self.held_ms)
 
     def _segment_tokens(self, result):
         """The open segment's tokens and timestamps, skipping any leading
@@ -880,8 +906,14 @@ class Transcriber:
             quiet_since = max(quiet_since, self.last_voiced_ms)
         return self.stream_ms - quiet_since >= PAUSE_CLOSE_MS
 
-    def _commit(self, tokens, count: int, result, timestamps, marks=()) -> list[dict]:
-        """Closes the segment made of the first `count` open tokens."""
+    def _commit(self, tokens, count: int, result, timestamps, marks=(),
+                sentence_end: bool = True) -> list[dict]:
+        """Closes the segment made of the first `count` open tokens.
+
+        `sentence_end` is False for a soft cut: the line was broken only to
+        keep it readable, and its sentence carries on in the next one. The app
+        translates such lines together with their continuation rather than as
+        a half sentence on their own."""
         text = tokens_to_text(tokens[:count])
         if marks:
             # Marks up to and including the one this line ends on. A line closed
@@ -896,7 +928,9 @@ class Transcriber:
             end = self.stream_ms
             if count <= len(timestamps):
                 end = min(end, self._ms(result, timestamps[count - 1]) + TOKEN_TAIL_MS)
-            events.append(self._event("final", text, end_ms=end))
+            final = self._event("final", text, end_ms=end)
+            final["sentenceEnd"] = sentence_end
+            events.append(final)
             self.segment_id += 1
         self.offset += count
         self.partial_text = ""
@@ -933,15 +967,258 @@ class Transcriber:
 
 
 # ---------------------------------------------------------------------------
+# Confucius4-R2T2
+# ---------------------------------------------------------------------------
+
+# A file import has no one waiting on each word, so it decodes in the largest
+# step the model supports: each step costs about the same whatever its length,
+# and 2 s steps run far faster than real time where 160 ms steps would not.
+R2T2_FILE_STEP_MS = 2000
+
+
+class R2T2Engine:
+    """The loaded R2T2 model; the counterpart of Engine. Built once at process
+    start, before READY, because a first run downloads ~2.5 GB of weights."""
+
+    def __init__(self, chunk_ms: int = DEFAULT_CHUNK_MS, on_stage=None):
+        self.chunk_ms = chunk_ms
+        self.on_stage = on_stage
+        self.model = None
+
+    def new_transcriber(self, language: str | None, context: str = "",
+                        file: bool = False) -> "R2T2Transcriber":
+        step = R2T2_FILE_STEP_MS if file else self.chunk_ms
+        return R2T2Transcriber(self.model, language, context, step_ms=step)
+
+    def load(self):
+        with contextlib.redirect_stdout(sys.stderr):
+            self._load()
+
+    def _load(self):
+        import r2t2_engine
+
+        try:
+            path = r2t2_engine.resolve_model_path(local_only=True)
+        except Exception:
+            path = None
+        total = 2 if path else 3
+        step = 0
+
+        def stage(key: str):
+            nonlocal step
+            step += 1
+            log(f"[engine] ({step}/{total}) {key}")
+            if self.on_stage:
+                self.on_stage(key, step, total)
+
+        if path is None:
+            stage("download")
+            with stage_heartbeat(lambda: self.on_stage and self.on_stage("download", step, total)):
+                path = r2t2_engine.resolve_model_path()
+        stage("streaming")
+        self.model = r2t2_engine.R2T2Model(path)
+        # The first MLX call compiles kernels; burn that on silence.
+        try:
+            warm = self.new_transcriber(None)
+            warm.feed(bytes(SAMPLE_RATE * 2))
+            warm.finish()
+        except Exception as exc:
+            log(f"[engine] warmup failed (non-fatal): {exc}")
+        log(f"[engine] ready: {r2t2_engine.MODEL_REPO}")
+
+
+class R2T2Transcriber:
+    """Turns R2T2's append-only text into the partial/final line events the
+    app expects -- the same contract as Transcriber.
+
+    R2T2 has no token timestamps, so lines are timed by the stream clock: a
+    line starts where the voice that produced it started and ends when its
+    last piece was committed. It punctuates its own output, so lines break at
+    its sentence marks; the soft cut and the pause close work as they do for
+    nemotron.
+    """
+
+    def __init__(self, model, language: str | None, context: str = "",
+                 step_ms: int = DEFAULT_CHUNK_MS):
+        import r2t2_engine
+
+        self._r2t2 = r2t2_engine
+        self.stream = r2t2_engine.R2T2Stream(
+            model=model,
+            language=r2t2_engine.language_name(language),
+            context=context or "",
+            step_samples=max(1, step_ms) * SAMPLE_RATE // 1000)
+        self.stream_samples = 0
+        self.segment_id = 0
+        self.line = ""
+        self.partial_text = ""
+        self.line_start_ms: int | None = None
+        self.last_commit_ms: int | None = None
+        self.last_voiced_ms: int | None = None
+        # Start of the current run of speech: where a line that begins in it
+        # is said to start.
+        self.voice_onset_ms: int | None = None
+        self.last_final_end_ms = 0
+        # Voiced audio has been fed since the last flush, so a pause may
+        # still be holding back a word.
+        self.dirty = False
+
+    @property
+    def stream_ms(self) -> int:
+        return self.stream_samples * 1000 // SAMPLE_RATE
+
+    def set_language(self, language: str | None):
+        self.stream.language = self._r2t2.language_name(language)
+
+    def set_context(self, context: str):
+        self.stream.context = context or ""
+
+    def feed(self, pcm: bytes) -> list[dict]:
+        if len(pcm) % 2:
+            pcm = pcm[:-1]
+        if not pcm:
+            return []
+        before = self.stream_ms
+        self.stream_samples += len(pcm) // 2
+        if frame_rms(pcm) >= VOICE_RMS_THRESHOLD:
+            if self.last_voiced_ms is None or before - self.last_voiced_ms >= PAUSE_CLOSE_MS:
+                self.voice_onset_ms = before
+            self.last_voiced_ms = self.stream_ms
+            self.dirty = True
+        events = self._take(self.stream.accept(pcm_to_float(pcm)))
+        events += self._cut()
+        if self.dirty and self._in_pause():
+            # R2T2 holds its last token back until more audio arrives, and in
+            # a pause none will: commit it now and close the line.
+            self.dirty = False
+            events += self._take(self.stream.flush())
+            events += self._cut()
+            events += self._close(sentence_end=True)
+        return events
+
+    def finish(self) -> list[dict]:
+        events = self._take(self.stream.flush())
+        events += self._cut()
+        events += self._close(sentence_end=True)
+        return events
+
+    # ---- internals ------------------------------------------------------
+
+    def _in_pause(self) -> bool:
+        quiet_since = max(self.last_commit_ms or 0, self.last_voiced_ms or 0)
+        return self.stream_ms - quiet_since >= PAUSE_CLOSE_MS
+
+    def _take(self, pieces) -> list[dict]:
+        changed = False
+        for text, _end in pieces:
+            if not self.line:
+                text = text.lstrip()
+                if all(ch in LEADING_SKIP_CHARS for ch in text):
+                    continue
+                onset = self.voice_onset_ms if self.voice_onset_ms is not None else self.stream_ms
+                self.line_start_ms = max(self.last_final_end_ms, onset)
+            self.line += text
+            self.last_commit_ms = self.stream_ms
+            changed = True
+        if not changed:
+            return []
+        text = polish_text(self.line)
+        if text == self.partial_text:
+            return []
+        self.partial_text = text
+        return [self._event("partial", text)]
+
+    def _cut(self) -> list[dict]:
+        """Closes as many whole sentences as the line holds, then a soft cut
+        if what is left has run past SOFT_CUT_MS."""
+        events: list[dict] = []
+        while True:
+            at = self._sentence_end(self.line)
+            if at is None:
+                break
+            events += self._commit(at, sentence_end=True)
+        start = self.line_start_ms if self.line_start_ms is not None else self.stream_ms
+        held = self.stream_ms - start
+        if self.line and held >= SOFT_CUT_MS:
+            at = self._soft_cut(self.line)
+            events += self._commit(at, sentence_end=False)
+        return events
+
+    @staticmethod
+    def _sentence_end(line: str) -> int | None:
+        """Length of the first finished sentence in `line`, or None."""
+        for i, ch in enumerate(line):
+            if ch not in SENTENCE_END_CHARS:
+                continue
+            nxt = line[i + 1:i + 2]
+            # "3.5" and "U.S." keep going; a mark then a space, a CJK
+            # character or the end of the line closes the sentence.
+            if nxt and not (nxt.isspace() or _is_cjk(nxt) or nxt in SENTENCE_END_CHARS):
+                continue
+            if ends_sentence(line[:i + 1]):
+                end = i + 1
+                while end < len(line) and line[end] in SENTENCE_END_CHARS:
+                    end += 1
+                return end
+        return None
+
+    @staticmethod
+    def _soft_cut(line: str) -> int:
+        for i in range(len(line) - 1, 0, -1):
+            if line[i] in CLAUSE_END_CHARS:
+                return i + 1
+        cut = line.rfind(" ")
+        return cut if cut > 0 else len(line)
+
+    def _commit(self, count: int, sentence_end: bool) -> list[dict]:
+        head, rest = self.line[:count], self.line[count:].lstrip()
+        text = polish_text(head)
+        events: list[dict] = []
+        end = self.last_commit_ms if self.last_commit_ms is not None else self.stream_ms
+        if text:
+            final = self._event("final", text, end_ms=end)
+            final["sentenceEnd"] = sentence_end
+            events.append(final)
+            self.segment_id += 1
+            self.last_final_end_ms = end
+        self.line = rest
+        self.partial_text = ""
+        self.line_start_ms = end if rest else None
+        if rest:
+            self.partial_text = polish_text(rest)
+            events.append(self._event("partial", self.partial_text))
+        return events
+
+    def _close(self, sentence_end: bool) -> list[dict]:
+        if not self.line.strip():
+            self.line = ""
+            return []
+        return self._commit(len(self.line), sentence_end)
+
+    def _event(self, kind: str, text: str, end_ms: int | None = None) -> dict:
+        start = self.line_start_ms if self.line_start_ms is not None else self.stream_ms
+        end = self.stream_ms if end_ms is None else end_ms
+        return {
+            "type": kind,
+            "segmentId": self.segment_id,
+            "startMs": max(0, min(int(start), end)),
+            "endMs": max(0, int(end)),
+            "text": text,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Session
 # ---------------------------------------------------------------------------
 
 
 class Session:
-    def __init__(self, ws, engine: Engine, default_language: str | None):
+    def __init__(self, ws, engine, default_language: str | None):
         self.ws = ws
         self.engine = engine
         self.language = default_language
+        # The course name and terms from the config frame; R2T2's prompt.
+        self.context = ""
         # Inference off the event loop, and on exactly one thread so frames are
         # decoded in order.
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr")
@@ -991,9 +1268,9 @@ class Session:
         for ev in events:
             await self._send(ev)
 
-    def _get_transcriber(self) -> Transcriber:
+    def _get_transcriber(self):
         if self._transcriber is None:
-            self._transcriber = Transcriber(self.engine, self.language)
+            self._transcriber = self.engine.new_transcriber(self.language, self.context)
         return self._transcriber
 
     # ---- live streaming -------------------------------------------------
@@ -1041,6 +1318,11 @@ class Session:
         self.language = language
         if self._transcriber is not None:
             await self._run(self._transcriber.set_language, language)
+
+    async def set_context(self, context: str):
+        self.context = context
+        if self._transcriber is not None:
+            await self._run(self._transcriber.set_context, context)
 
     async def finish(self):
         """Client signalled end of audio: decode what is queued, close the open
@@ -1091,7 +1373,7 @@ class Session:
         await self._send({"type": "progress", "completed": 0, "total": total})
         # A private transcriber, so a file import never disturbs a live stream
         # on the same connection.
-        transcriber = Transcriber(self.engine, self.language)
+        transcriber = self.engine.new_transcriber(self.language, self.context, file=True)
         # Small slices so pause detection has the same resolution as live audio,
         # and so only 200 ms of PCM is resident rather than the whole lecture.
         slice_frames = 200 * SAMPLE_RATE // 1000
@@ -1229,6 +1511,8 @@ async def handle_connection(ws, engine: Engine, default_language: str | None):
                 # The model is multilingual, so a language change is just a new
                 # prompt on the stream -- no restart, no model swap.
                 await session.set_language(lang if lang and lang != "auto" else None)
+                if "context" in cmd:
+                    await session.set_context(str(cmd.get("context") or ""))
             elif kind == "eof":
                 await session.finish()
             elif kind == "file":
@@ -1263,6 +1547,7 @@ async def main():
                         help="source language hint, e.g. zh, en, ja; omit for auto")
     parser.add_argument("--chunk-ms", default=DEFAULT_CHUNK_MS,
                         help=f"streaming chunk size, one of {CHUNK_CHOICES}")
+    parser.add_argument("--engine", default="nemotron", choices=("nemotron", "r2t2"))
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--exit-with-parent", type=int, default=0,
                         help="pid to watch; exit when it goes away")
@@ -1279,8 +1564,11 @@ async def main():
     def emit_stage(key: str, step: int, total: int):
         handshake(f"STAGE {step}/{total} {key}")
 
-    engine = Engine(chunk_ms=parse_chunk_ms(args.chunk_ms), threads=args.threads,
-                    on_stage=emit_stage)
+    if args.engine == "r2t2":
+        engine = R2T2Engine(chunk_ms=parse_chunk_ms(args.chunk_ms), on_stage=emit_stage)
+    else:
+        engine = Engine(chunk_ms=parse_chunk_ms(args.chunk_ms), threads=args.threads,
+                        on_stage=emit_stage)
     try:
         await asyncio.get_running_loop().run_in_executor(None, engine.load)
     except Exception:

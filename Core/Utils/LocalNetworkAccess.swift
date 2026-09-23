@@ -1,10 +1,6 @@
 import Foundation
 import Network
-#if os(macOS)
 import AppKit
-#else
-import UIKit
-#endif
 
 /// macOS only shows an app under Settings > Privacy & Security > Local Network
 /// once that app has actually attempted a connection to a local-network host
@@ -111,13 +107,8 @@ enum LocalNetworkAccess {
 
     /// Deep link straight into the relevant privacy settings pane.
     static func openSystemSettings() {
-        #if os(macOS)
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork") else { return }
         NSWorkspace.shared.open(url)
-        #else
-        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
-        UIApplication.shared.open(url)
-        #endif
     }
 }
 

@@ -35,7 +35,7 @@ private struct InnerOverlayView: View {
                     .fill(.black.opacity(0.78))
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(LinearGradient(colors: [
-                        Theme.accent.opacity(0.10),
+                        Color.accentColor.opacity(0.08),
                         Color.clear
                     ], startPoint: .topLeading, endPoint: .bottomTrailing))
             }
@@ -49,6 +49,9 @@ private struct InnerOverlayView: View {
         )
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
+        // Tracked here, so the toggle is right however the overlay was closed.
+        .onAppear { WindowRouter.shared.isOverlayVisible = true }
+        .onDisappear { WindowRouter.shared.isOverlayVisible = false }
     }
 
     private var header: some View {
@@ -108,13 +111,13 @@ private struct InnerOverlayView: View {
 
             if !appState.isRecording {
                 Button {
-                    appState.startNewSession(source: .system)
+                    RecordingLauncher.start(appState)
                 } label: {
-                    Image(systemName: "speaker.wave.3.fill")
-                        .foregroundStyle(Theme.accent)
+                    Image(systemName: "record.circle")
+                        .foregroundStyle(Theme.recording)
                 }
                 .buttonStyle(.plain)
-                .help(L10n.t("overlay.startSystem"))
+                .help(L10n.t("record.start"))
             } else {
                 Button {
                     appState.stopRecording()
@@ -123,9 +126,10 @@ private struct InnerOverlayView: View {
                         .foregroundStyle(Theme.recording)
                 }
                 .buttonStyle(.plain)
+                .help(L10n.t("record.stop"))
             }
             Button {
-                NotificationCenter.default.post(name: .toggleOverlay, object: nil)
+                WindowRouter.shared.toggleOverlay()
             } label: {
                 Image(systemName: "xmark")
                     .foregroundStyle(.white.opacity(0.7))
@@ -138,7 +142,10 @@ private struct InnerOverlayView: View {
 
     @ViewBuilder
     private var content: some View {
-        let segs = Array(orchestrator.transcript.segments.suffix(recentCount.rawValue))
+        // Whole sentences: a line cut mid-sentence has no translation of its
+        // own, which used to show as "translating…" forever.
+        let segs = Array(orchestrator.transcript.segments.sentenceBlocks.suffix(recentCount.rawValue))
+            .map(OverlaySentence.init)
         // The in-progress line, so the overlay fills in as you speak instead of
         // only jumping a whole sentence at a time once one is committed.
         let draft = orchestrator.transcript.draftText
@@ -174,7 +181,7 @@ private struct InnerOverlayView: View {
                                                       displayMode: displayMode,
                                                       textSize: textSize,
                                                       lineLimit: lineLimit)
-                            .id(seg.rowId)
+                            .id(seg.id)
                             .transition(.opacity)
                         }
                         if !draft.isEmpty {
@@ -285,8 +292,23 @@ private struct OverlayDraftCaptionView: View {
     }
 }
 
+/// A sentence as the overlay shows it.
+private struct OverlaySentence: Identifiable {
+    let id: Int64
+    let original: String
+    let translated: String
+    let isOpen: Bool
+
+    init(_ block: SentenceBlock<LiveSegment>) {
+        id = block.lines[0].rowId
+        original = SentenceGroups.join(block.lines.map(\.original))
+        translated = block.lines.last?.translated ?? ""
+        isOpen = block.lines.last?.continuesNext ?? false
+    }
+}
+
 private struct OverlayCaptionSegmentView: View {
-    let segment: LiveSegment
+    let segment: OverlaySentence
     let displayMode: OverlayCaptionDisplayMode
     let textSize: OverlayCaptionTextSize
     let lineLimit: Int
@@ -323,7 +345,8 @@ private struct OverlayCaptionSegmentView: View {
     }
 
     private var translationText: String {
-        segment.translated.isEmpty ? L10n.t("overlay.translationPending") : segment.translated
+        if !segment.translated.isEmpty { return segment.translated }
+        return segment.isOpen ? "…" : L10n.t("overlay.translationPending")
     }
 
     private func captionText(_ text: String,

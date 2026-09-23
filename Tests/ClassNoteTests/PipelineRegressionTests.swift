@@ -163,16 +163,14 @@ final class PipelineRegressionTests: XCTestCase {
                                     text: "hello",
                                     isFinal: true,
                                     speakerId: "spk",
-                                    engineSegmentId: 7,
-                                    isRevision: true)
+                                    continuesSentence: true)
         let shifted = event.shifted(by: 5_000)
 
         XCTAssertEqual(shifted.startMs, 5_100)
         XCTAssertEqual(shifted.endMs, 5_900)
         XCTAssertEqual(shifted.text, "hello")
         XCTAssertEqual(shifted.speakerId, "spk")
-        XCTAssertEqual(shifted.engineSegmentId, 7)
-        XCTAssertTrue(shifted.isRevision)
+        XCTAssertTrue(shifted.continuesSentence)
         // The first connection has nothing to rebase, so the event is untouched.
         XCTAssertEqual(event.shifted(by: 0).id, event.id)
     }
@@ -322,5 +320,68 @@ private struct ParkingSTTProvider: STTProvider {
                                                         text: "first slice",
                                                         isFinal: true)))
         }
+    }
+}
+
+// MARK: - Whole-sentence translation
+
+final class SentenceGroupsTests: XCTestCase {
+    private func line(_ id: Int64, _ text: String, continues: Bool = false) -> Segment {
+        Segment(id: id, sessionId: "s", startMs: id * 1000, endMs: id * 1000 + 900,
+                speakerId: nil, textOriginal: text, textTranslated: "", isFinal: true,
+                confidence: 0, version: 1, continuesNext: continues)
+    }
+
+    func testLinesCutMidSentenceJoinTheLineThatEndsIt() {
+        let groups = SentenceGroups.group([
+            line(1, "First part of it,", continues: true),
+            line(2, "and the rest."),
+            line(3, "A whole sentence."),
+        ])
+        XCTAssertEqual(groups.map { $0.compactMap(\.id) }, [[1, 2], [3]])
+    }
+
+    func testASentenceLeftOpenAtTheEndIsStillAGroup() {
+        let groups = SentenceGroups.group([line(1, "Done."), line(2, "Cut off", continues: true)])
+        XCTAssertEqual(groups.map { $0.compactMap(\.id) }, [[1], [2]])
+    }
+
+    func testJoinSpacesLatinButNotCJK() {
+        XCTAssertEqual(SentenceGroups.join(["first part,", "and the rest."]),
+                       "first part, and the rest.")
+        XCTAssertEqual(SentenceGroups.join(["糖酵解发生在", "细胞质中。"]), "糖酵解发生在细胞质中。")
+        XCTAssertEqual(SentenceGroups.join(["这叫做", "glycolysis"]), "这叫做glycolysis")
+        XCTAssertEqual(SentenceGroups.join(["", " spaced ", "out"]), "spaced out")
+    }
+
+    func testSettledStates() {
+        XCTAssertTrue(TranslationState.ok.isSettled)
+        XCTAssertTrue(TranslationState.merged.isSettled)
+        XCTAssertFalse(TranslationState.failed.isSettled)
+        XCTAssertFalse(TranslationState.notAttempted.isSettled)
+    }
+}
+
+final class TranslationGlossaryTests: XCTestCase {
+    func testPairsAcceptTheSeparatorsStudentsUse() {
+        let glossary = TranslationGlossary(raw: """
+        eigenvalue = 特征值
+        kernel -> 核
+        矩阵：matrix
+        no separator here
+         = missing term
+        pipeline => 流水线
+        """)
+        let pairs = glossary.pairs
+        XCTAssertEqual(pairs.map(\.0), ["eigenvalue", "kernel", "矩阵", "pipeline"])
+        XCTAssertEqual(pairs.map(\.1), ["特征值", "核", "matrix", "流水线"])
+    }
+
+    func testRecognitionHintNamesTheCourseAndItsTerms() {
+        var context = CourseContext()
+        context.courseName = "Linear Algebra"
+        context.glossary = "eigenvalue = 特征值\nkernel = 核"
+        XCTAssertEqual(context.recognitionHint, "Linear Algebra\neigenvalue, kernel")
+        XCTAssertEqual(CourseContext.empty.recognitionHint, "")
     }
 }

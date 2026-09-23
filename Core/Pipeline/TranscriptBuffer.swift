@@ -9,22 +9,24 @@ final class TranscriptBuffer: ObservableObject {
     @Published private(set) var segments: [LiveSegment] = []
     @Published var translationEnabled: Bool = true
 
-    /// The in-progress line for the sentence currently being spoken — only
-    /// ever populated by backends that report volatile/partial results
-    /// (currently the on-device Apple STT engines). Cleared as soon as that
-    /// sentence lands as a committed `LiveSegment`.
+    /// The in-progress line for the sentence currently being spoken, from
+    /// engines that report partial results. Cleared as soon as that line lands
+    /// as a committed `LiveSegment`.
     @Published private(set) var draftText: String = ""
 
-    /// Translation of `draftText`, refreshed on a debounce while the draft is
-    /// still changing. Always cleared together with `draftText`.
+    /// Translation of the sentence `draftText` belongs to (including lines of
+    /// it already committed), refreshed on a debounce while the draft is still
+    /// changing. Always cleared together with `draftText`.
     @Published private(set) var draftTranslated: String = ""
 
     /// Locally-known mapping from row id (database) to index in the array.
     private var indexById: [Int64: Int] = [:]
 
-    func appendFinal(rowId: Int64, startMs: Int64, endMs: Int64, original: String) {
-        let item = LiveSegment(rowId: rowId, startMs: startMs, endMs: endMs,
+    func appendFinal(rowId: Int64, startMs: Int64, endMs: Int64, original: String,
+                     continuesNext: Bool = false) {
+        var item = LiveSegment(rowId: rowId, startMs: startMs, endMs: endMs,
                                original: original, translated: "", isFinal: true)
+        item.continuesNext = continuesNext
         segments.append(item)
         indexById[rowId] = segments.count - 1
         draftText = ""
@@ -48,19 +50,6 @@ final class TranscriptBuffer: ObservableObject {
         segments[idx].translated = translated
     }
 
-    /// Replaces an already-committed segment's text with a more accurate
-    /// result from a 2-pass local ASR engine's offline correction pass.
-    func reviseFinal(rowId: Int64, newText: String) {
-        guard let idx = indexById[rowId], idx < segments.count else { return }
-        segments[idx].original = newText
-        segments[idx].wasRevised = true
-    }
-
-    func clearRevisedFlag(rowId: Int64) {
-        guard let idx = indexById[rowId], idx < segments.count else { return }
-        segments[idx].wasRevised = false
-    }
-
     func translatedText(rowId: Int64) -> String {
         guard let idx = indexById[rowId], idx < segments.count else { return "" }
         return segments[idx].translated
@@ -78,9 +67,6 @@ final class TranscriptBuffer: ObservableObject {
         draftTranslated = ""
     }
 
-    func recent(_ count: Int = 4) -> [String] {
-        Array(segments.suffix(count).map { $0.original })
-    }
 }
 
 struct LiveSegment: Identifiable, Hashable {
@@ -91,9 +77,9 @@ struct LiveSegment: Identifiable, Hashable {
     var original: String
     var translated: String
     var isFinal: Bool
-    /// Set briefly when a 2-pass local ASR engine replaces this segment's
-    /// text with a more accurate offline result, so the UI can flash a highlight.
-    var wasRevised: Bool = false
+    /// The line was cut mid-sentence; the sentence's translation arrives on
+    /// the line that ends it.
+    var continuesNext: Bool = false
 
     init(rowId: Int64, startMs: Int64, endMs: Int64, original: String, translated: String, isFinal: Bool) {
         self.id = rowId
