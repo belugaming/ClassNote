@@ -13,7 +13,7 @@ final class AppleTranslationEngine: TranslationProvider, Sendable {
                    sourceLanguage: String,
                    targetLanguage: String,
                    context: [String],
-                   glossary: String) -> AsyncThrowingStream<String, Error> {
+                   glossary: TranslationGlossary) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {

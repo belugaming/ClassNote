@@ -1340,7 +1340,7 @@ final class SessionDetailViewModel: ObservableObject {
     }
 
     var failedTranslationCount: Int {
-        (session?.segments ?? []).filter { $0.translationState != .ok && !$0.textOriginal.isEmpty }.count
+        (session?.segments ?? []).filter { !$0.translationState.isSettled && !$0.textOriginal.isEmpty }.count
     }
 
     /// Segment under the playhead, for the transcript highlight.

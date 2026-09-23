@@ -751,7 +751,7 @@ private struct LocalEngineStatusRow: View {
     @State private var isInstalling = false
 
     private var engine: LocalASREngineKind {
-        appState.sttBackend == .funasr ? .funasr : .nemotron
+        appState.sttBackend.localEngine ?? .funasr
     }
 
     private var isInstalled: Bool {

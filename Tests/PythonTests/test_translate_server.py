@@ -101,18 +101,46 @@ class PromptTests(unittest.TestCase):
                 raise ValueError("no chat template")
             return "<|user|>" + messages[0]["content"]
 
-    def test_prompt_names_both_languages(self):
+    def test_a_pair_with_chinese_uses_the_chinese_template(self):
         prompt = translate_server.build_prompt(self._Tokenizer(), "hello", "en", "zh")
-        self.assertIn("English", prompt)
-        self.assertIn("Chinese", prompt)
-        self.assertIn("hello", prompt)
+        self.assertIn("将以下文本翻译为中文", prompt)
+        self.assertTrue(prompt.endswith("hello"))
+
+    def test_a_pair_without_chinese_uses_the_english_template(self):
+        prompt = translate_server.build_prompt(self._Tokenizer(), "bonjour", "fr", "en")
+        self.assertIn("Translate the following text into English", prompt)
+        self.assertTrue(prompt.endswith("bonjour"))
 
     def test_a_tokenizer_without_a_chat_template_falls_back_to_the_instruction(self):
         prompt = translate_server.build_prompt(self._Tokenizer(template=False),
                                                "hello", "en", "zh")
-        self.assertTrue(prompt.startswith("Translate"))
+        self.assertTrue(prompt.startswith("将以下文本"))
         self.assertIn("hello", prompt)
 
+    def test_context_goes_in_as_background_not_as_text_to_translate(self):
+        prompt = translate_server.build_instruction(
+            "It breaks glucose down.", "en", "zh",
+            context=["Old line.", "Glycolysis happens in the cytoplasm."])
+        self.assertIn("【背景信息】\nOld line. Glycolysis happens in the cytoplasm.", prompt)
+        self.assertTrue(prompt.endswith("【待翻译文本】\nIt breaks glucose down."))
+
+    def test_background_keeps_only_the_nearest_sentences(self):
+        prompt = translate_server.build_instruction(
+            "x", "en", "zh", context=["one.", "two.", "three."])
+        self.assertIn("two. three.", prompt)
+        self.assertNotIn("one.", prompt)
+
+    def test_only_terms_in_the_sentence_are_sent_and_flipped_to_match_it(self):
+        terms = [["eigenvalue", "特征值"], ["矩阵", "matrix"], ["kernel", "核"]]
+        prompt = translate_server.build_instruction(
+            "The eigenvalue of this matrix is two.", "en", "zh", terms=terms)
+        self.assertIn("参考下面的翻译：\neigenvalue 翻译成 特征值\nmatrix 翻译成 矩阵\n", prompt)
+        self.assertNotIn("kernel", prompt)
+
+    def test_malformed_terms_are_ignored(self):
+        prompt = translate_server.build_instruction(
+            "hello", "en", "zh", terms=[["hello"], "hello", ["", "x"], None])
+        self.assertNotIn("参考", prompt)
 
 if __name__ == "__main__":
     unittest.main()

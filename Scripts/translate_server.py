@@ -10,8 +10,15 @@ WebSocket machinery asr_server.py has; a pipe is enough and avoids allocating a
 port.
 
 Client -> server (one JSON object per line):
-    {"id": 1, "text": "...", "source": "en", "target": "zh"}
+    {"id": 1, "text": "...", "source": "en", "target": "zh",
+     "context": ["previous sentence", ...],        (optional)
+     "terms": [["eigenvalue", "特征值"], ...]}      (optional)
     {"id": 2, "cancel": true}
+
+``context`` is the lecture just before this sentence and ``terms`` the course
+glossary. Both go into the prompt through the templates Hy-MT2 was trained on
+(background information and terminology intervention), which is what keeps a
+pronoun or a course term consistent from one sentence to the next.
 
 Server -> client:
     STAGE n/m key                     (plain line, load progress, repeated
@@ -62,9 +69,11 @@ STAGE_LINE = "STAGE 1/1 translation"
 HEARTBEAT_SECONDS = 5.0
 
 # Hy-MT2 is a dedicated translation model, not a general chat model: it is
-# trained to answer this instruction shape with the translation and nothing else.
-# Language names are spelled out because that is what the model card documents --
-# codes like "zh-Hans" are not part of its training format.
+# trained to answer the instruction shapes in its model card (github.com/
+# Tencent-Hunyuan/Hy-MT2, README "Prompt Templates") with the translation and
+# nothing else. Every template exists in a Chinese and an English wording, and
+# the card asks for full language names in the prompt's own language -- codes
+# like "zh-Hans" are not part of its training format.
 LANGUAGE_NAMES = {
     "zh": "Chinese", "zh-hans": "Chinese", "zh-hant": "Traditional Chinese",
     "zh-cn": "Chinese", "zh-tw": "Traditional Chinese",
@@ -74,6 +83,28 @@ LANGUAGE_NAMES = {
     "vi": "Vietnamese", "id": "Indonesian", "tr": "Turkish", "pl": "Polish",
     "nl": "Dutch", "cs": "Czech", "uk": "Ukrainian", "he": "Hebrew",
 }
+# The card's Chinese names, used when the prompt is in Chinese.
+LANGUAGE_NAMES_ZH = {
+    "Chinese": "中文", "Traditional Chinese": "繁体中文", "English": "英语",
+    "Japanese": "日语", "Korean": "韩语", "French": "法语", "German": "德语",
+    "Spanish": "西班牙语", "Portuguese": "葡萄牙语", "Russian": "俄语",
+    "Italian": "意大利语", "Arabic": "阿拉伯语", "Hindi": "印地语",
+    "Thai": "泰语", "Vietnamese": "越南语", "Indonesian": "印尼语",
+    "Turkish": "土耳其语", "Polish": "波兰语", "Dutch": "荷兰语",
+    "Czech": "捷克语", "Ukrainian": "乌克兰语", "Hebrew": "希伯来语",
+}
+
+# How much of the preceding lecture goes in as background. Enough to resolve
+# "it" and "this" across a sentence boundary; more only slows every sentence
+# down and gives a 1.8B model more text it might translate by mistake.
+MAX_CONTEXT_SENTENCES = 2
+MAX_CONTEXT_CHARS = 400
+# Glossary entries that actually occur in the sentence, capped: the whole
+# course glossary on every line would cost latency for terms that are not there.
+MAX_TERMS = 12
+# Hy-MT2's recommended repetition penalty. Decoding stays greedy (see handle),
+# and a small model decoding greedily is the one most prone to loops.
+REPETITION_PENALTY = 1.05
 
 
 def log(*a):
@@ -126,18 +157,104 @@ def language_name(code: str, fallback: str) -> str:
     return LANGUAGE_NAMES.get(code.strip().lower(), code.strip())
 
 
-def build_prompt(tokenizer, text: str, source: str, target: str) -> str:
-    src = language_name(source, "English")
-    tgt = language_name(target, "Chinese")
-    instruction = (
-        f"Translate the following segment into {tgt}, without additional "
-        f"explanation.\n\n{text}"
-    )
-    if src:
-        instruction = (
-            f"Translate the following {src} segment into {tgt}, without "
-            f"additional explanation.\n\n{text}"
-        )
+def is_chinese(code: str) -> bool:
+    return (code or "").strip().lower().split("-")[0] == "zh"
+
+
+def relevant_terms(text: str, terms) -> list[tuple[str, str]]:
+    """Glossary pairs whose source term occurs in `text`, oriented source ->
+    target. A student may have written the glossary either way round
+    ("特征值 = eigenvalue" for an English lecture), so a pair whose right-hand
+    side is the one in the sentence is flipped rather than dropped."""
+    lowered = text.lower()
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for pair in terms or []:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            continue
+        a, b = (str(pair[0]).strip(), str(pair[1]).strip())
+        if not a or not b:
+            continue
+        if a.lower() in lowered:
+            src, tgt = a, b
+        elif b.lower() in lowered:
+            src, tgt = b, a
+        else:
+            continue
+        if src.lower() in seen:
+            continue
+        seen.add(src.lower())
+        out.append((src, tgt))
+        if len(out) >= MAX_TERMS:
+            break
+    return out
+
+
+def background_text(context) -> str:
+    """The last few sentences before this one, trimmed from the front so the
+    sentence nearest the one being translated always survives."""
+    lines = [str(c).strip() for c in (context or []) if str(c).strip()]
+    joined = " ".join(lines[-MAX_CONTEXT_SENTENCES:])
+    if len(joined) > MAX_CONTEXT_CHARS:
+        joined = joined[-MAX_CONTEXT_CHARS:]
+    return joined
+
+
+def build_instruction(text: str, source: str, target: str,
+                      context=None, terms=None) -> str:
+    """The user turn, in the model card's own wording.
+
+    Chinese on either side of the pair takes the Chinese templates, which is
+    how every example in the card for a pair with Chinese is written; any other
+    pair takes the English ones.
+    """
+    tgt_en = language_name(target, "Chinese")
+    chinese = is_chinese(source) or is_chinese(target)
+    tgt = LANGUAGE_NAMES_ZH.get(tgt_en, tgt_en) if chinese else tgt_en
+    pairs = relevant_terms(text, terms)
+    background = background_text(context)
+
+    if background:
+        # "Structured Data 2" in the card: the background block is read, not
+        # translated. It replaced Hy-MT1.5's contextual template.
+        if chinese:
+            prompt = (f"【背景信息】\n{background}\n\n"
+                      f"请结合背景信息将以下文本翻译为{tgt}。\n\n"
+                      f"【待翻译文本】\n{text}")
+        else:
+            prompt = (f"[Background Information]\n{background}\n\n"
+                      f"Please translate the following text into {tgt}, taking the "
+                      f"provided background information into consideration.\n\n"
+                      f"[Source Text]\n{text}")
+        if pairs:
+            if chinese:
+                glossary = "\n".join(f"{a} 翻译成 {b}" for a, b in pairs)
+                prompt = f"参考下面的翻译：\n{glossary}\n{prompt}"
+            else:
+                glossary = "\n".join(f"{a} translates to {b}" for a, b in pairs)
+                prompt = f"Reference the following translations:\n{glossary}\n\n{prompt}"
+        return prompt
+
+    if pairs:
+        if chinese:
+            glossary = "\n".join(f"{a} 翻译成 {b}" for a, b in pairs)
+            return (f"参考下面的翻译：\n{glossary}\n"
+                    f"将以下文本翻译为{tgt}，注意只需要输出翻译后的结果，不要额外解释：\n\n{text}")
+        glossary = "\n".join(f"{a} translates to {b}" for a, b in pairs)
+        return (f"Reference the following translations:\n{glossary}\n\n"
+                f"Translate the following text into {tgt}. Note that you must ONLY output "
+                f"the translated result without any additional explanation:\n\n{text}")
+
+    if chinese:
+        return f"将以下文本翻译为{tgt}，注意只需要输出翻译后的结果，不要额外解释：\n\n{text}"
+    return (f"Translate the following text into {tgt}. Note that you should only output "
+            f"the translated result without any additional explanation:\n\n{text}")
+
+
+def build_prompt(tokenizer, text: str, source: str, target: str,
+                 context=None, terms=None) -> str:
+    instruction = build_instruction(text, source, target, context, terms)
+    # The card: "our models do not have a default system_prompt".
     messages = [{"role": "user", "content": instruction}]
     try:
         return tokenizer.apply_chat_template(messages, add_generation_prompt=True)
@@ -148,7 +265,7 @@ def build_prompt(tokenizer, text: str, source: str, target: str) -> str:
 
 def handle(model, tokenizer, req: dict):
     from mlx_lm import stream_generate
-    from mlx_lm.sample_utils import make_sampler
+    from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
     req_id = req.get("id")
     text = (req.get("text") or "").strip()
@@ -156,17 +273,20 @@ def handle(model, tokenizer, req: dict):
         emit({"id": req_id, "done": True})
         return
 
-    prompt = build_prompt(tokenizer, text, req.get("source", ""), req.get("target", ""))
+    prompt = build_prompt(tokenizer, text, req.get("source", ""), req.get("target", ""),
+                          context=req.get("context"), terms=req.get("terms"))
     # Greedy. Translation wants the most likely rendering, and sampling here
     # would make the same sentence translate differently on a retranslate.
     sampler = make_sampler(temp=0.0)
+    logits_processors = make_logits_processors(repetition_penalty=REPETITION_PENALTY)
     # Generous relative to the input: CJK->Latin can expand, and a hard cap that
     # truncates mid-sentence is worse than spending a few extra tokens.
     max_tokens = max(64, min(1024, len(text) * 4))
 
     try:
         for chunk in stream_generate(model, tokenizer, prompt,
-                                     max_tokens=max_tokens, sampler=sampler):
+                                     max_tokens=max_tokens, sampler=sampler,
+                                     logits_processors=logits_processors):
             with _cancel_lock:
                 if req_id in _cancelled:
                     _cancelled.discard(req_id)

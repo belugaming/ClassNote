@@ -13,24 +13,20 @@ struct TranscriptEvent: Sendable, Identifiable, Hashable {
     let text: String
     let isFinal: Bool
     let speakerId: String?
-    /// Engine-local segment identifier, only populated by local streaming
-    /// engines (FunASR/Nemotron) so a later `isRevision` event can be matched
-    /// back to the segment it corrects.
-    let engineSegmentId: Int64?
-    /// True when this event replaces the text of a previously emitted final
-    /// event with the same `engineSegmentId` (2-pass correction).
-    let isRevision: Bool
+    /// True when the engine broke this line only to keep it short and its
+    /// sentence carries on in the next final (the local engine's soft cut).
+    /// Translation waits for the rest instead of translating half a sentence.
+    let continuesSentence: Bool
 
     init(startMs: Int64, endMs: Int64, text: String, isFinal: Bool, speakerId: String? = nil,
-         engineSegmentId: Int64? = nil, isRevision: Bool = false) {
+         continuesSentence: Bool = false) {
         self.id = UUID()
         self.startMs = startMs
         self.endMs = endMs
         self.text = text
         self.isFinal = isFinal
         self.speakerId = speakerId
-        self.engineSegmentId = engineSegmentId
-        self.isRevision = isRevision
+        self.continuesSentence = continuesSentence
     }
 }
 
@@ -57,16 +53,16 @@ protocol STTProvider: Sendable {
 }
 
 protocol TranslationProvider: Sendable {
-    /// - Parameter context: recent transcript lines, rendered as prior turns.
-    /// - Parameter glossary: the course's fixed renderings, already formatted as
-    ///   a prompt block, or empty. Kept separate from `context` on purpose: a
-    ///   glossary smuggled in there becomes a user turn and gets translated
-    ///   instead of obeyed.
+    /// - Parameter context: the sentences just before this one, oldest first,
+    ///   for the translator to read but not translate.
+    /// - Parameter glossary: the course's fixed renderings. Kept separate from
+    ///   `context` on purpose: a glossary smuggled in there becomes text to
+    ///   translate instead of an instruction.
     func translate(text: String,
                    sourceLanguage: String,
                    targetLanguage: String,
                    context: [String],
-                   glossary: String) -> AsyncThrowingStream<String, Error>
+                   glossary: TranslationGlossary) -> AsyncThrowingStream<String, Error>
 }
 
 struct ChatMessage: Sendable {
@@ -127,20 +123,23 @@ struct EngineFactory {
         }
     }
 
+    /// - Parameter hint: what the course is about and its terms, for an engine
+    ///   that takes a text prompt (R2T2). The others ignore it.
     @MainActor
-    static func makeSTT(config: ApiConfig, backend: SttBackend) -> STTProvider {
+    static func makeSTT(config: ApiConfig, backend: SttBackend, hint: String = "") -> STTProvider {
         switch backend {
         case .openAICompatible:
             return OpenAICompatibleSTT(config: config)
         case .appleSpeech:
             return AppleSpeechSTT()
-        case .funasr:
+        case .funasr, .nemotronStreaming:
             return LocalWebSocketSTT(engine: .funasr,
                                      language: config.sourceLanguage,
                                      onProgress: Self.localEngineProgressSink())
-        case .nemotronStreaming:
-            return LocalWebSocketSTT(engine: .nemotron,
+        case .r2t2:
+            return LocalWebSocketSTT(engine: .r2t2,
                                      language: config.sourceLanguage,
+                                     hint: hint,
                                      onProgress: Self.localEngineProgressSink())
         }
     }

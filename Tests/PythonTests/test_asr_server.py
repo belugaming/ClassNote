@@ -46,6 +46,7 @@ from asr_server import (
     cut_from_marks,
     ends_sentence,
     find_cut,
+    find_cut_kind,
     parse_chunk_ms,
     pcm_to_float,
     punctuator_applies,
@@ -176,6 +177,15 @@ class FindCutTests(unittest.TestCase):
 
     def test_soft_cut_needs_the_time(self):
         self.assertIsNone(find_cut(words("still going on and on and on"), SOFT_CUT_MS - 1))
+
+    def test_cut_kind_says_whether_the_sentence_ended(self):
+        # A soft cut only breaks the line for length; the app translates it
+        # together with its continuation, so it must not claim a sentence end.
+        self.assertEqual(find_cut_kind(words("fifty pieces of gold."), 1000), (4, True))
+        cut, sentence_end = find_cut_kind(words("first part of it, second part"), SOFT_CUT_MS)
+        self.assertEqual(cut, 4)
+        self.assertFalse(sentence_end)
+        self.assertEqual(find_cut_kind(words("still going"), 1000), (None, False))
 
 
 class PunctuationHelperTests(unittest.TestCase):
@@ -388,9 +398,24 @@ class TranscriberTests(unittest.TestCase):
         self.assertEqual([e["type"] for e in events], ["partial", "final", "partial"])
         self.assertEqual(events[1]["text"], "This is a whole sentence.")
         self.assertEqual(events[1]["segmentId"], 0)
+        self.assertTrue(events[1]["sentenceEnd"])
         self.assertEqual(events[2]["text"], "Next")
         self.assertEqual(events[2]["segmentId"], 1)
         self.assertEqual(events[2]["startMs"], 110)
+
+    def test_a_soft_cut_line_says_its_sentence_goes_on(self):
+        t = self.make()
+        # Continuous speech, a word every 400 ms and one clause mark, until the
+        # line has been held past the soft cut.
+        words_in = ["first", "part", "of", "it,", "then", "more", "and", "more",
+                    "words", "keep", "coming", "without", "a", "stop", "at", "all"]
+        events = []
+        for i, word in enumerate(words_in):
+            events += self.feed(t, ms=400, new=[(" " + word, i * 0.4)])
+        finals = [e for e in events if e["type"] == "final"]
+        self.assertTrue(finals)
+        self.assertEqual(finals[0]["text"], "First part of it,")
+        self.assertFalse(finals[0]["sentenceEnd"])
 
     def test_leading_punctuation_after_a_pause_is_dropped(self):
         t = self.make()
@@ -421,6 +446,7 @@ class TranscriberTests(unittest.TestCase):
         self.assertEqual([e["type"] for e in events], ["partial", "final"])
         self.assertEqual(events[-1]["text"], "Last words here")
         self.assertTrue(t.stream.finished)
+        self.assertTrue(events[-1]["sentenceEnd"])
 
     def test_finish_with_nothing_open_emits_nothing(self):
         t = self.make()

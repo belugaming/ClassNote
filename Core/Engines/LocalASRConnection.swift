@@ -17,6 +17,10 @@ struct SidecarEvent: Decodable {
     /// `file.unreadable`, `file.failed`, `internal`). The sidecar's `message` is
     /// an English developer string; the code is what the UI can localize.
     let code: String?
+    /// On `final` frames: false when the line was cut for length and its
+    /// sentence goes on. Absent means a sentence end, which is what every
+    /// line was before the field existed.
+    let sentenceEnd: Bool?
 
     /// Maps transcript-bearing events onto `TranscriptEvent`. Returns nil for
     /// control frames (status/progress/eof/error), which callers handle
@@ -24,25 +28,13 @@ struct SidecarEvent: Decodable {
     func asTranscriptEvent() -> TranscriptEvent? {
         let start = startMs ?? 0
         let end = endMs ?? start
-        // The sidecar sends `listening` when it is capturing speech but cannot
-        // produce partials — FunASR has no English streaming model, so English
-        // would otherwise show nothing at all until the sentence completes.
-        if type == "listening" {
-            return TranscriptEvent(startMs: start, endMs: end,
-                                   text: L10n.t("localASR.recognizing"), isFinal: false,
-                                   engineSegmentId: segmentId, isRevision: false)
-        }
         guard let text, !text.isEmpty else { return nil }
         switch type {
         case "final":
             return TranscriptEvent(startMs: start, endMs: end, text: text, isFinal: true,
-                                   engineSegmentId: segmentId, isRevision: false)
-        case "revised":
-            return TranscriptEvent(startMs: start, endMs: end, text: text, isFinal: true,
-                                   engineSegmentId: segmentId, isRevision: true)
+                                   continuesSentence: sentenceEnd == false)
         case "partial":
-            return TranscriptEvent(startMs: start, endMs: end, text: text, isFinal: false,
-                                   engineSegmentId: segmentId, isRevision: false)
+            return TranscriptEvent(startMs: start, endMs: end, text: text, isFinal: false)
         default:
             return nil
         }
@@ -103,6 +95,7 @@ actor LocalASRConnection {
     /// The process outlives this connection so the next recording reuses it.
     static func connect(engine: LocalASREngineKind,
                         language: String?,
+                        hint: String = "",
                         onProgress: (@Sendable (String) -> Void)? = nil) async throws -> LocalASRConnection {
         let url = try await LocalASRWarmPool.shared.url(engine: engine,
                                                        language: language,
@@ -120,7 +113,7 @@ actor LocalASRConnection {
         socket.resume()
         let connection = LocalASRConnection(socket: socket, session: session)
         do {
-            try await connection.sendConfig(language: language)
+            try await connection.sendConfig(language: language, hint: hint)
         } catch {
             // This is the first write after `resume()`, so it is exactly what
             // fails when the sidecar died between `url()` and the handshake.
@@ -152,9 +145,10 @@ actor LocalASRConnection {
         channel.close()
     }
 
-    func sendConfig(language: String?) async throws {
+    func sendConfig(language: String?, hint: String = "") async throws {
         var payload: [String: Any] = ["type": "config"]
         if let language, !language.isEmpty { payload["language"] = language }
+        if !hint.isEmpty { payload["context"] = hint }
         try await sendJSON(payload)
     }
 

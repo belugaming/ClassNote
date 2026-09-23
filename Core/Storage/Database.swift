@@ -305,6 +305,13 @@ final class Database: @unchecked Sendable {
             }
         }
 
+        migrator.registerMigration("v13_segment_continues_next") { db in
+            try db.alter(table: "segment") { t in
+                // 1 when the line was cut mid-sentence; see SentenceGroups.
+                t.add(column: "continues_next", .boolean).notNull().defaults(to: false)
+            }
+        }
+
         return migrator
     }
 }

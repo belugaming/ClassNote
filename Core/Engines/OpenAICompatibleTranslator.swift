@@ -13,7 +13,7 @@ final class OpenAICompatibleTranslator: TranslationProvider, Sendable {
                    sourceLanguage: String,
                    targetLanguage: String,
                    context: [String],
-                   glossary: String) -> AsyncThrowingStream<String, Error> {
+                   glossary: TranslationGlossary) -> AsyncThrowingStream<String, Error> {
 
         let cfg = self.config
         let trimmedContext = Array(context.suffix(4))
@@ -29,7 +29,7 @@ final class OpenAICompatibleTranslator: TranslationProvider, Sendable {
                     // The system prompt is the only place the glossary can go:
                     // as a user turn it would be translated along with the line.
                     if !glossary.isEmpty {
-                        system += "\n\n" + glossary
+                        system += "\n\n" + glossary.promptBlock
                     }
                     var messages: [ChatMessage] = [.init(role: .system, content: system)]
                     if !trimmedContext.isEmpty {

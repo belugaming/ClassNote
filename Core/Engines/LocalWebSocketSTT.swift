@@ -1,7 +1,7 @@
 import Foundation
 
-/// STTProvider backed by the local sherpa-onnx (Nemotron) Python WebSocket
-/// sidecar.
+/// STTProvider backed by the local ASR Python WebSocket sidecar, running
+/// either nemotron (sherpa-onnx) or Confucius4-R2T2 (MLX).
 ///
 /// The sidecar process is shared and kept warm (see `LocalASRWarmPool`); each
 /// call opens its own WebSocket connection, and the sidecar gives every
@@ -10,15 +10,20 @@ import Foundation
 final class LocalWebSocketSTT: STTProvider, Sendable {
     private let engine: LocalASREngineKind
     private let language: String?
+    /// Course name and terms, sent with the connection's config. R2T2 reads it
+    /// as its prompt; nemotron ignores it.
+    private let hint: String
     /// Reports setup stages (dependency install, model loading) so the UI can
     /// show why the first start takes a while instead of appearing frozen.
     private let onProgress: (@Sendable (String) -> Void)?
 
     init(engine: LocalASREngineKind,
          language: String? = nil,
+         hint: String = "",
          onProgress: (@Sendable (String) -> Void)? = nil) {
         self.engine = engine
         self.language = language
+        self.hint = hint
         self.onProgress = onProgress
     }
 
@@ -31,6 +36,7 @@ final class LocalWebSocketSTT: STTProvider, Sendable {
                 do {
                     let connection = try await LocalASRConnection.connect(engine: engine,
                                                                          language: lang,
+                                                                         hint: self.hint,
                                                                          onProgress: self.onProgress)
                     // Pump audio and receive events concurrently: the sidecar
                     // emits partials while we are still sending, so these must
@@ -41,7 +47,7 @@ final class LocalWebSocketSTT: STTProvider, Sendable {
                         }
                         // Tell the sidecar to flush its final utterance rather
                         // than just dropping the socket, which would lose the
-                        // last segment's offline revision.
+                        // sentence still being spoken.
                         try? await connection.sendEOF()
                     }
                     defer { sender.cancel() }
@@ -76,6 +82,7 @@ final class LocalWebSocketSTT: STTProvider, Sendable {
                 do {
                     let connection = try await LocalASRConnection.connect(engine: engine,
                                                                          language: lang,
+                                                                         hint: self.hint,
                                                                          onProgress: self.onProgress)
                     box.connection = connection
                     // The sidecar only reads 16 kHz mono WAV; AVFoundation here

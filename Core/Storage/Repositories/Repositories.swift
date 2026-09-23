@@ -297,11 +297,29 @@ actor SegmentRepository {
         try await Database.shared.dbPool.read { db in
             try Segment
                 .filter(Column("session_id") == sessionId)
-                .filter(Column("translation_state") != TranslationState.ok.rawValue)
+                .filter(![TranslationState.ok.rawValue, TranslationState.merged.rawValue]
+                    .contains(Column("translation_state")))
                 .filter(Column("text_original") != "")
                 .order(Column("start_ms"))
                 .fetchAll(db)
         }
+    }
+
+    /// Marks the leading lines of a sentence as covered by its last line's
+    /// translation. Their own translation text is cleared: a stale one from
+    /// before the sentence was regrouped would otherwise show twice.
+    func markMerged(ids: [Int64]) async throws {
+        guard !ids.isEmpty else { return }
+        try await Task {
+            try await Database.shared.dbPool.write { db in
+                for id in ids {
+                    try db.execute(sql: """
+                        UPDATE segment SET text_translated='', translation_state=?, version=version+1
+                        WHERE id=?
+                        """, arguments: [TranslationState.merged.rawValue, id])
+                }
+            }
+        }.value
     }
 
     /// Replaces every segment of a session in one transaction, returning the new

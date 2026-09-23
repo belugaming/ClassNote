@@ -18,7 +18,10 @@ Server -> client (JSON text frames), all carrying the same envelope so the
 Swift decoder can treat them uniformly:
   {"type": "status",   "stage": "ready"}
   {"type": "partial",  "segmentId", "startMs", "endMs", "text"}
-  {"type": "final",    ...}     the segment's text once it is closed
+  {"type": "final",    ..., "sentenceEnd"}
+                                the segment's text once it is closed;
+                                sentenceEnd is false when the line was only
+                                broken for length and its sentence goes on
   {"type": "progress", "completed", "total"}
   {"type": "eof"}
   {"type": "error",    "code", "message"}
@@ -297,7 +300,13 @@ def ends_sentence(text: str) -> bool:
 
 def find_cut(tokens, held_ms: int) -> int | None:
     """Where to close the segment made of `tokens`, as a count of tokens to
-    commit, or None to keep it open.
+    commit, or None to keep it open. See `find_cut_kind`."""
+    return find_cut_kind(tokens, held_ms)[0]
+
+
+def find_cut_kind(tokens, held_ms: int) -> tuple[int | None, bool]:
+    """Where to close the segment made of `tokens`, and whether the cut ends a
+    sentence (False for a soft cut, whose line continues into the next one).
 
     Checks, in order: the last finished sentence anywhere in the segment (the
     punctuation usually arrives glued to the next sentence's first word, and a
@@ -308,28 +317,28 @@ def find_cut(tokens, held_ms: int) -> int | None:
     """
     n = len(tokens)
     if n == 0:
-        return None
+        return None, False
 
     for i in range(n - 1, -1, -1):
         piece = tokens[i].rstrip()
         if piece and piece[-1] in SENTENCE_END_CHARS and ends_sentence(tokens_to_text(tokens[: i + 1])):
-            return i + 1
+            return i + 1, True
 
     if held_ms < SOFT_CUT_MS:
-        return None
+        return None, False
 
     for i in range(n - 1, 0, -1):
         piece = tokens[i].rstrip()
         if piece and piece[-1] in CLAUSE_END_CHARS:
-            return i + 1
+            return i + 1, False
     # A word boundary: the last token that starts a new word (leading space).
     # CJK has no spaces, so a run of CJK tokens falls through to "everything",
     # which is fine -- any character boundary is a word boundary there.
     for i in range(n - 1, 0, -1):
         if tokens[i].startswith((" ", "▁")):
-            return i
+            return i, False
     log(f"[sentence] soft cut after {held_ms}ms (no boundary found)")
-    return n
+    return n, False
 
 
 # ---------------------------------------------------------------------------
@@ -825,11 +834,12 @@ class Transcriber:
         if closing or not tokens:
             return events
 
-        cut = self._find_cut(tokens, marks)
+        cut, sentence_end = self._find_cut(tokens, marks)
         if cut is None and self._in_pause():
-            cut = len(tokens)
+            cut, sentence_end = len(tokens), True
         if cut:
-            events += self._commit(tokens, cut, result, timestamps, marks)
+            events += self._commit(tokens, cut, result, timestamps, marks,
+                                   sentence_end=sentence_end)
             # Whatever remains after the cut is the start of the next segment;
             # report it right away so the screen never goes blank mid-word.
             rest, rest_ts = self._segment_tokens(result)
@@ -844,20 +854,21 @@ class Transcriber:
                     events.append(self._event("partial", self.partial_text))
         return events
 
-    def _find_cut(self, tokens, marks) -> int | None:
-        """Where to close the open segment, preferring the punctuation model's
-        sentence ends, then its clause marks once the soft cut is due, then the
-        ASR model's own marks and word boundaries (`find_cut`)."""
+    def _find_cut(self, tokens, marks) -> tuple[int | None, bool]:
+        """Where to close the open segment, and whether that ends a sentence.
+        Prefers the punctuation model's sentence ends, then its clause marks
+        once the soft cut is due, then the ASR model's own marks and word
+        boundaries (`find_cut_kind`)."""
         if marks:
             ends = content_ends(tokens)
             cut = cut_from_marks(tokens, marks, SENT_MARK_KINDS, ends)
             if cut is not None:
-                return cut
+                return cut, True
             if self.held_ms >= SOFT_CUT_MS:
                 cut = cut_from_marks(tokens, marks, CLAUSE_MARK_KINDS, ends)
                 if cut is not None:
-                    return cut
-        return find_cut(tokens, self.held_ms)
+                    return cut, False
+        return find_cut_kind(tokens, self.held_ms)
 
     def _segment_tokens(self, result):
         """The open segment's tokens and timestamps, skipping any leading
@@ -880,8 +891,14 @@ class Transcriber:
             quiet_since = max(quiet_since, self.last_voiced_ms)
         return self.stream_ms - quiet_since >= PAUSE_CLOSE_MS
 
-    def _commit(self, tokens, count: int, result, timestamps, marks=()) -> list[dict]:
-        """Closes the segment made of the first `count` open tokens."""
+    def _commit(self, tokens, count: int, result, timestamps, marks=(),
+                sentence_end: bool = True) -> list[dict]:
+        """Closes the segment made of the first `count` open tokens.
+
+        `sentence_end` is False for a soft cut: the line was broken only to
+        keep it readable, and its sentence carries on in the next one. The app
+        translates such lines together with their continuation rather than as
+        a half sentence on their own."""
         text = tokens_to_text(tokens[:count])
         if marks:
             # Marks up to and including the one this line ends on. A line closed
@@ -896,7 +913,9 @@ class Transcriber:
             end = self.stream_ms
             if count <= len(timestamps):
                 end = min(end, self._ms(result, timestamps[count - 1]) + TOKEN_TAIL_MS)
-            events.append(self._event("final", text, end_ms=end))
+            final = self._event("final", text, end_ms=end)
+            final["sentenceEnd"] = sentence_end
+            events.append(final)
             self.segment_id += 1
         self.offset += count
         self.partial_text = ""

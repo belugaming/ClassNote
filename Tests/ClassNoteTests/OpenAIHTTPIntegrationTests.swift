@@ -112,7 +112,7 @@ final class OpenAIHTTPIntegrationTests: XCTestCase {
                                            sourceLanguage: "en",
                                            targetLanguage: "zh-Hans",
                                            context: [],
-                                           glossary: "")
+                                           glossary: .empty)
         for try await chunk in stream { collected += chunk }
         XCTAssertEqual(collected, "你好")
     }

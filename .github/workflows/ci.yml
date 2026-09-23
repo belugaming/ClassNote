@@ -136,7 +136,7 @@ jobs:
 
       - name: Install test dependencies (the pinned set, minus the Apple-only wheels)
         run: |
-          grep -vE '^(mlx|sherpa-onnx)' Scripts/requirements-nemotron.txt > /tmp/requirements-ci.txt
+          grep -vE '^(mlx|sherpa-onnx|transformers)' Scripts/requirements-local.txt > /tmp/requirements-ci.txt
           python -m pip install --quiet -r /tmp/requirements-ci.txt pyflakes
 
       - name: Syntax check sidecars
@@ -158,6 +158,11 @@ jobs:
                    for c in (80, 160, 320, 560, 1120)]
           repos += ["csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12",
                     "mlx-community/Hy-MT2-1.8B-4bit",
+                    "mlx-community/Confucius4-R2T2-8bit",
+                    "mlx-community/Confucius4-R2T2-4bit",
+                    "mlx-community/Confucius4-R2T2-bf16",
+                    "netease-youdao/Confucius4-R2T2",
+                    "netease-youdao/Confucius4-T3PO",
                     "mlx-community/Qwen3-4B-Instruct-2507-4bit",
                     "mlx-community/Qwen3-8B-4bit"]
           for r in repos:

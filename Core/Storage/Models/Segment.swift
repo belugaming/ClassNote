@@ -8,6 +8,13 @@ enum TranslationState: Int, Codable, Sendable {
     case notAttempted = 0
     case ok = 1
     case failed = 2
+    /// Translated as part of the following line: the line was cut mid-sentence
+    /// (`continuesNext`), and the whole sentence's translation is stored on the
+    /// line that ends it. Its own `textTranslated` stays empty.
+    case merged = 3
+
+    /// Nothing left to do for this line: translated, or covered by the next.
+    var isSettled: Bool { self == .ok || self == .merged }
 }
 
 // Store the raw Int rather than letting the Codable machinery decide how an
@@ -28,6 +35,9 @@ struct Segment: Codable, FetchableRecord, MutablePersistableRecord, Identifiable
     // Defaulted and last, so every existing memberwise construction still
     // compiles and a freshly captured segment starts out untranslated.
     var translationState: TranslationState = .notAttempted
+    /// The engine cut this line for length and its sentence carries on in the
+    /// next one. See `SentenceGroups`.
+    var continuesNext: Bool = false
 
     enum CodingKeys: String, CodingKey {
         case id, confidence, version
@@ -39,6 +49,7 @@ struct Segment: Codable, FetchableRecord, MutablePersistableRecord, Identifiable
         case textTranslated = "text_translated"
         case isFinal = "is_final"
         case translationState = "translation_state"
+        case continuesNext = "continues_next"
     }
 
     static let databaseTableName = "segment"

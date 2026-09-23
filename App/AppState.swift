@@ -107,8 +107,8 @@ final class AppState: ObservableObject {
             isLocalEngineReady = false
             return
         }
-        let engine: LocalASREngineKind = sttBackend == .funasr ? .funasr : .nemotron
-        guard LocalASREnvironment.shared.isReady(engine: engine) else {
+        guard let engine = sttBackend.localEngine,
+              LocalASREnvironment.shared.isReady(engine: engine) else {
             isLocalEngineReady = false
             return
         }
@@ -542,17 +542,23 @@ final class AppState: ObservableObject {
                                     title: SessionOrchestrator.defaultTitle(),
                                     sourceKind: orchestrator.source.rawValue)
             try await SessionRepository.shared.insert(saved)
-            let segments = orchestrator.transcript.segments.map {
-                Segment(id: nil,
-                        sessionId: saved.id,
-                        startMs: $0.startMs,
-                        endMs: $0.endMs,
-                        speakerId: nil,
-                        textOriginal: $0.original,
-                        textTranslated: $0.translated,
-                        isFinal: $0.isFinal,
-                        confidence: 0,
-                        version: 1)
+            let segments = orchestrator.transcript.segments.map { line -> Segment in
+                // A line cut mid-sentence has its translation on the line that
+                // ends the sentence; one with a translation of its own is done.
+                let state: TranslationState = !line.translated.isEmpty ? .ok
+                    : (line.continuesNext ? .merged : .notAttempted)
+                return Segment(id: nil,
+                               sessionId: saved.id,
+                               startMs: line.startMs,
+                               endMs: line.endMs,
+                               speakerId: nil,
+                               textOriginal: line.original,
+                               textTranslated: line.translated,
+                               isFinal: line.isFinal,
+                               confidence: 0,
+                               version: 1,
+                               translationState: state,
+                               continuesNext: line.continuesNext)
             }
             try await SegmentRepository.shared.insertMany(segments)
             let duration = segments.map(\.endMs).max() ?? 0
@@ -656,26 +662,24 @@ extension Notification.Name {
 enum SttBackend: String, CaseIterable, Identifiable {
     case openAICompatible = "openai"
     case appleSpeech = "apple"
-    // Both rawValues now drive the same sherpa-onnx sidecar. They are kept as
-    // two cases only so a stored setting from an earlier build still decodes;
-    // the language-specific engine split they used to mean is gone.
+    /// The local sherpa-onnx nemotron sidecar. The rawValue is historical; a
+    /// stored "nemotron" from an earlier build folds onto it (`resolve`).
     case funasr = "funasr"
     case nemotronStreaming = "nemotron"
+    /// The local Confucius4-R2T2 sidecar (append-only streaming, 1.7B).
+    case r2t2 = "r2t2"
     var id: String { rawValue }
     var displayName: String {
         switch self {
         case .openAICompatible: return L10n.t("settings.engines.sttBackend.openai")
         case .appleSpeech: return L10n.t("settings.engines.sttBackend.apple")
         case .funasr, .nemotronStreaming: return L10n.t("settings.engines.sttBackend.local")
+        case .r2t2: return L10n.t("settings.engines.sttBackend.r2t2")
         }
     }
 
-    /// What the settings picker offers.
-    ///
-    /// `.nemotronStreaming` still exists so a stored setting from an earlier
-    /// build decodes, but both cases now drive the same sidecar, so listing both
-    /// just showed the user two identical "Local MLX" rows. It is decoded, never
-    /// offered — `AppState.loadConfig` folds it into `.funasr`.
+    /// What the settings picker offers. `.nemotronStreaming` is decoded, never
+    /// offered — it drives the same sidecar as `.funasr`.
     static var selectableCases: [SttBackend] {
         allCases.filter { $0 != .nemotronStreaming }
     }
@@ -684,9 +688,7 @@ enum SttBackend: String, CaseIterable, Identifiable {
     /// backend onto the one they actually ran.
     ///
     /// `"whisperkit"` never had an implementation — it silently used the cloud
-    /// engine, which is where the nil-coalescing lands it. Both `loadConfig` and
-    /// `saveConfig` go through here: `saveConfig` used to skip the nemotron fold
-    /// and so republished a value the picker cannot display.
+    /// engine, which is where the nil-coalescing lands it.
     static func resolve(_ raw: String) -> SttBackend {
         let backend = SttBackend(rawValue: raw) ?? .openAICompatible
         return backend == .nemotronStreaming ? .funasr : backend
@@ -694,10 +696,14 @@ enum SttBackend: String, CaseIterable, Identifiable {
 
     /// True for backends backed by a local Python WebSocket sidecar process
     /// that may need first-run installation before it can be used.
-    var isLocalSidecar: Bool {
+    var isLocalSidecar: Bool { localEngine != nil }
+
+    /// The sidecar engine this backend runs, or nil for a non-local one.
+    var localEngine: LocalASREngineKind? {
         switch self {
-        case .funasr, .nemotronStreaming: return true
-        case .openAICompatible, .appleSpeech: return false
+        case .funasr, .nemotronStreaming: return .funasr
+        case .r2t2: return .r2t2
+        case .openAICompatible, .appleSpeech: return nil
         }
     }
 }
