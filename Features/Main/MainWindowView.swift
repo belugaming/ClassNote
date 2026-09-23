@@ -1,78 +1,56 @@
 import SwiftUI
+import UniformTypeIdentifiers
+import Combine
+
+/// Which sessions the middle column lists.
+enum LibraryFilter: Hashable {
+    case all
+    case unfiled
+    case course(String)
+}
 
 struct MainWindowView: View {
     @EnvironmentObject var appState: AppState
     @StateObject private var vm = MainWindowViewModel()
-    @State private var selectedSessionId: String? = nil
-    @State private var searchText: String = ""
+    @ObservedObject private var prefs = RecordingPreferences.shared
+    @State private var filter: LibraryFilter? = .all
+    @State private var selectedSessionId: String?
+    @State private var searchText = ""
     @State private var showingSearchResults = false
-    /// Set when a search hit is clicked, so the detail view knows which segment
+    /// Set when a search hit is clicked, so the detail view knows which line
     /// to scroll to. Carries a token, so clicking the same hit twice re-fires.
     @State private var jumpTarget: SegmentJumpTarget?
     @State private var showingTaskCenter = false
     @State private var showingDiagnostics = false
     @State private var showingFirstLaunchGuide = false
-    #if os(iOS)
-    @State private var showingSettings = false
-    #endif
-    @AppStorage("hasCompletedFirstLaunchTutorial.v1", store: AppEnvironment.defaults) private var hasCompletedFirstLaunchTutorial = false
-    private let launcher = RecordingLauncher()
+    @State private var importingInto: ImportRequest?
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @AppStorage("hasCompletedFirstLaunchTutorial.v1", store: AppEnvironment.defaults)
+    private var hasCompletedFirstLaunchTutorial = false
 
     var body: some View {
-        NavigationSplitView {
-            CourseSessionSidebarView(selectedSessionId: $selectedSessionId,
-                                      totalSessionCount: vm.totalSessionCount,
-                                      courses: vm.courses,
-                                      allSessions: vm.sessions(for: nil),
-                                      recordingSessionId: appState.isRecording ? appState.currentSessionId : nil,
-                                      onCreateCourse: { vm.createCourse(name: $0) },
-                                      onUpdateCourse: { vm.updateCourse($0) },
-                                      onDeleteCourse: { id in
-                                          vm.deleteCourse(id: id)
-                                      },
-                                      onStartSession: { courseId in
-                                          Task { await vm.startSession(courseId: courseId, source: .microphone) }
-                                      },
-                                      onImport: { urls, courseId in
-                                          Task { await vm.importFiles(urls: urls, courseId: courseId) }
-                                      },
-                                      onDeleteSession: { vm.deleteSession(id: $0) },
-                                      onMoveSession: { sessionId, courseId in
-                                          Task { await vm.moveSession(id: sessionId, courseId: courseId) }
-                                      },
-                                      onRevealStorage: {
-                                          #if os(macOS)
-                                          NSWorkspace.shared.open(AppBootstrap.applicationSupportURL)
-                                          #endif
-                                      })
-                .navigationSplitViewColumnWidth(min: 260, ideal: 300)
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            LibrarySidebar(filter: $filter, vm: vm,
+                           onRecord: { courseId in RecordingLauncher.start(appState, courseId: courseId) },
+                           onImport: { courseId in importingInto = ImportRequest(courseId: courseId) })
+                .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 300)
+        } content: {
+            SessionListView(title: filterTitle,
+                            sessions: visibleSessions,
+                            courses: vm.courses,
+                            selection: $selectedSessionId,
+                            recordingSessionId: appState.isRecording ? appState.currentSessionId : nil,
+                            vm: vm,
+                            onRecord: { RecordingLauncher.start(appState, courseId: currentCourseId) },
+                            onImport: { importingInto = ImportRequest(courseId: currentCourseId) },
+                            onDropFiles: { urls in Task { await vm.importFiles(urls: urls, courseId: currentCourseId) } })
+                .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 460)
         } detail: {
             VStack(spacing: 0) {
                 if let interrupted = appState.interruptedSessions.first {
                     RecoveryBanner(session: interrupted,
-                                   recover: {
-                                       Task {
-                                           await appState.recoverInterruptedSession(interrupted)
-                                           await vm.refresh()
-                                           selectedSessionId = interrupted.id
-                                       }
-                                   },
-                                   recoverAndRetranscribe: {
-                                       Task {
-                                           // Recovering is instant, re-transcribing takes minutes.
-                                           // Refresh and select before the long half, or the banner
-                                           // keeps its stale badge for the whole run and the
-                                           // selection jumps back here when the job finally ends.
-                                           await appState.recoverInterruptedSession(interrupted)
-                                           await vm.refresh()
-                                           selectedSessionId = interrupted.id
-                                           // Re-read the row that recovery just stamped closed, so
-                                           // the re-transcription sees the recovered state.
-                                           let refreshed = (try? await SessionRepository.shared.get(id: interrupted.id)) ?? interrupted
-                                           await appState.retranscribe(session: refreshed)
-                                           await vm.refresh()
-                                       }
-                                   },
+                                   recover: { Task { await recover(interrupted, retranscribe: false) } },
+                                   recoverAndRetranscribe: { Task { await recover(interrupted, retranscribe: true) } },
                                    dismiss: {
                                        Task {
                                            await appState.dismissInterruptedSession(interrupted)
@@ -80,120 +58,60 @@ struct MainWindowView: View {
                                        }
                                    })
                 }
-
-                Group {
-                    if showingSearchResults {
-                        SearchResultsView(query: searchText) { target in
-                            jumpTarget = target
-                            selectedSessionId = target.sessionId
-                            showingSearchResults = false
-                        }
-                    } else if let sid = selectedSessionId {
-                        // .id(sid) gives every session its own view model, so a
-                        // generation started for one session can never publish
-                        // into the next one.
-                        SessionDetailView(sessionId: sid, jumpTarget: jumpTarget)
-                            .id(sid)
-                    } else {
-                        MainEmptyStateView(isCredentialMissing: appState.isMissingCloudCredentialForRecording,
-                                           onStart: {
-                                               Task { await vm.startSession(courseId: nil, source: .microphone) }
-                                           },
-                                           onImport: {
-                                               NotificationCenter.default.post(name: .requestImportFile, object: nil)
-                                           })
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                detail
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .searchable(text: $searchText, prompt: Text(L10n.t("main.search.prompt")))
+        .searchable(text: $searchText, placement: .toolbar, prompt: Text(L10n.t("main.search.prompt")))
         .onSubmit(of: .search) {
             showingSearchResults = !searchText.trimmingCharacters(in: .whitespaces).isEmpty
         }
         .onChange(of: searchText) { _, newValue in
             if newValue.isEmpty { showingSearchResults = false }
         }
-        // A jump belongs to the click that produced it. `onOpen` sets the target
-        // before it changes the selection, so this only ever clears one left over
-        // from an earlier search — otherwise re-opening that session normally
-        // would scroll to the old hit and force the transcript tab again.
+        // A jump belongs to the click that produced it; opening the session
+        // another way later must not scroll to the old hit.
         .onChange(of: selectedSessionId) { _, newValue in
             if let target = jumpTarget, target.sessionId != newValue { jumpTarget = nil }
+            if newValue != nil { showingSearchResults = false }
         }
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                // One start/stop control with a menu for the options, rather than
-                // the seven fixed mode entries this toolbar used to duplicate
-                // from the menu bar.
-                Menu {
-                    RecordingOptionsMenuContent(source: sourceBinding,
-                                                intent: intentBinding,
-                                                translationEnabled: $appState.translationEnabled)
-                } label: {
-                    Label(appState.isRecording ? L10n.t("record.stop") : L10n.t("record.start"),
-                          systemImage: appState.isRecording ? "stop.circle.fill" : "record.circle")
-                } primaryAction: {
-                    launcher.toggle(appState)
-                    Task { await vm.refresh() }
-                }
-                .tint(appState.isRecording ? Theme.recording : Theme.accent)
-                .disabled(isEngineUnconfigured)
-                .help(isEngineUnconfigured
-                      ? L10n.t("toolbar.help.configureKey")
-                      : L10n.t("toolbar.classroomMode.help"))
-
-                Button {
-                    NotificationCenter.default.post(name: .toggleOverlay, object: nil)
-                } label: {
-                    Label(L10n.t("toolbar.overlay"), systemImage: "rectangle.on.rectangle")
-                }
-                .help(L10n.t("toolbar.overlay.help"))
-
-                TaskCenterButton(taskCenter: appState.taskCenter) {
-                    showingTaskCenter = true
-                }
-
-                // Diagnostics and the tutorial are rare, so they move out of the
-                // always-visible row and into an overflow menu.
-                Menu {
-                    Button {
-                        showingDiagnostics = true
-                    } label: {
-                        Label(L10n.t("diagnostics.title"), systemImage: "stethoscope")
-                    }
-                    Button {
-                        showingFirstLaunchGuide = true
-                    } label: {
-                        Label(L10n.t("onboarding.replay"), systemImage: "questionmark.circle")
-                    }
-                    #if os(iOS)
-                    Button {
-                        showingSettings = true
-                    } label: {
-                        Label(L10n.t("settings.title"), systemImage: "gearshape")
-                    }
-                    #endif
-                } label: {
-                    Label(L10n.t("record.more"), systemImage: "ellipsis.circle")
-                }
-            }
-        }
+        .toolbar { toolbar }
         .task { await vm.refresh() }
         .task { await appState.refreshInterruptedSessions() }
         .onAppear {
-            if !hasCompletedFirstLaunchTutorial {
-                showingFirstLaunchGuide = true
+            if !hasCompletedFirstLaunchTutorial { showingFirstLaunchGuide = true }
+        }
+        .onChange(of: appState.isRecording) { _, recording in
+            Task {
+                await vm.refresh()
+                // A new recording shows up selected, so its row is easy to find.
+                if recording, let id = appState.currentSessionId { selectedSessionId = id }
             }
         }
-        .onChange(of: appState.isRecording) { _, _ in
-            Task { await vm.refresh() }
+        // An import or re-transcription adds or changes sessions when it
+        // finishes; refresh on that, not on every progress tick.
+        .onReceive(appState.taskCenter.$items
+            .map { items in items.filter { $0.status == .running }.count }
+            .removeDuplicates()) { _ in Task { await vm.refresh() } }
+        .onReceive(NotificationCenter.default.publisher(for: .requestImportFile)) { _ in
+            importingInto = ImportRequest(courseId: currentCourseId)
+        }
+        .fileImporter(isPresented: Binding(get: { importingInto != nil },
+                                           set: { if !$0 { importingInto = nil } }),
+                      allowedContentTypes: [.movie, .audio, .mpeg4Movie, .audiovisualContent],
+                      allowsMultipleSelection: true) { result in
+            let courseId = importingInto?.courseId
+            switch result {
+            case .success(let urls):
+                Task { await vm.importFiles(urls: urls, courseId: courseId) }
+            case .failure(let err):
+                appState.setError(err.localizedDescription)
+            }
         }
         .alert(L10n.t("common.error"),
                isPresented: Binding(get: { appState.lastError != nil },
                                     set: { if !$0 { appState.lastError = nil } })) {
-            Button("OK") { appState.lastError = nil }
+            Button(L10n.t("common.ok")) { appState.lastError = nil }
         } message: {
             Text(appState.lastError ?? "")
         }
@@ -201,8 +119,7 @@ struct MainWindowView: View {
             TaskCenterSheet(taskCenter: appState.taskCenter)
         }
         .sheet(isPresented: $showingDiagnostics) {
-            DiagnosticsSheet()
-                .environmentObject(appState)
+            DiagnosticsSheet().environmentObject(appState)
         }
         .sheet(isPresented: $showingFirstLaunchGuide) {
             FirstLaunchGuideSheet {
@@ -210,271 +127,186 @@ struct MainWindowView: View {
                 showingFirstLaunchGuide = false
             }
         }
-        #if os(iOS)
-        .sheet(isPresented: $showingSettings) {
-            NavigationStack {
-                SettingsView()
-                    .navigationTitle(L10n.t("settings.title"))
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button(L10n.t("common.close")) { showingSettings = false }
-                        }
-                    }
+    }
+
+    // MARK: - Detail
+
+    @ViewBuilder
+    private var detail: some View {
+        if showingSearchResults {
+            SearchResultsView(query: searchText) { target in
+                jumpTarget = target
+                selectedSessionId = target.sessionId
+                showingSearchResults = false
             }
-            .environmentObject(appState)
+        } else if let sid = selectedSessionId {
+            // .id(sid) gives every session its own view model, so a generation
+            // started for one session can never publish into the next one.
+            SessionDetailView(sessionId: sid, jumpTarget: jumpTarget,
+                              onChanged: { Task { await vm.refresh() } },
+                              onDeleted: {
+                                  selectedSessionId = nil
+                                  Task { await vm.refresh() }
+                              })
+                .id(sid)
+        } else {
+            WelcomeView(hasSessions: vm.totalSessionCount > 0,
+                        isCredentialMissing: appState.isMissingCloudCredentialForRecording,
+                        onRecord: { RecordingLauncher.start(appState, courseId: currentCourseId) },
+                        onImport: { importingInto = ImportRequest(courseId: currentCourseId) })
         }
-        #endif
     }
 
-    /// A missing key only blocks recording when a cloud engine is part of it —
-    /// a fully local setup, or a keyless loopback endpoint, needs none.
-    private var isEngineUnconfigured: Bool {
-        appState.isMissingCloudCredentialForRecording
-    }
+    // MARK: - Toolbar
 
-    private var sourceBinding: Binding<AudioSourceKind> {
-        Binding(get: { launcher.source }, set: { launcher.source = $0 })
-    }
-
-    private var intentBinding: Binding<RecordingIntent> {
-        Binding(get: { launcher.intent }, set: { launcher.intent = $0 })
-    }
-}
-
-private struct FirstLaunchGuideSheet: View {
-    let onFinish: () -> Void
-    @State private var selectedIndex = 0
-
-    private var steps: [FirstLaunchGuideStep] {
-        [
-            .init(icon: "key.fill",
-                  tint: Theme.accent,
-                  titleKey: "onboarding.step.setup.title",
-                  bodyKey: "onboarding.step.setup.body",
-                  points: [
-                      "onboarding.step.setup.point.api",
-                      "onboarding.step.setup.point.permissions",
-                      "onboarding.step.setup.point.diagnostics"
-                  ]),
-            .init(icon: "waveform.badge.mic",
-                  tint: Theme.accent,
-                  titleKey: "onboarding.step.capture.title",
-                  bodyKey: "onboarding.step.capture.body",
-                  points: [
-                      "onboarding.step.capture.point.record",
-                      "onboarding.step.capture.point.import",
-                      "onboarding.step.capture.point.translateOnly"
-                  ]),
-            .init(icon: "sparkles",
-                  tint: Theme.accent,
-                  titleKey: "onboarding.step.study.title",
-                  bodyKey: "onboarding.step.study.body",
-                  points: [
-                      "onboarding.step.study.point.notes",
-                      "onboarding.step.study.point.qa",
-                      "onboarding.step.study.point.flashcards"
-                  ]),
-            .init(icon: "checklist",
-                  tint: Theme.accent,
-                  titleKey: "onboarding.step.control.title",
-                  bodyKey: "onboarding.step.control.body",
-                  points: [
-                      "onboarding.step.control.point.tasks",
-                      "onboarding.step.control.point.saveTemporary",
-                      "onboarding.step.control.point.export"
-                  ])
-        ]
-    }
-
-    private var step: FirstLaunchGuideStep {
-        steps[min(max(selectedIndex, 0), steps.count - 1)]
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(L10n.t("onboarding.title"))
-                    .font(.title2.weight(.semibold))
-                Spacer()
-                Text("\(selectedIndex + 1)/\(steps.count)")
-                    .font(.caption.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(.secondary)
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .primaryAction) {
+            Menu {
+                RecordingOptionsMenuContent(source: $prefs.source,
+                                            intent: $prefs.intent,
+                                            translationEnabled: $appState.translationEnabled)
+            } label: {
+                Label(appState.isRecording ? L10n.t("record.stop") : L10n.t("record.start"),
+                      systemImage: appState.isRecording ? "stop.circle.fill" : "record.circle")
+            } primaryAction: {
+                RecordingLauncher.toggle(appState, courseId: currentCourseId)
             }
-            .padding(.horizontal, 24)
-            .padding(.top, 22)
-            .padding(.bottom, 12)
+            .disabled(appState.isStartingRecording
+                      || (!appState.isRecording && appState.isMissingCloudCredentialForRecording))
+            .help(appState.isMissingCloudCredentialForRecording && !appState.isRecording
+                  ? L10n.t("toolbar.help.configureKey")
+                  : L10n.t("toolbar.record.help"))
 
-            Divider()
-
-            ScrollView {
-                VStack(spacing: 22) {
-                Image(systemName: step.icon)
-                    .font(.system(size: 50, weight: .semibold))
-                    .foregroundStyle(step.tint)
-                    .frame(width: 96, height: 96)
-                    .background(
-                        RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
-                            .fill(step.tint.opacity(0.12))
-                    )
-
-                VStack(spacing: 8) {
-                    Text(L10n.t(step.titleKey))
-                        .font(.system(size: 28, weight: .semibold, design: .rounded))
-                        .multilineTextAlignment(.center)
-                    Text(L10n.t(step.bodyKey))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .lineSpacing(3)
-                        .frame(maxWidth: 520)
-                }
-
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(step.points, id: \.self) { point in
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(step.tint)
-                                .font(.callout)
-                            Text(L10n.t(point))
-                                .font(.callout)
-                                .foregroundStyle(.primary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                }
-                .padding(16)
-                .frame(maxWidth: 520, alignment: .leading)
-                .cardBackground()
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, 28)
-                .padding(.vertical, 22)
+            Button {
+                WindowRouter.shared.toggleOverlay()
+            } label: {
+                Label(L10n.t("toolbar.overlay"), systemImage: "captions.bubble")
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .help(L10n.t("toolbar.overlay.help"))
 
-            Divider()
+            TaskCenterButton(taskCenter: appState.taskCenter) { showingTaskCenter = true }
 
-            HStack(spacing: 10) {
-                Button(L10n.t("onboarding.skip")) {
-                    onFinish()
-                }
-                .buttonStyle(.borderless)
-
-                Spacer()
-
-                HStack(spacing: 6) {
-                    ForEach(steps.indices, id: \.self) { index in
-                        Circle()
-                            .fill(index == selectedIndex ? Theme.accent : Theme.hairline)
-                            .frame(width: 7, height: 7)
-                    }
-                }
-
-                Spacer()
-
+            Menu {
                 Button {
-                    selectedIndex = max(selectedIndex - 1, 0)
+                    importingInto = ImportRequest(courseId: currentCourseId)
                 } label: {
-                    Label(L10n.t("onboarding.back"), systemImage: "chevron.left")
+                    Label(L10n.t("toolbar.import"), systemImage: "square.and.arrow.down")
                 }
-                .disabled(selectedIndex == 0)
-
+                Divider()
                 Button {
-                    if selectedIndex == steps.count - 1 {
-                        onFinish()
-                    } else {
-                        selectedIndex += 1
-                    }
+                    showingDiagnostics = true
                 } label: {
-                    Label(selectedIndex == steps.count - 1 ? L10n.t("onboarding.finish") : L10n.t("onboarding.next"),
-                          systemImage: selectedIndex == steps.count - 1 ? "checkmark.circle" : "chevron.right")
+                    Label(L10n.t("diagnostics.title"), systemImage: "stethoscope")
                 }
-                .prominentAccentButton()
+                Button {
+                    showingFirstLaunchGuide = true
+                } label: {
+                    Label(L10n.t("onboarding.replay"), systemImage: "questionmark.circle")
+                }
+                Button {
+                    NSWorkspace.shared.open(AppBootstrap.applicationSupportURL)
+                } label: {
+                    Label(L10n.t("settings.engines.reveal"), systemImage: "folder")
+                }
+            } label: {
+                Label(L10n.t("record.more"), systemImage: "ellipsis.circle")
             }
-            .padding(18)
         }
-        #if os(macOS)
-        .frame(width: 680, height: 560)
-        #endif
-        .interactiveDismissDisabled()
+    }
+
+    // MARK: - Helpers
+
+    private var currentCourseId: String? {
+        if case .course(let id) = filter { return id }
+        return nil
+    }
+
+    private var filterTitle: String {
+        switch filter ?? .all {
+        case .all: return L10n.t("library.all")
+        case .unfiled: return L10n.t("main.unfiled")
+        case .course(let id): return vm.courses.first { $0.id == id }?.name ?? L10n.t("library.all")
+        }
+    }
+
+    private var visibleSessions: [Session] {
+        let base: [Session]
+        switch filter ?? .all {
+        case .all: base = vm.sessions
+        case .unfiled: base = vm.sessions.filter { $0.courseId == nil }
+        case .course(let id): base = vm.sessions.filter { $0.courseId == id }
+        }
+        let query = searchText.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return base }
+        return base.filter { $0.title.localizedCaseInsensitiveContains(query) }
+    }
+
+    private func recover(_ session: Session, retranscribe: Bool) async {
+        // Recovering is instant, re-transcribing takes minutes: refresh and
+        // select before the long half, so the banner does not linger.
+        await appState.recoverInterruptedSession(session)
+        await vm.refresh()
+        selectedSessionId = session.id
+        guard retranscribe else { return }
+        let refreshed = (try? await SessionRepository.shared.get(id: session.id)) ?? session
+        await appState.retranscribe(session: refreshed)
+        await vm.refresh()
     }
 }
 
-private struct FirstLaunchGuideStep {
-    let icon: String
-    let tint: Color
-    let titleKey: String
-    let bodyKey: String
-    let points: [String]
+private struct ImportRequest: Equatable {
+    let courseId: String?
 }
 
-struct MainEmptyStateView: View {
-    /// True when recording would need a cloud key the app does not have. Not
-    /// "the key field is empty": a local engine, or a loopback endpoint, needs
-    /// no key and must not be blocked here.
+// MARK: - Welcome
+
+private struct WelcomeView: View {
+    let hasSessions: Bool
     let isCredentialMissing: Bool
-    let onStart: () -> Void
+    let onRecord: () -> Void
     let onImport: () -> Void
 
     var body: some View {
-        VStack(spacing: 22) {
-            Spacer()
-            VStack(spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 26, style: .continuous)
-                        .fill(Theme.accentSoft)
-                        .frame(width: 96, height: 96)
-                    Image(systemName: "waveform.badge.mic")
-                        .font(.system(size: 42, weight: .medium))
-                        .foregroundStyle(Theme.accent)
-                }
-                VStack(spacing: 8) {
-                    Text(L10n.t("main.empty.title"))
-                        .font(.system(size: 26, weight: .semibold, design: .rounded))
-                    Text(L10n.t("main.empty.description"))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .lineSpacing(2)
-                        .frame(maxWidth: 460)
-                }
+        VStack(spacing: 20) {
+            Image(systemName: hasSessions ? "text.book.closed" : "waveform.badge.mic")
+                .font(.system(size: 52, weight: .light))
+                .foregroundStyle(Theme.accent)
+            VStack(spacing: 8) {
+                Text(L10n.t(hasSessions ? "main.pick.title" : "main.empty.title"))
+                    .font(.title.weight(.semibold))
+                Text(L10n.t(hasSessions ? "main.pick.description" : "main.empty.description"))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 440)
             }
-
             HStack(spacing: 10) {
-                Button {
-                    onStart()
-                } label: {
-                    Label(L10n.t("toolbar.newSession"), systemImage: "mic.circle.fill")
-                        .frame(minWidth: 116)
+                Button(action: onRecord) {
+                    Label(L10n.t("record.start"), systemImage: "record.circle")
+                        .frame(minWidth: 120)
                 }
+                .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .prominentAccentButton()
                 .disabled(isCredentialMissing)
-
-                Button {
-                    onImport()
-                } label: {
+                Button(action: onImport) {
                     Label(L10n.t("toolbar.import"), systemImage: "square.and.arrow.down")
-                        .frame(minWidth: 96)
+                        .frame(minWidth: 100)
                 }
                 .controlSize(.large)
             }
-
             if isCredentialMissing {
                 Label(L10n.t("toolbar.help.configureKey"), systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(Theme.warning)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(Capsule().fill(Theme.warning.opacity(0.12)))
             }
-            Spacer()
         }
+        .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.surface)
     }
 }
+
+// MARK: - Recovery banner
 
 private struct RecoveryBanner: View {
     let session: Session
@@ -487,152 +319,202 @@ private struct RecoveryBanner: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(Theme.warning)
                 .font(.title3)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(L10n.t("recovery.banner.title"))
-                    .font(.headline)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(L10n.t("recovery.banner.title")).font(.headline)
                 Text("\(session.title) · \(L10n.t("recovery.banner.subtitle"))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
             Spacer()
-            Button {
-                dismiss()
-            } label: {
-                Label(L10n.t("recovery.action.dismiss"), systemImage: "xmark")
-            }
-            // Recovering only stamps the session closed; whatever the crash
-            // cost its transcript is still missing, and the audio is right
-            // there. Offer both, with the cheap one as the default.
-            Button {
-                recoverAndRetranscribe()
-            } label: {
-                Label(L10n.t("recovery.action.recoverAndRetranscribe"), systemImage: "waveform.path.badge.plus")
-            }
-            Button {
-                recover()
-            } label: {
-                Label(L10n.t("recovery.action.recover"), systemImage: "arrow.clockwise")
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(Theme.warning)
+            Button(L10n.t("recovery.action.dismiss"), action: dismiss)
+            Button(L10n.t("recovery.action.recoverAndRetranscribe"), action: recoverAndRetranscribe)
+            Button(L10n.t("recovery.action.recover"), action: recover)
+                .buttonStyle(.borderedProminent)
         }
+        .controlSize(.small)
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(Theme.warning.opacity(0.10))
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Theme.warning.opacity(0.20))
-                .frame(height: 1)
-        }
+        .overlay(alignment: .bottom) { Divider() }
     }
 }
+
+// MARK: - First launch guide
+
+private struct FirstLaunchGuideSheet: View {
+    let onFinish: () -> Void
+    @State private var index = 0
+
+    private struct Step {
+        let icon: String
+        let titleKey: String
+        let bodyKey: String
+        let points: [String]
+    }
+
+    private let steps: [Step] = [
+        Step(icon: "gearshape.2", titleKey: "onboarding.step.setup.title", bodyKey: "onboarding.step.setup.body",
+             points: ["onboarding.step.setup.point.api", "onboarding.step.setup.point.permissions",
+                      "onboarding.step.setup.point.diagnostics"]),
+        Step(icon: "waveform.badge.mic", titleKey: "onboarding.step.capture.title",
+             bodyKey: "onboarding.step.capture.body",
+             points: ["onboarding.step.capture.point.record", "onboarding.step.capture.point.import",
+                      "onboarding.step.capture.point.translateOnly"]),
+        Step(icon: "sparkles", titleKey: "onboarding.step.study.title", bodyKey: "onboarding.step.study.body",
+             points: ["onboarding.step.study.point.notes", "onboarding.step.study.point.qa",
+                      "onboarding.step.study.point.flashcards"]),
+        Step(icon: "checklist", titleKey: "onboarding.step.control.title", bodyKey: "onboarding.step.control.body",
+             points: ["onboarding.step.control.point.tasks", "onboarding.step.control.point.saveTemporary",
+                      "onboarding.step.control.point.export"]),
+    ]
+
+    var body: some View {
+        let step = steps[index]
+        VStack(spacing: 0) {
+            VStack(spacing: 18) {
+                Image(systemName: step.icon)
+                    .font(.system(size: 44, weight: .light))
+                    .foregroundStyle(Theme.accent)
+                    .frame(height: 60)
+                Text(L10n.t(step.titleKey))
+                    .font(.title.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                Text(L10n.t(step.bodyKey))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 480)
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(step.points, id: \.self) { point in
+                        Label {
+                            Text(L10n.t(point)).fixedSize(horizontal: false, vertical: true)
+                        } icon: {
+                            Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.accent)
+                        }
+                        .font(.callout)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: 480, alignment: .leading)
+                .cardBackground()
+            }
+            .padding(32)
+            .frame(maxHeight: .infinity)
+
+            Divider()
+            HStack {
+                Button(L10n.t("onboarding.skip"), action: onFinish)
+                    .buttonStyle(.borderless)
+                Spacer()
+                HStack(spacing: 6) {
+                    ForEach(steps.indices, id: \.self) { i in
+                        Circle()
+                            .fill(i == index ? Theme.accent : Theme.hairline)
+                            .frame(width: 7, height: 7)
+                    }
+                }
+                Spacer()
+                Button(L10n.t("onboarding.back")) { index = max(0, index - 1) }
+                    .disabled(index == 0)
+                Button(index == steps.count - 1 ? L10n.t("onboarding.finish") : L10n.t("onboarding.next")) {
+                    if index == steps.count - 1 { onFinish() } else { index += 1 }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(16)
+        }
+        .frame(width: 620, height: 540)
+        .interactiveDismissDisabled()
+    }
+}
+
+// MARK: - View model
 
 @MainActor
 final class MainWindowViewModel: ObservableObject {
     @Published var courses: [Course] = []
-    @Published private var allSessions: [Session] = []
-    @Published private var sessionsByCourse: [String: [Session]] = [:]
+    @Published private(set) var sessions: [Session] = []
 
-    var totalSessionCount: Int { allSessions.count }
+    var totalSessionCount: Int { sessions.count }
 
-    func sessions(for courseId: String?) -> [Session] {
-        guard let courseId else {
-            return allSessions
+    func count(for filter: LibraryFilter) -> Int {
+        switch filter {
+        case .all: return sessions.count
+        case .unfiled: return sessions.filter { $0.courseId == nil }.count
+        case .course(let id): return sessions.filter { $0.courseId == id }.count
         }
-        return sessionsByCourse[courseId] ?? []
     }
 
     func refresh() async {
         do {
             courses = try await CourseRepository.shared.all()
-            let sessions = try await SessionRepository.shared.all()
-            var grouped: [String: [Session]] = [:]
-            for c in courses { grouped[c.id] = [] }
-            for s in sessions {
-                guard let courseId = s.courseId else { continue }
-                grouped[courseId, default: []].append(s)
-            }
-            self.allSessions = sessions
-            self.sessionsByCourse = grouped
+            sessions = try await SessionRepository.shared.all()
         } catch {
             NSLog("[ClassNote] refresh failed: \(error)")
         }
     }
 
-    func createCourse(name: String) {
-        Task {
-            let course = Course.new(name: name)
-            try? await CourseRepository.shared.insert(course)
+    func createCourse(name: String) async -> Course? {
+        let course = Course.new(name: name)
+        do {
+            try await CourseRepository.shared.insert(course)
             await refresh()
+            return course
+        } catch {
+            AppState.shared.setError(error.localizedDescription)
+            return nil
         }
     }
 
-    func updateCourse(_ course: Course) {
-        Task {
-            do {
-                try await CourseRepository.shared.update(course)
-            } catch {
-                AppState.shared.setError(error.localizedDescription)
-            }
-            await refresh()
+    func updateCourse(_ course: Course) async {
+        do {
+            try await CourseRepository.shared.update(course)
+        } catch {
+            AppState.shared.setError(error.localizedDescription)
         }
+        await refresh()
     }
 
-    func deleteCourse(id: String) {
-        Task {
-            do {
-                try await CourseRepository.shared.delete(id: id)
-            } catch {
-                AppState.shared.setError(error.localizedDescription)
-            }
-            await refresh()
+    func deleteCourse(id: String) async {
+        do {
+            try await CourseRepository.shared.delete(id: id)
+        } catch {
+            AppState.shared.setError(error.localizedDescription)
         }
+        await refresh()
     }
 
-    func deleteSession(id: String) {
-        Task {
-            do {
-                // The repository refuses to delete a recording session; that
-                // refusal is the message the user needs, not a silent no-op.
-                try await SessionRepository.shared.delete(id: id)
-            } catch {
-                AppState.shared.setError(error.localizedDescription)
-            }
-            await refresh()
+    func deleteSession(id: String) async {
+        do {
+            // The repository refuses to delete a session that is recording;
+            // that refusal is the message the user needs.
+            try await SessionRepository.shared.delete(id: id)
+        } catch {
+            AppState.shared.setError(error.localizedDescription)
         }
+        await refresh()
+    }
+
+    func renameSession(id: String, title: String) async {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        do {
+            try await SessionRepository.shared.setTitle(id, title: trimmed)
+        } catch {
+            AppState.shared.setError(error.localizedDescription)
+        }
+        await refresh()
     }
 
     func moveSession(id: String, courseId: String?) async {
         do {
             try await SessionRepository.shared.move(id: id, toCourseId: courseId)
-            await refresh()
         } catch {
             AppState.shared.setError(error.localizedDescription)
         }
-    }
-
-    func startSession(courseId: String?,
-                      source: AudioSourceKind = .microphone,
-                      translationEnabled: Bool? = nil) async {
-        let app = AppState.shared
-        if app.isRecording {
-            app.stopRecording()
-            return
-        }
-        _ = await app.startNewSession(courseId: courseId,
-                                      source: source,
-                                      translationEnabled: translationEnabled)
         await refresh()
-    }
-
-    func startEphemeralTranslation(source: AudioSourceKind = .microphone) async {
-        let app = AppState.shared
-        if app.isRecording {
-            app.stopRecording()
-            return
-        }
-        _ = await app.startEphemeralTranslation(source: source)
     }
 
     func importFiles(urls: [URL], courseId: String?) async {

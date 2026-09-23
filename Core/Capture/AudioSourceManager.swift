@@ -1,10 +1,8 @@
 import Foundation
 @preconcurrency import AVFoundation
 import CoreMedia
-#if os(macOS)
 import CoreAudio
 @preconcurrency import ScreenCaptureKit
-#endif
 
 enum AudioSourceKind: String, CaseIterable, Sendable, Identifiable {
     case microphone
@@ -25,11 +23,7 @@ enum AudioSourceKind: String, CaseIterable, Sendable, Identifiable {
     /// `.system`/`.mixed` need ScreenCaptureKit, which iOS doesn't have.
     /// UI source pickers should use this instead of `allCases`.
     static var availableCases: [AudioSourceKind] {
-        #if os(macOS)
         return Self.allCases
-        #else
-        return [.microphone, .file]
-        #endif
     }
 }
 
@@ -93,11 +87,9 @@ final class AudioSourceManager: NSObject {
     private(set) var state = State()
 
     private var engine: AVAudioEngine?
-    #if os(macOS)
     private var scStream: SCStream?
     private var scStreamOutputHandler: SCStreamOutputHandler?
     private var scStreamDelegate: SCStreamDelegateAdapter?
-    #endif
     private var micConverter: AVAudioConverter?
     private var targetFormat: AVAudioFormat!
     private var running = false
@@ -161,7 +153,6 @@ final class AudioSourceManager: NSObject {
         case .microphone:
             bus.activate(.microphone)
             try startMic()
-        #if os(macOS)
         case .system:
             bus.activate(.system)
             try await startSystemAudio()
@@ -170,10 +161,6 @@ final class AudioSourceManager: NSObject {
             bus.activate(.system)
             try startMic()
             try await startSystemAudio()
-        #else
-        case .system, .mixed:
-            throw EngineError.unsupported("System audio capture is only available on macOS.")
-        #endif
         case .file:
             throw EngineError.unsupported("Use ingestFile() for .file source")
         }
@@ -186,14 +173,12 @@ final class AudioSourceManager: NSObject {
         engine?.stop()
         engine = nil
 
-        #if os(macOS)
         if let scStream = scStream {
             do { try await scStream.stopCapture() } catch { NSLog("[ClassNote] SCStream stop err: \(error)") }
         }
         scStream = nil
         scStreamOutputHandler = nil
         scStreamDelegate = nil
-        #endif
 
         // Flush the bus before closing the writer, or the last tick's audio is
         // captured and then thrown away.
@@ -246,7 +231,6 @@ final class AudioSourceManager: NSObject {
     }
 
     private func configurePreferredInputDevice(on input: AVAudioInputNode) throws {
-        #if os(macOS)
         guard let microphoneDeviceID, !microphoneDeviceID.isEmpty else { return }
         guard let deviceID = Self.audioDeviceID(for: microphoneDeviceID) else {
             throw EngineError.unsupported("Selected microphone is not available: \(MicrophoneDeviceCatalog.name(for: microphoneDeviceID))")
@@ -262,12 +246,10 @@ final class AudioSourceManager: NSObject {
         guard status == noErr else {
             throw EngineError.unsupported("Could not switch to microphone \(MicrophoneDeviceCatalog.name(for: microphoneDeviceID)) (OSStatus \(status)).")
         }
-        #endif
         // iOS has no per-device AVAudioEngine input selection API; the system
         // default input (managed via AVAudioSession) is always used.
     }
 
-    #if os(macOS)
     nonisolated private static func audioDeviceID(for uniqueID: String) -> AudioDeviceID? {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
@@ -314,7 +296,6 @@ final class AudioSourceManager: NSObject {
         }
         return nil
     }
-    #endif
 
     nonisolated private static func pcmData(from buffer: AVAudioPCMBuffer) -> Data? {
         guard let ch = buffer.int16ChannelData else { return nil }
@@ -326,7 +307,6 @@ final class AudioSourceManager: NSObject {
 
     // MARK: - System audio (ScreenCaptureKit, macOS only)
 
-    #if os(macOS)
     private var systemAudioSampleCount: Int = 0
 
     private func startSystemAudio() async throws {
@@ -449,7 +429,6 @@ final class AudioSourceManager: NSObject {
         guard let data = pcmData(from: outBuffer) else { return }
         submit(data)
     }
-    #endif
 
     // MARK: - File import
 
@@ -929,7 +908,6 @@ final class SampleCounter: @unchecked Sendable {
 
 // MARK: - SCK adapters (macOS only)
 
-#if os(macOS)
 /// Handed to ScreenCaptureKit, which calls it on the sample handler queue it
 /// was given, so it leaves the main actor. There is no mutable state to guard:
 /// the class is final and its one stored property is an immutable `@Sendable`
@@ -956,4 +934,3 @@ final class SCStreamDelegateAdapter: NSObject, SCStreamDelegate, @unchecked Send
         onError(error)
     }
 }
-#endif

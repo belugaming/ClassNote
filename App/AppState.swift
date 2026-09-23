@@ -32,7 +32,13 @@ final class AppState: ObservableObject {
     /// recording can start immediately.
     @Published var isLocalEngineReady = false
     @Published var lastError: String? = nil
-    @Published var translationEnabled: Bool = true
+    /// Remembered across launches: it is a setting, and it used to come back
+    /// on at every start whatever the user had chosen.
+    @Published var translationEnabled: Bool = AppEnvironment.defaults.object(forKey: "translationEnabled") as? Bool ?? true {
+        didSet { AppEnvironment.defaults.set(translationEnabled, forKey: "translationEnabled") }
+    }
+    /// When the last highlight landed, so the live window can confirm it.
+    @Published var lastHighlightAt: Date?
     @Published var sttBackend: SttBackend = .openAICompatible
     @Published var translationBackend: TranslationBackend = .openAICompatible
     /// Which engine writes notes, answers questions and explains highlights.
@@ -215,25 +221,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    func startNewSession(source: AudioSourceKind = .microphone,
-                         translationEnabled: Bool? = nil) {
-        Task { @MainActor in
-            do {
-                if let translationEnabled {
-                    self.translationEnabled = translationEnabled
-                }
-                await Self.freeMemoryForRecording()
-                let sessionId = try await orchestrator.startNewSession(courseId: nil, source: source)
-                self.currentSessionId = sessionId
-                self.isRecording = true
-                NotificationCenter.default.post(name: .openLiveSession, object: Self.liveWindowId)
-            } catch {
-                self.setError(error.localizedDescription)
-                self.isRecording = false
-            }
-        }
-    }
-
     /// Window id every live recording reuses.
     ///
     /// Recordings all share `self.orchestrator`, so opening one window per
@@ -247,10 +234,12 @@ final class AppState: ObservableObject {
     /// notes are three separate MLX sidecars, and all three resident at once is
     /// more memory than a 16 GB machine has; the long-form one is the only one
     /// nobody is waiting on during a lecture.
+    ///
+    /// Only on a machine that needs it: on 32 GB or more everything fits, and
+    /// unloading there only killed a notes generation that was still running.
     private static func freeMemoryForRecording() async {
-        #if os(macOS)
+        guard ProcessInfo.processInfo.physicalMemory < 32 * 1024 * 1024 * 1024 else { return }
         await LocalMLXLLMProcess.shared.shutdown()
-        #endif
     }
 
     /// The orchestrator a window should bind to, or nil once that window's work
@@ -265,9 +254,17 @@ final class AppState: ObservableObject {
         return windowId == Self.liveWindowId ? orchestrator : nil
     }
 
+    /// True from a start request until the recording is running (or failed).
+    /// Starting takes a moment, and a second click in that window used to
+    /// start another recording, whose `stop()` ended the first.
+    @Published private(set) var isStartingRecording = false
+
     func startNewSession(courseId: String?,
                          source: AudioSourceKind,
                          translationEnabled: Bool? = nil) async -> String? {
+        guard !isStartingRecording, !isRecording else { return nil }
+        isStartingRecording = true
+        defer { isStartingRecording = false }
         do {
             if let translationEnabled {
                 self.translationEnabled = translationEnabled
@@ -286,7 +283,10 @@ final class AppState: ObservableObject {
     }
 
     func startEphemeralTranslation(source: AudioSourceKind = .microphone) {
+        guard !isStartingRecording, !isRecording else { return }
+        isStartingRecording = true
         Task { @MainActor in
+            defer { self.isStartingRecording = false }
             do {
                 self.translationEnabled = true
                 _ = try await orchestrator.startEphemeralTranslation(source: source)
@@ -297,21 +297,6 @@ final class AppState: ObservableObject {
                 self.setError(error.localizedDescription)
                 self.isRecording = false
             }
-        }
-    }
-
-    func startEphemeralTranslation(source: AudioSourceKind) async -> Bool {
-        do {
-            self.translationEnabled = true
-            _ = try await orchestrator.startEphemeralTranslation(source: source)
-            self.currentSessionId = nil
-            self.isRecording = true
-            NotificationCenter.default.post(name: .openLiveSession, object: Self.liveWindowId)
-            return true
-        } catch {
-            self.setError(error.localizedDescription)
-            self.isRecording = false
-            return false
         }
     }
 
@@ -350,15 +335,11 @@ final class AppState: ObservableObject {
         }
         // force: a deferred retire would orphan a ~2 GB sidecar holding its
         // port when the app quits mid-recording.
-        #if os(macOS)
         async let asr: Bool = LocalASRWarmPool.shared.retire(force: true)
         async let translator: Void = LocalMLXTranslatorProcess.shared.shutdown()
         async let simul: Void = SimulTranslatorProcess.shared.shutdown()
         async let llm: Void = LocalMLXLLMProcess.shared.shutdown()
         _ = await (asr, translator, simul, llm)
-        #else
-        _ = await LocalASRWarmPool.shared.retire(force: true)
-        #endif
     }
 
     func importFile(url: URL,
@@ -528,9 +509,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Recovery banner's second action: stamp the interrupted session closed,
-    /// then rebuild its transcript from the audio that was captured.
-
     func saveTemporaryTranslationAsSession(courseId: String? = nil) async -> String? {
         guard orchestrator.isEphemeralTranslation,
               !orchestrator.transcript.segments.isEmpty else { return nil }
@@ -579,10 +557,14 @@ final class AppState: ObservableObject {
     func markHighlight(note: String = "") {
         guard !orchestrator.isEphemeralTranslation else { return }
         guard let sid = currentSessionId else { return }
+        let timestamp = orchestrator.currentTimestampMs
         Task {
-            try? await HighlightRepository.shared.mark(sessionId: sid,
-                                                        timestampMs: orchestrator.currentTimestampMs,
-                                                        note: note)
+            do {
+                try await HighlightRepository.shared.mark(sessionId: sid, timestampMs: timestamp, note: note)
+                self.lastHighlightAt = Date()
+            } catch {
+                self.setError(error.localizedDescription)
+            }
         }
     }
 
@@ -631,11 +613,9 @@ final class AppState: ObservableObject {
         checks.append(.init(name: L10n.t("diagnostics.microphone"),
                             status: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized ? .ok : .warning,
                             detail: "\(L10n.t("diagnostics.microphone.detail")) \(selectedMicrophoneName)"))
-        #if os(macOS)
         checks.append(.init(name: L10n.t("diagnostics.screen"),
                             status: CGPreflightScreenCaptureAccess() ? .ok : .warning,
                             detail: L10n.t("diagnostics.screen.detail")))
-        #endif
         diagnosticReport = checks
         taskCenter.succeed(id: taskId, detail: L10n.t("diagnostics.done"))
     }

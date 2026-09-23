@@ -17,9 +17,7 @@ enum AppBootstrap {
             NSLog("[ClassNote] Database setup failed: \(error)")
         }
         guard !AppEnvironment.isRunningTests else { return }
-        #if os(macOS)
         GlobalShortcuts.register()
-        #endif
     }
 
     /// The one place that answers "where does ClassNote keep its data" — the

@@ -464,6 +464,18 @@ actor HighlightRepository {
         }
     }
 
+    func setNote(id: Int64, note: String) async throws {
+        try await Database.shared.dbPool.write { db in
+            try db.execute(sql: "UPDATE highlight SET user_note=? WHERE id=?", arguments: [note, id])
+        }
+    }
+
+    func delete(id: Int64) async throws {
+        try await Database.shared.dbPool.write { db in
+            _ = try Highlight.deleteOne(db, key: id)
+        }
+    }
+
     func clearExplanation(id: Int64) async throws {
         try await Database.shared.dbPool.write { db in
             try db.execute(sql: """

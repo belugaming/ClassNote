@@ -710,7 +710,6 @@ final class SessionOrchestrator: ObservableObject {
     /// another backend is selected or the language pair is not Chinese <->
     /// English, in which case sentences go to the sentence translator.
     private func simultaneousSession(config: ApiConfig) -> LocalSimulSession? {
-        #if os(macOS)
         if simulChecked { return simulSession }
         simulChecked = true
         guard AppState.shared.translationBackend == .t3po else { return nil }
@@ -729,9 +728,6 @@ final class SessionOrchestrator: ObservableObject {
             NSLog("[ClassNote] T3PO does not cover \(config.sourceLanguage) -> \(config.targetLanguage); using the sentence translator")
         }
         return simulSession
-        #else
-        return nil
-        #endif
     }
 
     /// A T3PO translation covering `rows`: it lands on the last of them, the
@@ -922,14 +918,12 @@ final class SessionOrchestrator: ObservableObject {
                                    glossary: TranslationGlossary,
                                    failedOnly: Bool = false,
                                    onProgress: ((Int, Int) -> Void)? = nil) async throws -> Int {
-        #if os(macOS)
         if AppState.shared.translationBackend == .t3po,
            SimulTranslatorProcess.direction(source: config.sourceLanguage,
                                             target: config.targetLanguage) != nil {
             return await translateSimultaneously(segments, config: config,
                                                  glossary: glossary, onProgress: onProgress)
         }
-        #endif
         let groups = SentenceGroups.group(segments.filter { $0.id != nil && !$0.textOriginal.isEmpty })
         var jobs: [SentenceJob] = []
         var previous: [String] = []
@@ -996,7 +990,6 @@ final class SessionOrchestrator: ObservableObject {
                                         glossary: CourseContext(course: course).translationGlossary)) ?? false
     }
 
-    #if os(macOS)
     /// A whole transcript through T3PO, line by line in order: its history is
     /// what keeps the translation coherent, so it always runs over every line,
     /// even when only some failed. Returns the number of errors.
@@ -1036,7 +1029,6 @@ final class SessionOrchestrator: ObservableObject {
         onProgress?(lines.count, lines.count)
         return failures
     }
-    #endif
 
     /// One sentence of a batch translation.
     struct SentenceJob: Sendable {

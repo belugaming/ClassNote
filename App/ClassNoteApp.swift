@@ -1,6 +1,5 @@
 import SwiftUI
 
-#if os(macOS)
 /// Finishes the recording and shuts the sidecars down on quit.
 ///
 /// `applicationWillTerminate` is the wrong hook for any of that: it is
@@ -52,17 +51,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.reply(toApplicationShouldTerminate: true)
     }
 }
-#endif
 
 @main
 struct ClassNoteApp: App {
     @StateObject private var appState = AppState.shared
-    #if os(macOS)
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    #endif
 
     init() {
         AppBootstrap.run()
+        WindowRouter.shared.start()
         // The test bundle is hosted by this app, so a bootstrap here would race
         // every test: `loadConfig()` overwrites whatever config a test just set,
         // `refreshMicrophoneDevices()` writes back a preference, and
@@ -76,90 +73,63 @@ struct ClassNoteApp: App {
     }
 
     var body: some Scene {
-        #if os(macOS)
-        macOSScenes
-        #else
-        iOSScenes
-        #endif
-    }
-
-    #if os(macOS)
-    @SceneBuilder
-    private var macOSScenes: some Scene {
-        WindowGroup(id: "main") {
+        WindowGroup(id: WindowRouter.mainWindowId) {
             MainWindowView()
                 .environmentObject(appState)
-                .frame(minWidth: 1000, minHeight: 640)
-                .background(LiveSessionOpener().environmentObject(appState))
+                .frame(minWidth: 960, minHeight: 600)
                 .background(translationBridgeView)
+                .captureWindowActions()
                 .id(appState.languageRefreshToken)
         }
-        .defaultSize(width: 1240, height: 780)
-        .commands {
-            CommandGroup(replacing: .newItem) {
-                // The flag is answered by CourseSessionSidebarView, which owns
-                // the sheet this command is named after.
-                Button("New Course") { appState.presentNewCourseSheet = true }
-                    .keyboardShortcut("n", modifiers: [.command, .shift])
-                Button("New Session") { appState.startNewSession() }
-                    .keyboardShortcut("n", modifiers: .command)
-            }
-        }
+        .defaultSize(width: 1280, height: 800)
+        .commands { AppCommands(appState: appState) }
 
-        WindowGroup(id: "live-session", for: String.self) { $sessionId in
+        WindowGroup(id: WindowRouter.liveWindowId, for: String.self) { $sessionId in
             if let id = sessionId {
-                LiveSessionView(sessionId: id)
+                LiveSessionView(windowId: id)
                     .environmentObject(appState)
-                    .frame(minWidth: 720, minHeight: 520)
+                    .frame(minWidth: 640, minHeight: 460)
+                    .background(translationBridgeView)
+                    .captureWindowActions()
                     .id(appState.languageRefreshToken)
             }
         }
-        .defaultSize(width: 900, height: 600)
+        .defaultSize(width: 920, height: 640)
         .defaultPosition(.center)
 
-        Window("Overlay", id: "overlay") {
+        Window(L10n.t("overlay.windowTitle"), id: WindowRouter.overlayWindowId) {
             OverlayView()
                 .environmentObject(appState)
-                .frame(minWidth: 420, minHeight: 180)
+                .frame(minWidth: 420, minHeight: 160)
                 .id(appState.languageRefreshToken)
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
-        .defaultSize(width: 560, height: 260)
+        .defaultSize(width: 580, height: 240)
         .defaultPosition(.topTrailing)
 
         Settings {
             SettingsView()
                 .environmentObject(appState)
         }
-        .defaultSize(width: 720, height: 560)
 
         MenuBarExtra {
             MenuBarExtraView()
                 .environmentObject(appState)
+                .captureWindowActions()
         } label: {
-            Image(systemName: appState.isRecording ? "record.circle.fill" : "waveform")
+            // The label is the one view that exists for the whole life of the
+            // app, so it is where window actions are captured for a start
+            // from the menu bar or a shortcut with every window closed.
+            MenuBarLabel(isRecording: appState.isRecording)
+                .captureWindowActions()
         }
         .menuBarExtraStyle(.window)
     }
-    #else
-    /// iOS/iPadOS has no independent windows, menu bar, or global shortcuts.
-    /// Everything lives in one WindowGroup; live session and settings are
-    /// presented as a full-screen cover / sheet from `MainWindowView`.
-    @SceneBuilder
-    private var iOSScenes: some Scene {
-        WindowGroup {
-            MainWindowView()
-                .environmentObject(appState)
-                .background(translationBridgeView)
-                .id(appState.languageRefreshToken)
-        }
-    }
-    #endif
 
     @ViewBuilder
     private var translationBridgeView: some View {
-        if #available(macOS 15.0, iOS 18.0, *) {
+        if #available(macOS 15.0, *) {
             AppleTranslationBridgeView()
         } else {
             EmptyView()
@@ -167,31 +137,41 @@ struct ClassNoteApp: App {
     }
 }
 
-#if os(macOS)
-/// Hidden helper view that listens for the `openLiveSession` notification and uses
-/// the environment's openWindow to pop the live session window.
-private struct LiveSessionOpener: View {
-    @Environment(\.openWindow) private var openWindow
-    @Environment(\.dismissWindow) private var dismissWindow
-    @State private var overlayOpen = false
+private struct MenuBarLabel: View {
+    let isRecording: Bool
 
     var body: some View {
-        Color.clear
-            .frame(width: 0, height: 0)
-            .onReceive(NotificationCenter.default.publisher(for: .openLiveSession)) { note in
-                if let sid = note.object as? String {
-                    openWindow(id: "live-session", value: sid)
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .toggleOverlay)) { _ in
-                if overlayOpen {
-                    dismissWindow(id: "overlay")
-                    overlayOpen = false
-                } else {
-                    openWindow(id: "overlay")
-                    overlayOpen = true
-                }
-            }
+        Image(systemName: isRecording ? "record.circle.fill" : "waveform")
     }
 }
-#endif
+
+/// Menu commands. Recording goes through the launcher, so ⌘N uses the same
+/// source and mode as the toolbar and never silently ends a running
+/// recording to start another.
+private struct AppCommands: Commands {
+    @ObservedObject var appState: AppState
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button(appState.isRecording ? L10n.t("record.stop") : L10n.t("record.start")) {
+                RecordingLauncher.toggle(appState)
+            }
+            .keyboardShortcut("n", modifiers: .command)
+            Button(L10n.t("main.newCourse")) { appState.presentNewCourseSheet = true }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+            Divider()
+            Button(L10n.t("toolbar.import")) {
+                WindowRouter.shared.openMain()
+                NotificationCenter.default.post(name: .requestImportFile, object: nil)
+            }
+            .keyboardShortcut("i", modifiers: .command)
+        }
+        CommandMenu(L10n.t("menu.recording")) {
+            Button(L10n.t("live.highlight")) { appState.markHighlight() }
+                .keyboardShortcut("b", modifiers: .command)
+                .disabled(!appState.isRecording)
+            Button(L10n.t("menubar.toggleOverlay")) { WindowRouter.shared.toggleOverlay() }
+                .keyboardShortcut("o", modifiers: [.command, .option])
+        }
+    }
+}

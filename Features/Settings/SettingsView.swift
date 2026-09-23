@@ -1,632 +1,308 @@
 import SwiftUI
-#if os(macOS)
 import KeyboardShortcuts
-#endif
 
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
-    @State private var selection: Tab = .api
-
-    enum Tab: String, CaseIterable, Hashable {
-        case api, engines
-        #if os(macOS)
-        case shortcuts
-        #endif
-        case appearance, about
-
-        var titleKey: String {
-            switch self {
-            case .api: return "settings.tab.api"
-            case .engines: return "settings.tab.engines"
-            #if os(macOS)
-            case .shortcuts: return "settings.tab.shortcuts"
-            #endif
-            case .appearance: return "settings.tab.appearance"
-            case .about: return "settings.tab.about"
-            }
-        }
-        var icon: String {
-            switch self {
-            case .api: return "network"
-            case .engines: return "waveform.circle"
-            #if os(macOS)
-            case .shortcuts: return "keyboard"
-            #endif
-            case .appearance: return "paintpalette"
-            case .about: return "info.circle"
-            }
-        }
-    }
+    @AppStorage("settingsTab", store: AppEnvironment.defaults) private var tab = SettingsTab.general.rawValue
 
     var body: some View {
-        TabView(selection: $selection) {
-            ApiSettingsView()
-                .tabItem { Label(L10n.t("settings.tab.api"), systemImage: "network") }
-                .tag(Tab.api)
-            EngineSettingsView()
-                .tabItem { Label(L10n.t("settings.tab.engines"), systemImage: "waveform.circle") }
-                .tag(Tab.engines)
-            #if os(macOS)
-            ShortcutsSettingsView()
-                .tabItem { Label(L10n.t("settings.tab.shortcuts"), systemImage: "keyboard") }
-                .tag(Tab.shortcuts)
-            #endif
-            AppearanceSettingsView()
-                .tabItem { Label(L10n.t("settings.tab.appearance"), systemImage: "paintpalette") }
-                .tag(Tab.appearance)
-            AboutView()
-                .tabItem { Label(L10n.t("settings.tab.about"), systemImage: "info.circle") }
-                .tag(Tab.about)
+        TabView(selection: $tab) {
+            ForEach(SettingsTab.allCases) { item in
+                item.content
+                    .tabItem { Label(L10n.t(item.titleKey), systemImage: item.icon) }
+                    .tag(item.rawValue)
+            }
         }
-        #if os(macOS)
-        .frame(minWidth: 640, minHeight: 540)
-        #endif
-        .background(Theme.surface)
-        .id(appState.languageRefreshToken)   // force full re-render on language switch
+        .frame(width: 720, height: 620)
+        .id(appState.languageRefreshToken)
     }
 }
 
-struct AppearanceSettingsView: View {
+enum SettingsTab: String, CaseIterable, Identifiable {
+    case general, engines, models, api, shortcuts, about
+
+    var id: String { rawValue }
+
+    var titleKey: String { "settings.tab.\(rawValue)" }
+
+    var icon: String {
+        switch self {
+        case .general: return "gearshape"
+        case .engines: return "waveform.circle"
+        case .models: return "shippingbox"
+        case .api: return "network"
+        case .shortcuts: return "keyboard"
+        case .about: return "info.circle"
+        }
+    }
+
+    @MainActor @ViewBuilder
+    var content: some View {
+        switch self {
+        case .general: GeneralSettingsView()
+        case .engines: EngineSettingsView()
+        case .models: ModelsSettingsView()
+        case .api: ApiSettingsView()
+        case .shortcuts: ShortcutsSettingsView()
+        case .about: AboutView()
+        }
+    }
+}
+
+/// A scrolling settings page with the standard padding.
+private struct SettingsPage<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: Theme.sectionSpacing) { content }
+                .padding(Theme.pagePadding)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+// MARK: - Languages
+
+/// The languages offered for lectures and translation. Codes are what the
+/// engines take; names are shown in the interface language.
+enum LectureLanguage {
+    static let codes = ["en", "zh-Hans", "zh-Hant", "yue", "ja", "ko", "fr", "de", "es", "pt", "it",
+                        "ru", "ar", "hi", "th", "vi", "id", "tr", "nl", "pl"]
+
+    static func name(_ code: String) -> String {
+        if code == "auto" { return L10n.t("language.auto") }
+        let locale = Locale(identifier: L10n.isChinese ? "zh-Hans" : "en")
+        return locale.localizedString(forIdentifier: code) ?? code
+    }
+}
+
+// MARK: - General
+
+struct GeneralSettingsView: View {
     @EnvironmentObject var appState: AppState
-    @State private var selection: L10n.LanguageOverride = L10n.override
+    @State private var uiLanguage: L10n.LanguageOverride = L10n.override
     @AppStorage("overlayCaptionDisplayMode", store: AppEnvironment.defaults) private var displayModeRaw = OverlayCaptionDisplayMode.bilingual.rawValue
     @AppStorage("overlayCaptionTextSize", store: AppEnvironment.defaults) private var textSizeRaw = OverlayCaptionTextSize.medium.rawValue
     @AppStorage("overlayCaptionRecentCount", store: AppEnvironment.defaults) private var recentCountRaw = OverlayCaptionRecentCount.two.rawValue
-    @AppStorage("overlayAlwaysOnTop", store: AppEnvironment.defaults) private var overlayAlwaysOnTop: Bool = true
+    @AppStorage("overlayAlwaysOnTop", store: AppEnvironment.defaults) private var overlayAlwaysOnTop = true
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
-                SettingsSection(title: L10n.t("settings.appearance.language"),
-                                footer: L10n.t("settings.appearance.languageNote")) {
-                    Picker("", selection: $selection) {
-                        ForEach(L10n.LanguageOverride.allCases, id: \.rawValue) { opt in
-                            Text(opt.displayName).tag(opt)
+        SettingsPage {
+            SettingsSection(title: L10n.t("settings.languages.title"),
+                            footer: L10n.t("settings.languages.footer")) {
+                Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+                    GridRow {
+                        Text(L10n.t("settings.api.source"))
+                        Picker("", selection: languageBinding(\.sourceLanguage)) {
+                            Text(LectureLanguage.name("auto")).tag("auto")
+                            Divider()
+                            ForEach(LectureLanguage.codes, id: \.self) { Text(LectureLanguage.name($0)).tag($0) }
                         }
+                        .labelsHidden()
+                        .frame(maxWidth: 240)
+                        // A new language reloads the local engine, which would
+                        // end the transcription of a recording running on it.
+                        .disabled(appState.isRecording && appState.sttBackend.isLocalSidecar)
                     }
-                    .pickerStyle(.segmented)
-                    .onChange(of: selection) { _, newValue in
-                        appState.setLanguage(newValue)
+                    GridRow {
+                        Text(L10n.t("settings.api.target"))
+                        Picker("", selection: languageBinding(\.targetLanguage)) {
+                            ForEach(LectureLanguage.codes, id: \.self) { Text(LectureLanguage.name($0)).tag($0) }
+                        }
+                        .labelsHidden()
+                        .frame(maxWidth: 240)
                     }
                 }
-
-                SettingsSection(title: L10n.t("settings.appearance.overlay"),
-                                footer: L10n.t("settings.appearance.overlayNote")) {
-                    LabeledRow(label: L10n.t("overlay.displayMode")) {
-                        Picker("", selection: displayModeBinding) {
-                            ForEach(OverlayCaptionDisplayMode.allCases) { mode in
-                                Text(mode.title).tag(mode)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                    }
-
-                    LabeledRow(label: L10n.t("overlay.textSize")) {
-                        Picker("", selection: textSizeBinding) {
-                            ForEach(OverlayCaptionTextSize.allCases) { size in
-                                Text(size.title).tag(size)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                    }
-
-                    LabeledRow(label: L10n.t("overlay.recentCount")) {
-                        Picker("", selection: recentCountBinding) {
-                            ForEach(OverlayCaptionRecentCount.allCases) { count in
-                                Text(count.title).tag(count)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                    }
-
-                    Toggle(L10n.t("overlay.alwaysOnTop"), isOn: $overlayAlwaysOnTop)
-                        .toggleStyle(.switch)
-                        .tint(Theme.accent)
-                }
+                Toggle(L10n.t("settings.engines.liveTranslationToggle"), isOn: $appState.translationEnabled)
             }
-            .padding(Theme.pagePadding)
-        }
-        .background(Theme.surface)
-    }
 
-    private var displayMode: OverlayCaptionDisplayMode {
-        OverlayCaptionDisplayMode(rawValue: displayModeRaw) ?? .bilingual
-    }
-
-    private var textSize: OverlayCaptionTextSize {
-        OverlayCaptionTextSize(rawValue: textSizeRaw) ?? .medium
-    }
-
-    private var recentCount: OverlayCaptionRecentCount {
-        OverlayCaptionRecentCount(rawValue: recentCountRaw) ?? .two
-    }
-
-    private var displayModeBinding: Binding<OverlayCaptionDisplayMode> {
-        Binding(
-            get: { displayMode },
-            set: { displayModeRaw = $0.rawValue }
-        )
-    }
-
-    private var textSizeBinding: Binding<OverlayCaptionTextSize> {
-        Binding(
-            get: { textSize },
-            set: { textSizeRaw = $0.rawValue }
-        )
-    }
-
-    private var recentCountBinding: Binding<OverlayCaptionRecentCount> {
-        Binding(
-            get: { recentCount },
-            set: { recentCountRaw = $0.rawValue }
-        )
-    }
-}
-
-// MARK: - API
-
-struct ApiSettingsView: View {
-    @EnvironmentObject var appState: AppState
-    @State private var testStatus: String = ""
-    @State private var testIsError: Bool = false
-    @State private var autosaveTask: Task<Void, Never>?
-    @State private var localNetworkDenied: Bool = false
-
-    /// Presets carry no per-provider colour: `Theme` documents a monochrome
-    /// design language, and six arbitrary hues here made the first thing you see
-    /// in Settings look like a swatch test. Which preset is active is shown by
-    /// selection state instead, which is information the colours never conveyed.
-    ///
-    /// The table itself lives on `ApiConfig`, because the same rows answer
-    /// "does this endpoint need a key" for every engine — a question this screen
-    /// used to answer for itself and get wrong for loopback servers.
-    private var providerPresets: [ApiConfig.ProviderPreset] { ApiConfig.providerPresets }
-
-    /// The preset the stored base URL matches, if the user has not edited it.
-    private var activePreset: ApiConfig.ProviderPreset? {
-        providerPresets.first { $0.baseUrl == appState.apiConfig.baseUrl }
-    }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
-                SettingsSection(title: L10n.t("settings.api.presets")) {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 8)], spacing: 8) {
-                        ForEach(providerPresets) { preset in
-                            let isActive = appState.apiConfig.baseUrl == preset.baseUrl
-                            Button {
-                                updateConfig(immediate: true) { config in
-                                    config.baseUrl = preset.baseUrl
-                                    // A provider that serves no transcription
-                                    // endpoint has no STT model to offer, and
-                                    // writing one only produces a 404 on the
-                                    // first recording. Leave the field alone.
-                                    if let sttModel = preset.sttModel {
-                                        config.sttModel = sttModel
-                                    }
-                                    config.translationModel = preset.chatModel
-                                    config.llmModel = preset.chatModel
-                                }
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: isActive ? "checkmark.circle.fill" : "circle")
-                                        .font(.caption)
-                                        .foregroundStyle(isActive ? Theme.accent : Color.secondary.opacity(0.5))
-                                    Text(preset.label)
-                                        .font(.callout.weight(isActive ? .semibold : .regular))
-                                        .lineLimit(1)
-                                    Spacer(minLength: 0)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.vertical, 8)
-                                .padding(.horizontal, 10)
-                                .background(
-                                    RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous)
-                                        .fill(isActive ? Theme.accentSoft : Theme.chrome)
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous)
-                                        .stroke(isActive ? Theme.accent.opacity(0.35) : Color.clear, lineWidth: 1)
-                                )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-
-                    if let active = activePreset {
-                        if active.sttModel == nil && appState.sttBackend == .openAICompatible {
-                            Label(L10n.t("settings.api.preset.noStt"), systemImage: "exclamationmark.triangle")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        if !active.requiresApiKey {
-                            Label(L10n.t("settings.api.preset.noKeyNeeded"), systemImage: "info.circle")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                }
-
-                SettingsSection(title: L10n.t("settings.api.endpoint"),
-                                footer: L10n.t("settings.api.privacy")) {
-                    LabeledRow(label: L10n.t("settings.api.baseUrl")) {
-                        TextField("https://api.openai.com/v1", text: baseUrlBinding)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                    LabeledRow(label: L10n.t("settings.api.key")) {
-                        SecureField("sk-…", text: apiKeyBinding)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                    if !appState.apiConfig.requiresApiKey {
-                        Text(L10n.t("settings.api.keyOptional"))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    if localNetworkDenied {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Label(L10n.t("settings.api.localNetworkDenied"), systemImage: "wifi.exclamationmark")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                            Button {
-                                LocalNetworkAccess.openSystemSettings()
-                            } label: {
-                                Text(L10n.t("settings.api.openSystemSettings"))
-                                    .font(.caption)
-                            }
-                        }
-                    }
-                }
-
-                SettingsSection(title: L10n.t("settings.api.models")) {
-                    LabeledRow(label: L10n.t("settings.api.stt")) {
-                        TextField("whisper-1", text: sttModelBinding).textFieldStyle(.roundedBorder)
-                    }
-                    LabeledRow(label: L10n.t("settings.api.translation")) {
-                        TextField("gpt-4o-mini", text: translationModelBinding).textFieldStyle(.roundedBorder)
-                    }
-                    LabeledRow(label: L10n.t("settings.api.llm")) {
-                        TextField("gpt-4o-mini", text: llmModelBinding).textFieldStyle(.roundedBorder)
-                    }
-                }
-
-                SettingsSection(title: L10n.t("settings.api.languages"),
-                                footer: L10n.t("settings.api.langHelp")) {
-                    HStack(spacing: 8) {
-                        LabeledRow(label: L10n.t("settings.api.source")) {
-                            TextField("en", text: sourceLanguageBinding)
-                                .textFieldStyle(.roundedBorder)
-                                .onSubmit { reloadEngineForLanguageChange() }
-                                // Committing a new language retires the warm
-                                // sidecar, which would kill the recording that
-                                // is streaming through it.
-                                .disabled(appState.isRecording && appState.sttBackend.isLocalSidecar)
-                        }
-                        LabeledRow(label: L10n.t("settings.api.target")) {
-                            TextField("zh-Hans", text: targetLanguageBinding).textFieldStyle(.roundedBorder)
-                        }
-                    }
-                }
-
+            SettingsSection(title: L10n.t("settings.audio.input"), footer: L10n.t("settings.audio.inputNote")) {
                 HStack {
-                    Button {
-                        save()
-                    } label: {
-                        Label(L10n.t("common.save"), systemImage: "checkmark.circle")
-                            .frame(minWidth: 100)
-                    }
-                    .controlSize(.large)
-                    .prominentAccentButton()
-
-                    Button {
-                        Task { await testConnection() }
-                    } label: {
-                        Label(L10n.t("settings.api.test"), systemImage: "antenna.radiowaves.left.and.right")
-                            .frame(minWidth: 100)
-                    }
-                    .controlSize(.large)
-                    .disabled(appState.apiConfig.baseUrl.isEmpty || appState.apiConfig.isCloudCredentialMissing)
-
-                    if !testStatus.isEmpty {
-                        HStack(spacing: 4) {
-                            Image(systemName: testIsError ? "xmark.circle.fill" : "checkmark.seal.fill")
-                            Text(testStatus).font(.callout)
-                        }
-                        .foregroundStyle(testIsError ? Theme.recording : Theme.success)
-                    }
-                    Spacer()
-                }
-            }
-            .padding(Theme.pagePadding)
-        }
-        .background(Theme.surface)
-        .onDisappear {
-            autosaveTask?.cancel()
-            Task { await appState.saveConfig(appState.apiConfig) }
-        }
-    }
-
-    private func save() {
-        autosaveTask?.cancel()
-        let config = appState.apiConfig
-        Task {
-            await appState.saveConfig(config)
-            testStatus = L10n.t("settings.api.saved")
-            testIsError = false
-            await probeLocalNetworkIfNeeded(config.baseUrl)
-        }
-    }
-
-    /// If the base URL points at a local-network host, open a throwaway
-    /// connection so macOS surfaces (or we can detect denial of) the Local
-    /// Network permission prompt. See `LocalNetworkAccess` for why this is
-    /// necessary — declaring the Info.plist key alone never triggers it.
-    private func probeLocalNetworkIfNeeded(_ baseUrl: String) async {
-        guard LocalNetworkAccess.isLocalNetworkHost(baseUrl) else {
-            localNetworkDenied = false
-            return
-        }
-        let result = await LocalNetworkAccess.probe(baseUrlString: baseUrl)
-        localNetworkDenied = (result == .denied)
-    }
-
-    private func updateConfig(immediate: Bool = false, _ update: (inout ApiConfig) -> Void) {
-        var config = appState.apiConfig
-        update(&config)
-        appState.apiConfig = config
-        testStatus = ""
-        if immediate {
-            autosaveTask?.cancel()
-            Task { await appState.saveConfig(config) }
-        } else {
-            scheduleAutosave(config)
-        }
-    }
-
-    private func scheduleAutosave(_ config: ApiConfig) {
-        autosaveTask?.cancel()
-        let state = appState
-        autosaveTask = Task { [config, state] in
-            do {
-                try await Task.sleep(nanoseconds: 500_000_000)
-            } catch {
-                return
-            }
-            guard !Task.isCancelled else { return }
-            await state.saveConfig(config)
-        }
-    }
-
-    private func testConnection() async {
-        testStatus = L10n.t("settings.api.testing")
-        testIsError = false
-        let client = OpenAICompatibleLLM(config: appState.apiConfig)
-        do {
-            let out = try await client.chatComplete(messages: [
-                .init(role: .system, content: "Reply with exactly: OK"),
-                .init(role: .user, content: "ping")
-            ], model: appState.apiConfig.llmModel, temperature: 0)
-            testStatus = "\(L10n.t("settings.api.testOk")) — \(out.prefix(40))"
-            testIsError = false
-        } catch {
-            testStatus = "\(L10n.t("settings.api.testFail")): \(error.localizedDescription)"
-            testIsError = true
-        }
-    }
-
-    private var baseUrlBinding: Binding<String> {
-        Binding(get: { appState.apiConfig.baseUrl },
-                set: { newValue in
-                    updateConfig { $0.baseUrl = newValue }
-                })
-    }
-
-    private var apiKeyBinding: Binding<String> {
-        Binding(get: { appState.apiConfig.apiKey },
-                set: { newValue in
-                    updateConfig { $0.apiKey = newValue }
-                })
-    }
-
-    private var sttModelBinding: Binding<String> {
-        Binding(get: { appState.apiConfig.sttModel },
-                set: { newValue in
-                    updateConfig { $0.sttModel = newValue }
-                })
-    }
-
-    private var translationModelBinding: Binding<String> {
-        Binding(get: { appState.apiConfig.translationModel },
-                set: { newValue in
-                    updateConfig { $0.translationModel = newValue }
-                })
-    }
-
-    private var llmModelBinding: Binding<String> {
-        Binding(get: { appState.apiConfig.llmModel },
-                set: { newValue in
-                    updateConfig { $0.llmModel = newValue }
-                })
-    }
-
-    private var sourceLanguageBinding: Binding<String> {
-        Binding(get: { appState.apiConfig.sourceLanguage },
-                set: { newValue in
-                    updateConfig { $0.sourceLanguage = newValue }
-                })
-    }
-
-    /// Reloads a warm local sidecar after the source language settles.
-    ///
-    /// The language decides which models are loaded, so a change invalidates a
-    /// warm process. This runs on commit rather than per keystroke, since typing
-    /// "en" would otherwise restart the sidecar on the intermediate "e".
-    private func reloadEngineForLanguageChange() {
-        guard appState.sttBackend.isLocalSidecar else { return }
-        Task { await appState.reloadLocalEngine() }
-    }
-
-    private var targetLanguageBinding: Binding<String> {
-        Binding(get: { appState.apiConfig.targetLanguage },
-                set: { newValue in
-                    updateConfig { $0.targetLanguage = newValue }
-                })
-    }
-}
-
-// MARK: - Engines
-
-struct EngineSettingsView: View {
-    @EnvironmentObject var appState: AppState
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
-                SettingsSection(title: L10n.t("settings.engines.stt")) {
-                    Picker(L10n.t("settings.engines.sttPicker"), selection: $appState.sttBackend) {
-                        ForEach(SttBackend.selectableCases) { backend in
-                            Text(backend.displayName).tag(backend)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    // Switching engines retires the warm sidecar, and the live
-                    // pipeline is streaming through it: the recording would lose
-                    // its transcription for good, with no way back but stop/start.
-                    .disabled(appState.isRecording)
-                    if appState.sttBackend == .appleSpeech {
-                        Label(L10n.t("settings.engines.appleSpeechNote"), systemImage: "info.circle")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    if appState.sttBackend == .funasr {
-                        Label(L10n.t("settings.engines.funasrNote"), systemImage: "arrow.down.circle")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    if appState.sttBackend == .nemotronStreaming {
-                        Label(L10n.t("settings.engines.nemotronNote"), systemImage: "arrow.down.circle")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    if appState.isRecording {
-                        Label(L10n.t("settings.engines.lockedWhileRecording"), systemImage: "lock")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    if appState.sttBackend.isLocalSidecar {
-                        LocalEngineLatencyRow()
-                        LocalEngineStatusRow()
-                    }
-                }
-
-                SettingsSection(title: L10n.t("settings.engines.translationSection"),
-                                footer: L10n.t("settings.engines.liveHelp")) {
-                    Toggle(L10n.t("settings.engines.liveTranslationToggle"), isOn: $appState.translationEnabled)
-                        .toggleStyle(.switch)
-                        .tint(Theme.accent)
-                    if appState.translationEnabled {
-                        Picker(L10n.t("settings.engines.translationBackendPicker"), selection: $appState.translationBackend) {
-                            ForEach(TranslationBackend.allCases) { backend in
-                                Text(backend.displayName).tag(backend)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        switch appState.translationBackend {
-                        case .appleTranslation:
-                            Label(L10n.t("settings.engines.appleTranslationNote"), systemImage: "info.circle")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        case .localMLX:
-                            Label(L10n.t("settings.engines.translationBackend.mlxNote"), systemImage: "info.circle")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                            Label(L10n.t("settings.translation.modelList"), systemImage: "shippingbox")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                            #if os(macOS)
-                            LocalTranslationStatusRow()
-                            #endif
-                        case .openAICompatible, .t3po:
-                            EmptyView()
-                        }
-                    }
-                }
-
-                SettingsSection(title: L10n.t("settings.engines.llmSection"),
-                                footer: L10n.t("settings.engines.llmHelp")) {
-                    Picker(L10n.t("settings.engines.llmBackendPicker"), selection: $appState.llmBackend) {
-                        ForEach(LLMBackend.allCases) { backend in
-                            Text(backend.displayName).tag(backend)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    if appState.llmBackend == .localMLX {
-                        Label(L10n.t("settings.engines.llmBackend.mlxNote"), systemImage: "info.circle")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        #if os(macOS)
-                        LocalLLMStatusRow()
-                        #endif
-                    }
-                }
-
-                SettingsSection(title: L10n.t("settings.audio.input"),
-                                footer: L10n.t("settings.audio.inputNote")) {
                     Picker(L10n.t("settings.audio.microphone"), selection: $appState.preferredMicrophoneDeviceID) {
                         ForEach(appState.microphoneDevices) { device in
                             Text(device.name).tag(device.id)
                         }
                     }
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
+                    .frame(maxWidth: 360)
                     Button {
                         appState.refreshMicrophoneDevices()
                     } label: {
-                        Label(L10n.t("settings.audio.refresh"), systemImage: "arrow.clockwise")
+                        Image(systemName: "arrow.clockwise")
                     }
-                }
-
-                SettingsSection(title: L10n.t("settings.engines.storage")) {
-                    PathRow(label: L10n.t("settings.engines.appSupport"),
-                            path: AppBootstrap.applicationSupportURL.path)
-                    PathRow(label: L10n.t("settings.engines.recordings"),
-                            path: AppBootstrap.recordingsURL.path)
-                    PathRow(label: L10n.t("settings.engines.database"),
-                            path: AppBootstrap.applicationSupportURL.appendingPathComponent("classnote.sqlite").path)
-                    #if os(macOS)
-                    Button {
-                        NSWorkspace.shared.open(AppBootstrap.applicationSupportURL)
-                    } label: {
-                        Label(L10n.t("settings.engines.reveal"), systemImage: "folder")
-                    }
-                    #endif
+                    .help(L10n.t("settings.audio.refresh"))
                 }
             }
-            .padding(Theme.pagePadding)
+
+            SettingsSection(title: L10n.t("settings.appearance.overlay"),
+                            footer: L10n.t("settings.appearance.overlayNote")) {
+                Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+                    GridRow {
+                        Text(L10n.t("overlay.displayMode"))
+                        Picker("", selection: $displayModeRaw) {
+                            ForEach(OverlayCaptionDisplayMode.allCases) { Text($0.title).tag($0.rawValue) }
+                        }
+                        .pickerStyle(.segmented).labelsHidden()
+                    }
+                    GridRow {
+                        Text(L10n.t("overlay.textSize"))
+                        Picker("", selection: $textSizeRaw) {
+                            ForEach(OverlayCaptionTextSize.allCases) { Text($0.title).tag($0.rawValue) }
+                        }
+                        .pickerStyle(.segmented).labelsHidden()
+                    }
+                    GridRow {
+                        Text(L10n.t("overlay.recentCount"))
+                        Picker("", selection: $recentCountRaw) {
+                            ForEach(OverlayCaptionRecentCount.allCases) { Text($0.title).tag($0.rawValue) }
+                        }
+                        .pickerStyle(.segmented).labelsHidden()
+                    }
+                }
+                Toggle(L10n.t("overlay.alwaysOnTop"), isOn: $overlayAlwaysOnTop)
+            }
+
+            SettingsSection(title: L10n.t("settings.appearance.language"),
+                            footer: L10n.t("settings.appearance.languageNote")) {
+                Picker("", selection: $uiLanguage) {
+                    ForEach(L10n.LanguageOverride.allCases, id: \.rawValue) { Text($0.displayName).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 360)
+                .onChange(of: uiLanguage) { _, value in appState.setLanguage(value) }
+            }
         }
-        .background(Theme.surface)
-        .onAppear {
-            appState.refreshMicrophoneDevices()
+        .onAppear { appState.refreshMicrophoneDevices() }
+    }
+
+    private func languageBinding(_ keyPath: WritableKeyPath<ApiConfig, String>) -> Binding<String> {
+        Binding(get: {
+            let value = appState.apiConfig[keyPath: keyPath]
+            return value.isEmpty ? "auto" : value
+        }, set: { newValue in
+            var config = appState.apiConfig
+            let old = config[keyPath: keyPath]
+            config[keyPath: keyPath] = newValue == "auto" ? "" : newValue
+            appState.apiConfig = config
+            let isSource = keyPath == \ApiConfig.sourceLanguage
+            Task {
+                await appState.saveConfig(config)
+                // The source language decides what the warm sidecar loaded.
+                if isSource, old != config.sourceLanguage, appState.sttBackend.isLocalSidecar {
+                    await appState.reloadLocalEngine()
+                }
+            }
+        })
+    }
+}
+
+// MARK: - Engines
+
+/// One choice in an engine picker.
+private struct EngineOption<Value: Hashable>: Identifiable {
+    let value: Value
+    let title: String
+    let detail: String
+    let isLocal: Bool
+    var id: Value { value }
+}
+
+/// A column of radio cards: each engine with a line on what it is.
+private struct EnginePicker<Value: Hashable>: View {
+    let options: [EngineOption<Value>]
+    @Binding var selection: Value
+    var disabled = false
+
+    var body: some View {
+        VStack(spacing: 6) {
+            ForEach(options) { option in
+                Button {
+                    selection = option.value
+                } label: {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: selection == option.value ? "largecircle.fill.circle" : "circle")
+                            .foregroundStyle(selection == option.value ? Theme.accent : .secondary)
+                            .padding(.top, 1)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(option.title).font(.body.weight(.medium))
+                                Text(L10n.t(option.isLocal ? "engine.badge.local" : "engine.badge.cloud"))
+                                    .pill(option.isLocal ? Theme.success : Theme.accent)
+                            }
+                            Text(option.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(10)
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
+                            .fill(selection == option.value ? Theme.accentSoft : Color.clear)
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .disabled(disabled)
+    }
+}
+
+struct EngineSettingsView: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        SettingsPage {
+            SettingsSection(title: L10n.t("settings.engines.stt")) {
+                EnginePicker(options: sttOptions, selection: $appState.sttBackend, disabled: appState.isRecording)
+                if appState.isRecording {
+                    Label(L10n.t("settings.engines.lockedWhileRecording"), systemImage: "lock")
+                        .font(.caption)
+                        .foregroundStyle(Theme.warning)
+                }
+                if appState.sttBackend == .funasr { LocalEngineLatencyRow() }
+                if appState.sttBackend.isLocalSidecar { LocalEngineStatusRow() }
+            }
+
+            SettingsSection(title: L10n.t("settings.engines.translationSection"),
+                            footer: L10n.t("settings.engines.liveHelp")) {
+                EnginePicker(options: translationOptions, selection: $appState.translationBackend)
+                if appState.translationBackend == .t3po,
+                   SimulTranslatorProcess.direction(source: appState.apiConfig.sourceLanguage,
+                                                    target: appState.apiConfig.targetLanguage) == nil {
+                    Label(L10n.t("settings.engines.t3po.pairFallback"), systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(Theme.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if appState.translationBackend == .t3po,
+                   ProcessInfo.processInfo.physicalMemory < 32 * 1_073_741_824 {
+                    Label(L10n.t("settings.engines.t3po.memory"), systemImage: "memorychip")
+                        .font(.caption)
+                        .foregroundStyle(Theme.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if appState.translationBackend.isLocalSidecar {
+                    ModelsLink(ids: appState.translationBackend == .t3po ? ["t3po", "hymt2"] : ["hymt2"])
+                }
+            }
+
+            SettingsSection(title: L10n.t("settings.engines.llmSection"), footer: L10n.t("settings.engines.llmHelp")) {
+                EnginePicker(options: llmOptions, selection: $appState.llmBackend)
+                if appState.llmBackend == .localMLX { ModelsLink(ids: ["qwen3"]) }
+            }
         }
         // Skip the write when the picker already matches what is stored: that
-        // means loadConfig() just applied it, not the user changing it. Saving
-        // here would race the load and could persist a stale config.
+        // means loadConfig() just applied it, not the user changing it.
         .onChange(of: appState.sttBackend) { _, backend in
             guard appState.apiConfig.sttBackend != backend.rawValue else { return }
             var config = appState.apiConfig
             config.sttBackend = backend.rawValue
             Task {
                 await appState.saveConfig(config)
-                // A warm sidecar holds models for the previous engine, so swap
-                // it for one matching the new selection.
                 await appState.reloadLocalEngine()
             }
         }
@@ -643,212 +319,173 @@ struct EngineSettingsView: View {
             Task { await appState.saveConfig(config) }
         }
     }
-}
 
-private struct PathRow: View {
-    let label: String
-    let path: String
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label).font(.caption.weight(.medium)).foregroundStyle(.secondary)
-            Text(path)
-                .font(.system(.callout, design: .monospaced))
-                .foregroundStyle(.primary)
-                .textSelection(.enabled)
-                .lineLimit(2)
-                .truncationMode(.middle)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+    private var sttOptions: [EngineOption<SttBackend>] {
+        [
+            EngineOption(value: .funasr, title: "Nemotron 3.5", detail: L10n.t("engine.stt.nemotron"), isLocal: true),
+            EngineOption(value: .r2t2, title: "Confucius4-R2T2", detail: L10n.t("engine.stt.r2t2"), isLocal: true),
+            EngineOption(value: .appleSpeech, title: L10n.t("engine.stt.apple.title"),
+                         detail: L10n.t("settings.engines.appleSpeechNote"), isLocal: true),
+            EngineOption(value: .openAICompatible, title: L10n.t("engine.cloud.title"),
+                         detail: L10n.t("engine.stt.cloud"), isLocal: false),
+        ]
+    }
+
+    private var translationOptions: [EngineOption<TranslationBackend>] {
+        [
+            EngineOption(value: .localMLX, title: "Hy-MT2 1.8B", detail: L10n.t("engine.mt.hymt2"), isLocal: true),
+            EngineOption(value: .t3po, title: "Confucius4-T3PO 14B", detail: L10n.t("engine.mt.t3po"), isLocal: true),
+            EngineOption(value: .appleTranslation, title: L10n.t("engine.mt.apple.title"),
+                         detail: L10n.t("settings.engines.appleTranslationNote"), isLocal: true),
+            EngineOption(value: .openAICompatible, title: L10n.t("engine.cloud.title"),
+                         detail: L10n.t("engine.mt.cloud"), isLocal: false),
+        ]
+    }
+
+    private var llmOptions: [EngineOption<LLMBackend>] {
+        [
+            EngineOption(value: .localMLX, title: "Qwen3 4B Instruct", detail: L10n.t("engine.llm.qwen3"), isLocal: true),
+            EngineOption(value: .openAICompatible, title: L10n.t("engine.cloud.title"),
+                         detail: L10n.t("engine.llm.cloud"), isLocal: false),
+        ]
     }
 }
 
-// MARK: - Shortcuts (macOS only — no global hotkeys on iOS)
+/// Size and state of the models an engine uses, with a jump to the Models
+/// tab where they are downloaded and deleted.
+private struct ModelsLink: View {
+    let ids: [String]
+    @AppStorage("settingsTab", store: AppEnvironment.defaults) private var tab = SettingsTab.general.rawValue
 
-#if os(macOS)
-struct ShortcutsSettingsView: View {
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
-                SettingsSection(title: L10n.t("settings.shortcuts.global"),
-                                footer: L10n.t("settings.shortcuts.note")) {
-                    ShortcutRow(label: L10n.t("settings.shortcuts.toggleRecording"), name: .toggleRecording, icon: "record.circle")
-                    ShortcutRow(label: L10n.t("settings.shortcuts.markHighlight"), name: .markHighlight, icon: "star.circle")
-                    ShortcutRow(label: L10n.t("settings.shortcuts.toggleTranslation"), name: .toggleTranslation, icon: "character.bubble")
-                    ShortcutRow(label: L10n.t("settings.shortcuts.toggleOverlay"), name: .toggleOverlay, icon: "rectangle.on.rectangle")
+        let models = ids.compactMap { LocalModelCatalog.model(id: $0) }
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "shippingbox").foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(models) { model in
+                    HStack(spacing: 6) {
+                        Text(model.name)
+                        Text("≈ " + LocalModelCatalog.formatBytes(model.approxBytes)).foregroundStyle(.secondary)
+                        Image(systemName: model.isInstalled ? "checkmark.circle.fill" : "arrow.down.circle")
+                            .foregroundStyle(model.isInstalled ? Theme.success : .secondary)
+                    }
                 }
             }
-            .padding(Theme.pagePadding)
-        }
-        .background(Theme.surface)
-    }
-}
-
-private struct ShortcutRow: View {
-    let label: String
-    let name: KeyboardShortcuts.Name
-    let icon: String
-
-    var body: some View {
-        HStack {
-            Label(label, systemImage: icon)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            KeyboardShortcuts.Recorder(for: name)
-        }
-    }
-}
-#endif
-
-// MARK: - About
-
-struct AboutView: View {
-    static var bundleVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
-    }
-
-    var body: some View {
-        VStack(spacing: 18) {
             Spacer()
-            ZStack {
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .fill(Theme.accentSoft)
-                    .frame(width: 104, height: 104)
-                Image(systemName: "waveform.badge.mic")
-                    .font(.system(size: 46, weight: .medium))
-                    .foregroundStyle(Theme.accent)
+            Button(L10n.t("settings.engines.manageModels")) { tab = SettingsTab.models.rawValue }
+                .controlSize(.small)
+        }
+        .font(.caption)
+    }
+}
+
+/// Picks the Nemotron chunk size: how far behind the voice the text runs.
+/// Each option is its own ~650 MB export, so a change downloads once and
+/// reloads the engine.
+struct LocalEngineLatencyRow: View {
+    @EnvironmentObject var appState: AppState
+    @AppStorage(LocalEngineLatency.storageKey, store: AppEnvironment.defaults) private var raw = LocalEngineLatency.default.rawValue
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Picker(L10n.t("settings.engines.latency"), selection: $raw) {
+                ForEach(LocalEngineLatency.allCases) { Text($0.title).tag($0.rawValue) }
             }
-            Text(L10n.t("app.name"))
-                .font(.system(size: 30, weight: .semibold, design: .rounded))
-            // Read from the bundle rather than a localized literal. The string
-            // used to hardcode "v0.3.0" in both locales, so it kept claiming
-            // 0.3.0 long after the project moved on — About is the one screen
-            // where a stale version is actively misleading.
-            Text(verbatim: "v\(Self.bundleVersion) · \(L10n.t("settings.about.buildKind"))")
-                .font(.callout)
+            .pickerStyle(.segmented)
+            .disabled(appState.isRecording)
+            Text(L10n.t("settings.engines.latency.note"))
+                .font(.caption)
                 .foregroundStyle(.secondary)
-            Text(L10n.t("settings.about.tagline"))
-                .multilineTextAlignment(.center)
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .lineSpacing(3)
-                .frame(maxWidth: 420)
-                .padding(.top, 2)
-            Spacer()
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.surfaceElevated.opacity(0.35))
+        .onChange(of: raw) { _, _ in Task { await appState.reloadLocalEngine() } }
     }
 }
 
-/// Install/download and warm-up control for a local ASR sidecar.
-///
-/// Both are surfaced here on purpose: a first run downloads ~1 GB of models and
-/// loading them costs ~30s, and neither should first happen when the user hits
-/// record. Once warm, the sidecar stays in memory so recording starts instantly.
+/// Install, load and unload for the local recogniser.
 private struct LocalEngineStatusRow: View {
-    @ObservedObject private var appState = AppState.shared
-    @State private var installStage: String = ""
-    @State private var installError: String = ""
+    @EnvironmentObject var appState: AppState
+    @State private var installStage = ""
+    @State private var installError = ""
     @State private var isInstalling = false
 
-    private var engine: LocalASREngineKind {
-        appState.sttBackend.localEngine ?? .funasr
-    }
-
-    private var isInstalled: Bool {
-        LocalASREnvironment.shared.isReady(engine: engine)
-    }
+    private var isInstalled: Bool { LocalASREnvironment.shared.isReady() }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            statusLine
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                status
+                Spacer()
+                action
+            }
+            .font(.caption)
             if !installError.isEmpty {
                 Text(installError)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Theme.recording)
                     .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            actionButton
+            ModelsLink(ids: appState.sttBackend == .r2t2
+                       ? ["r2t2", "runtime"]
+                       : [LocalModelCatalog.currentNemotron?.id ?? "", "punctuation", "runtime"])
         }
-        .padding(.top, 4)
-        // Re-check when the picker or language changes, since each language
-        // loads a different model set.
-        .onChange(of: appState.sttBackend) { _, _ in installError = "" }
     }
-}
 
-extension LocalEngineStatusRow {
     @ViewBuilder
-    private var statusLine: some View {
+    private var status: some View {
         if isInstalling {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
                 Text(installStage.isEmpty ? L10n.t("localASR.installing") : installStage)
             }
-            .font(.caption)
             .foregroundStyle(.secondary)
         } else if !isInstalled {
-            VStack(alignment: .leading, spacing: 4) {
-                Label(L10n.t("settings.engines.notInstalled"), systemImage: "arrow.down.circle")
-                    .foregroundStyle(.orange)
-                // Name the weights rather than only their total size: "about
-                // 2 GB" says nothing about what is being fetched or from where.
-                Label(L10n.t("settings.engines.modelList"), systemImage: "shippingbox")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .font(.caption)
+            Label(L10n.t("settings.engines.notInstalled"), systemImage: "arrow.down.circle")
+                .foregroundStyle(Theme.warning)
         } else if appState.isLocalEnginePreloading {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
-                Text(appState.localEngineStatus.isEmpty
-                     ? L10n.t("settings.engines.loading") : appState.localEngineStatus)
+                Text(appState.localEngineStatus.isEmpty ? L10n.t("settings.engines.loading")
+                                                        : appState.localEngineStatus)
             }
-            .font(.caption)
             .foregroundStyle(.secondary)
         } else if appState.isLocalEngineReady {
             Label(L10n.t("settings.engines.ready"), systemImage: "checkmark.circle.fill")
-                .font(.caption)
-                .foregroundStyle(.green)
+                .foregroundStyle(Theme.success)
         } else {
             Label(L10n.t("settings.engines.installedNotLoaded"), systemImage: "circle.dashed")
-                .font(.caption)
                 .foregroundStyle(.secondary)
         }
     }
 
     @ViewBuilder
-    private var actionButton: some View {
-        HStack(spacing: 10) {
-            if !isInstalled {
-                Button(L10n.t("settings.engines.installNow")) { install() }
-                    .disabled(isInstalling)
-            } else if !appState.isLocalEngineReady {
-                Button(L10n.t("settings.engines.loadNow")) {
-                    Task { await appState.preloadLocalEngine() }
-                }
-                .disabled(appState.isLocalEnginePreloading)
-            } else {
-                Button(L10n.t("settings.engines.unload")) {
-                    Task {
-                        await LocalASRWarmPool.shared.retire()
-                        appState.isLocalEngineReady = false
-                    }
-                }
-                .disabled(appState.isRecording)
+    private var action: some View {
+        if !isInstalled {
+            Button(L10n.t("settings.engines.installNow"), action: install).disabled(isInstalling)
+        } else if !appState.isLocalEngineReady {
+            Button(L10n.t("settings.engines.loadNow")) {
+                Task { await appState.preloadLocalEngine() }
             }
+            .disabled(appState.isLocalEnginePreloading)
+        } else {
+            Button(L10n.t("settings.engines.unload")) {
+                Task {
+                    // Deferred while a transcription holds it; the flag must
+                    // only drop when the models really went.
+                    if await LocalASRWarmPool.shared.retire() { appState.isLocalEngineReady = false }
+                }
+            }
+            .disabled(appState.isRecording)
         }
     }
 
-    /// Installs the venv and its dependencies, then downloads the models by
-    /// warming the sidecar once -- the same path recording uses, so a success
-    /// here means recording will work.
     private func install() {
         isInstalling = true
         installError = ""
-        let engine = self.engine
         Task {
             do {
-                for try await progress in LocalASREnvironment.shared.install(engine: engine) {
+                for try await progress in LocalASREnvironment.shared.install() {
                     installStage = progress.stage
                 }
                 isInstalling = false
@@ -861,201 +498,262 @@ extension LocalEngineStatusRow {
     }
 }
 
-#if os(macOS)
-/// Download / status control for the local translation model.
-///
-/// The ASR engine already had one of these; translation shipped without it, so
-/// the ~1 GB download only happened implicitly on the first translated sentence
-/// — which looked like the app had hung.
-struct LocalTranslationStatusRow: View {
-    @State private var isPreparing = false
-    @State private var stage = ""
-    @State private var errorText = ""
-    @State private var isReady = LocalMLXTranslatorProcess.isModelDownloaded
-    @State private var hasPartial = LocalMLXTranslatorProcess.hasPartialDownload
+// MARK: - Cloud API
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if isPreparing {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text(stage.isEmpty ? L10n.t("settings.translation.downloading") : stage)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            } else if isReady {
-                Label(L10n.t("settings.translation.ready"), systemImage: "checkmark.circle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.green)
-            } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    Label(L10n.t("settings.translation.notInstalled"), systemImage: "arrow.down.circle")
-                        .foregroundStyle(.orange)
-                    if hasPartial {
-                        Text(L10n.t("settings.translation.partial"))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .font(.caption)
-            }
-
-            if !errorText.isEmpty {
-                Text(errorText)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            if !isReady {
-                Button(L10n.t(hasPartial ? "settings.translation.resume" : "settings.translation.install")) {
-                    prepare()
-                }
-                .disabled(isPreparing)
-            }
-        }
-        .onAppear { refreshInstallState() }
-    }
-
-    /// A `@State` initial value is evaluated once for the view's lifetime, so
-    /// without this the row keeps reporting whatever was true when the Engines
-    /// tab first appeared — including "ready" for a download that has since been
-    /// interrupted.
-    private func refreshInstallState() {
-        isReady = LocalMLXTranslatorProcess.isModelDownloaded
-        hasPartial = LocalMLXTranslatorProcess.hasPartialDownload
-    }
-
-    private func prepare() {
-        isPreparing = true
-        errorText = ""
-        Task {
-            do {
-                try await LocalMLXTranslatorProcess.shared.prewarm { text in
-                    Task { @MainActor in stage = text }
-                }
-                // Trust a successful load over the file probe: a repo layout
-                // change must not make a working model look absent.
-                isReady = true
-                hasPartial = false
-            } catch {
-                errorText = error.localizedDescription
-                refreshInstallState()
-            }
-            isPreparing = false
-        }
-    }
-}
-
-/// The same control for the notes/Q&A model.
-///
-/// A sibling rather than a generic row: the two sidecars share no protocol in
-/// Swift (each is its own actor with its own static probes), and the strings
-/// differ because one download is 1 GB and the other 2.4 GB.
-struct LocalLLMStatusRow: View {
-    @State private var isPreparing = false
-    @State private var stage = ""
-    @State private var errorText = ""
-    @State private var isReady = LocalMLXLLMProcess.isModelDownloaded
-    @State private var hasPartial = LocalMLXLLMProcess.hasPartialDownload
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if isPreparing {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text(stage.isEmpty ? L10n.t("settings.llm.downloading") : stage)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            } else if isReady {
-                Label(L10n.t("settings.llm.ready"), systemImage: "checkmark.circle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.green)
-            } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    Label(L10n.t("settings.llm.notInstalled"), systemImage: "arrow.down.circle")
-                        .foregroundStyle(.orange)
-                    if hasPartial {
-                        Text(L10n.t("settings.llm.partial"))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .font(.caption)
-            }
-
-            if !errorText.isEmpty {
-                Text(errorText)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            if !isReady {
-                Button(L10n.t(hasPartial ? "settings.llm.resume" : "settings.llm.download")) {
-                    prepare()
-                }
-                .disabled(isPreparing)
-            }
-        }
-        .onAppear { refreshInstallState() }
-    }
-
-    private func refreshInstallState() {
-        isReady = LocalMLXLLMProcess.isModelDownloaded
-        hasPartial = LocalMLXLLMProcess.hasPartialDownload
-    }
-
-    private func prepare() {
-        isPreparing = true
-        errorText = ""
-        Task {
-            do {
-                try await LocalMLXLLMProcess.shared.prewarm { text in
-                    Task { @MainActor in stage = text }
-                }
-                isReady = true
-                hasPartial = false
-            } catch {
-                errorText = error.localizedDescription
-                refreshInstallState()
-            }
-            isPreparing = false
-        }
-    }
-}
-#endif
-
-#if os(macOS)
-/// Picks the streaming model's chunk size, which is the latency of the text
-/// behind the voice. Each option is a separate ~650 MB export of the same
-/// model, so changing it downloads once and reloads the engine.
-struct LocalEngineLatencyRow: View {
+struct ApiSettingsView: View {
     @EnvironmentObject var appState: AppState
-    @AppStorage(LocalEngineLatency.storageKey, store: AppEnvironment.defaults) private var raw = LocalEngineLatency.default.rawValue
+    @State private var testStatus = ""
+    @State private var testIsError = false
+    @State private var autosaveTask: Task<Void, Never>?
+    @State private var localNetworkDenied = false
+
+    private var presets: [ApiConfig.ProviderPreset] { ApiConfig.providerPresets }
+
+    private var activePreset: ApiConfig.ProviderPreset? {
+        presets.first { $0.baseUrl == appState.apiConfig.baseUrl }
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Picker(L10n.t("settings.engines.latency"), selection: $raw) {
-                ForEach(LocalEngineLatency.allCases) { option in
-                    Text(option.title).tag(option.rawValue)
-                }
-            }
-            .pickerStyle(.segmented)
-            // Same reason as the engine picker: a new chunk size means a new
-            // model export, which means retiring the process mid-recording.
-            .disabled(appState.isRecording)
-
-            Text(L10n.t("settings.engines.latency.note"))
-                .font(.caption)
+        SettingsPage {
+            Text(L10n.t("settings.api.intro"))
+                .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            SettingsSection(title: L10n.t("settings.api.presets")) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 8)], spacing: 8) {
+                    ForEach(presets) { preset in
+                        let isActive = appState.apiConfig.baseUrl == preset.baseUrl
+                        Button {
+                            updateConfig(immediate: true) { config in
+                                config.baseUrl = preset.baseUrl
+                                // A provider with no transcription endpoint has
+                                // no STT model; writing one only 404s later.
+                                if let stt = preset.sttModel { config.sttModel = stt }
+                                config.translationModel = preset.chatModel
+                                config.llmModel = preset.chatModel
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: isActive ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(isActive ? Theme.accent : .secondary)
+                                Text(preset.label).lineLimit(1)
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.vertical, 7)
+                            .padding(.horizontal, 10)
+                            .background(RoundedRectangle(cornerRadius: Theme.cornerSmall)
+                                .fill(isActive ? Theme.accentSoft : Theme.chrome))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                if let active = activePreset {
+                    if active.sttModel == nil && appState.sttBackend == .openAICompatible {
+                        Label(L10n.t("settings.api.preset.noStt"), systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(Theme.warning)
+                    }
+                    if !active.requiresApiKey {
+                        Label(L10n.t("settings.api.preset.noKeyNeeded"), systemImage: "info.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            SettingsSection(title: L10n.t("settings.api.endpoint"), footer: L10n.t("settings.api.privacy")) {
+                LabeledRow(label: L10n.t("settings.api.baseUrl")) {
+                    TextField("https://api.openai.com/v1", text: binding(\.baseUrl))
+                        .textFieldStyle(.roundedBorder)
+                }
+                LabeledRow(label: L10n.t("settings.api.key")) {
+                    SecureField("sk-…", text: binding(\.apiKey))
+                        .textFieldStyle(.roundedBorder)
+                }
+                if !appState.apiConfig.requiresApiKey {
+                    Text(L10n.t("settings.api.keyOptional")).font(.caption).foregroundStyle(.secondary)
+                }
+                if localNetworkDenied {
+                    HStack {
+                        Label(L10n.t("settings.api.localNetworkDenied"), systemImage: "wifi.exclamationmark")
+                            .foregroundStyle(Theme.warning)
+                        Button(L10n.t("settings.api.openSystemSettings")) { LocalNetworkAccess.openSystemSettings() }
+                    }
+                    .font(.caption)
+                }
+            }
+
+            SettingsSection(title: L10n.t("settings.api.models")) {
+                Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+                    GridRow {
+                        Text(L10n.t("settings.api.stt"))
+                        TextField("whisper-1", text: binding(\.sttModel)).textFieldStyle(.roundedBorder)
+                    }
+                    GridRow {
+                        Text(L10n.t("settings.api.translation"))
+                        TextField("gpt-4o-mini", text: binding(\.translationModel)).textFieldStyle(.roundedBorder)
+                    }
+                    GridRow {
+                        Text(L10n.t("settings.api.llm"))
+                        TextField("gpt-4o-mini", text: binding(\.llmModel)).textFieldStyle(.roundedBorder)
+                    }
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    Task { await testConnection() }
+                } label: {
+                    Label(L10n.t("settings.api.test"), systemImage: "antenna.radiowaves.left.and.right")
+                }
+                .disabled(appState.apiConfig.baseUrl.isEmpty || appState.apiConfig.isCloudCredentialMissing)
+                if !testStatus.isEmpty {
+                    Label(testStatus, systemImage: testIsError ? "xmark.circle.fill" : "checkmark.circle.fill")
+                        .foregroundStyle(testIsError ? Theme.recording : Theme.success)
+                        .font(.callout)
+                        .lineLimit(2)
+                }
+                Spacer()
+            }
         }
-        .onChange(of: raw) { _, _ in
-            // A running sidecar holds the old export, so it has to be replaced.
-            Task { await appState.reloadLocalEngine() }
+        .onDisappear {
+            autosaveTask?.cancel()
+            let config = appState.apiConfig
+            Task { await appState.saveConfig(config) }
+        }
+    }
+
+    private func binding(_ keyPath: WritableKeyPath<ApiConfig, String>) -> Binding<String> {
+        Binding(get: { appState.apiConfig[keyPath: keyPath] },
+                set: { value in updateConfig { $0[keyPath: keyPath] = value } })
+    }
+
+    /// Edits are saved on their own, half a second after the last keystroke.
+    private func updateConfig(immediate: Bool = false, _ update: (inout ApiConfig) -> Void) {
+        var config = appState.apiConfig
+        update(&config)
+        appState.apiConfig = config
+        testStatus = ""
+        autosaveTask?.cancel()
+        let state = appState
+        autosaveTask = Task { [config] in
+            if !immediate {
+                do { try await Task.sleep(nanoseconds: 500_000_000) } catch { return }
+            }
+            guard !Task.isCancelled else { return }
+            await state.saveConfig(config)
+            await probeLocalNetwork(config.baseUrl)
+        }
+    }
+
+    /// A local-network host needs the Local Network permission, which macOS
+    /// only asks for on a first connection; this makes that happen now.
+    private func probeLocalNetwork(_ baseUrl: String) async {
+        guard LocalNetworkAccess.isLocalNetworkHost(baseUrl) else {
+            localNetworkDenied = false
+            return
+        }
+        localNetworkDenied = await LocalNetworkAccess.probe(baseUrlString: baseUrl) == .denied
+    }
+
+    private func testConnection() async {
+        testStatus = L10n.t("settings.api.testing")
+        testIsError = false
+        let client = OpenAICompatibleLLM(config: appState.apiConfig)
+        do {
+            let out = try await client.chatComplete(messages: [
+                .init(role: .system, content: "Reply with exactly: OK"),
+                .init(role: .user, content: "ping"),
+            ], model: appState.apiConfig.llmModel, temperature: 0)
+            testStatus = "\(L10n.t("settings.api.testOk")) — \(out.prefix(40))"
+        } catch {
+            testStatus = "\(L10n.t("settings.api.testFail")): \(error.localizedDescription)"
+            testIsError = true
         }
     }
 }
-#endif
+
+// MARK: - Shortcuts
+
+struct ShortcutsSettingsView: View {
+    var body: some View {
+        SettingsPage {
+            SettingsSection(title: L10n.t("settings.shortcuts.global"), footer: L10n.t("settings.shortcuts.note")) {
+                ShortcutRow(label: L10n.t("settings.shortcuts.toggleRecording"), name: .toggleRecording, icon: "record.circle")
+                ShortcutRow(label: L10n.t("settings.shortcuts.markHighlight"), name: .markHighlight, icon: "star")
+                ShortcutRow(label: L10n.t("settings.shortcuts.toggleTranslation"), name: .toggleTranslation, icon: "character.bubble")
+                ShortcutRow(label: L10n.t("settings.shortcuts.toggleOverlay"), name: .toggleOverlay, icon: "captions.bubble")
+            }
+        }
+    }
+}
+
+private struct ShortcutRow: View {
+    let label: String
+    let name: KeyboardShortcuts.Name
+    let icon: String
+
+    var body: some View {
+        HStack {
+            Label(label, systemImage: icon)
+            Spacer()
+            KeyboardShortcuts.Recorder(for: name)
+        }
+    }
+}
+
+// MARK: - About
+
+struct AboutView: View {
+    static var bundleVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+    }
+
+    var body: some View {
+        SettingsPage {
+            VStack(spacing: 10) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .frame(width: 88, height: 88)
+                Text(L10n.t("app.name")).font(.title.weight(.semibold))
+                Text(verbatim: "v\(Self.bundleVersion)")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text(L10n.t("settings.about.tagline"))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 420)
+            }
+            .frame(maxWidth: .infinity)
+
+            SettingsSection(title: L10n.t("settings.engines.storage")) {
+                PathRow(label: L10n.t("settings.engines.appSupport"), path: AppBootstrap.applicationSupportURL.path)
+                PathRow(label: L10n.t("settings.engines.recordings"), path: AppBootstrap.recordingsURL.path)
+                PathRow(label: L10n.t("settings.engines.database"),
+                        path: AppBootstrap.applicationSupportURL.appendingPathComponent("classnote.sqlite").path)
+                Button {
+                    NSWorkspace.shared.open(AppBootstrap.applicationSupportURL)
+                } label: {
+                    Label(L10n.t("settings.engines.reveal"), systemImage: "folder")
+                }
+            }
+        }
+    }
+}
+
+private struct PathRow: View {
+    let label: String
+    let path: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption.weight(.medium)).foregroundStyle(.secondary)
+            Text(path)
+                .font(.system(.callout, design: .monospaced))
+                .textSelection(.enabled)
+                .lineLimit(2)
+                .truncationMode(.middle)
+        }
+    }
+}

@@ -73,7 +73,6 @@ enum LocalModelCatalog {
             approxBytes: 2_400 * mb,
             locations: [HuggingFaceCache.repoURL(r2t2Repo)],
             usageKey: "models.usage.r2t2"))
-        #if os(macOS)
         models.append(LocalModel(
             id: "hymt2",
             name: "Hy-MT2 1.8B · 4-bit",
@@ -102,7 +101,6 @@ enum LocalModelCatalog {
             approxBytes: 2_400 * mb,
             locations: [HuggingFaceCache.repoURL(LocalMLXLLMProcess.modelRepo)],
             usageKey: "models.usage.qwen3"))
-        #endif
         models.append(LocalModel(
             id: "runtime",
             name: "Python runtime + packages",
@@ -183,24 +181,18 @@ enum LocalModelCatalog {
         case .recognition, .punctuation:
             guard await LocalASRWarmPool.shared.retire() else { throw DeleteError.inUse }
         case .translation:
-            #if os(macOS)
             if model.id == "t3po" {
                 await SimulTranslatorProcess.shared.shutdown()
             } else {
                 await LocalMLXTranslatorProcess.shared.shutdown()
             }
-            #endif
         case .notes:
-            #if os(macOS)
             await LocalMLXLLMProcess.shared.shutdown()
-            #endif
         case .runtime:
             guard await LocalASRWarmPool.shared.retire() else { throw DeleteError.inUse }
-            #if os(macOS)
             await LocalMLXTranslatorProcess.shared.shutdown()
             await SimulTranslatorProcess.shared.shutdown()
             await LocalMLXLLMProcess.shared.shutdown()
-            #endif
         }
     }
 

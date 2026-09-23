@@ -154,7 +154,6 @@ struct EngineFactory {
                 return AppleTranslationEngine()
             }
             return OpenAICompatibleTranslator(config: config)
-        #if os(macOS)
         case .localMLX:
             return LocalMLXTranslator()
         case .t3po:
@@ -163,11 +162,6 @@ struct EngineFactory {
             // sentence translated on its own (a draft line, a language pair
             // T3PO does not cover) gets the local sentence model.
             return LocalMLXTranslator()
-        #else
-        case .localMLX, .t3po:
-            // The sidecar is a Python process, so there is nothing to run on iOS.
-            return OpenAICompatibleTranslator(config: config)
-        #endif
         }
     }
 
@@ -176,14 +170,8 @@ struct EngineFactory {
         switch backend {
         case .openAICompatible:
             return OpenAICompatibleLLM(config: config)
-        #if os(macOS)
         case .localMLX:
             return LocalMLXLLM()
-        #else
-        case .localMLX:
-            // The sidecar is a Python process, so there is nothing to run on iOS.
-            return OpenAICompatibleLLM(config: config)
-        #endif
         }
     }
 }
