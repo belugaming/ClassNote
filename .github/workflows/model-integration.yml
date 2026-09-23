@@ -15,16 +15,28 @@ on:
       - "Tests/Integration/**"
       - ".github/workflows/model-integration.yml"
 
+# Manual only: on a CPU runner these take an hour or more. A push still
+# starts a run, but only to cancel older runs (both group names ever used)
+# so they don't hold the PR; the model jobs skip.
 concurrency:
-  group: model-integration-${{ github.ref }}
-  # Queue rather than cancel: a run downloads GBs and is worth finishing.
-  cancel-in-progress: false
+  group: models-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   PYTHONUNBUFFERED: "1"
 
 jobs:
+  cancel-older:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: model-integration-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - run: echo "Model integration runs are started by hand (workflow_dispatch)."
+
   r2t2:
+    if: github.event_name == 'workflow_dispatch'
     name: Confucius4-R2T2 streaming (CPU)
     runs-on: ubuntu-latest
     # MLX's CPU build is slow (minutes per decode); these runs are about
@@ -61,6 +73,7 @@ jobs:
         run: python Tests/Integration/run_models.py r2t2 /tmp/speech.wav "$(cat /tmp/ref.txt)"
 
   hymt:
+    if: github.event_name == 'workflow_dispatch'
     name: Hy-MT2 prompt templates (CPU)
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -76,6 +89,7 @@ jobs:
         run: python Tests/Integration/run_models.py hymt
 
   simt:
+    if: github.event_name == 'workflow_dispatch'
     name: T3PO plumbing, small stand-in model (CPU)
     runs-on: ubuntu-latest
     timeout-minutes: 60
