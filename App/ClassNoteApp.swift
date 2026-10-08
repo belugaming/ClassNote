@@ -122,7 +122,7 @@ struct ClassNoteApp: App {
             // The label is the one view that exists for the whole life of the
             // app, so it is where window actions are captured for a start
             // from the menu bar or a shortcut with every window closed.
-            MenuBarLabel(isRecording: appState.isRecording)
+            MenuBarLabel(appState: appState)
                 .captureWindowActions()
         }
         .menuBarExtraStyle(.window)
@@ -138,11 +138,14 @@ struct ClassNoteApp: App {
     }
 }
 
+/// Observes `AppState` itself rather than taking a Bool from the scene body, so
+/// the icon follows the recording state instead of waiting for SwiftUI to
+/// re-evaluate the whole scene.
 private struct MenuBarLabel: View {
-    let isRecording: Bool
+    @ObservedObject var appState: AppState
 
     var body: some View {
-        Image(systemName: isRecording ? "record.circle.fill" : "waveform")
+        Image(systemName: appState.isActivelyRecording ? "record.circle.fill" : "waveform")
     }
 }
 
@@ -154,7 +157,7 @@ private struct AppCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button(appState.isRecording ? L10n.t("record.stop") : L10n.t("record.start")) {
+            Button(appState.isActivelyRecording ? L10n.t("record.stop") : L10n.t("record.start")) {
                 RecordingLauncher.toggle(appState)
             }
             .keyboardShortcut("n", modifiers: .command)
@@ -174,7 +177,7 @@ private struct AppCommands: Commands {
         CommandMenu(L10n.t("menu.recording")) {
             Button(L10n.t("live.highlight")) { appState.markHighlight() }
                 .keyboardShortcut("b", modifiers: .command)
-                .disabled(!appState.isRecording)
+                .disabled(!appState.isActivelyRecording)
             Button(L10n.t("menubar.toggleOverlay")) { WindowRouter.shared.toggleOverlay() }
                 .keyboardShortcut("o", modifiers: [.command, .option])
         }

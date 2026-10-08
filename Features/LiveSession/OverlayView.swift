@@ -57,11 +57,12 @@ private struct InnerOverlayView: View {
     private var header: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(appState.isRecording ? Theme.recording : Color.gray)
+                .fill(appState.isActivelyRecording ? Theme.recording : Color.gray)
                 .frame(width: 8, height: 8)
-                .scaleEffect(appState.isRecording ? 1.0 : 0.85)
-                .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: appState.isRecording)
-            Text(appState.isRecording ? L10n.t("live.statusLive") : L10n.t("live.statusIdle"))
+                .scaleEffect(appState.isActivelyRecording ? 1.0 : 0.85)
+                .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: appState.isActivelyRecording)
+            Text(appState.isStoppingRecording ? L10n.t("record.finishing")
+                 : appState.isActivelyRecording ? L10n.t("live.statusLive") : L10n.t("live.statusIdle"))
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.9))
             Spacer()
@@ -109,7 +110,7 @@ private struct InnerOverlayView: View {
             .buttonStyle(.plain)
             .help(alwaysOnTop ? L10n.t("overlay.unpin") : L10n.t("overlay.pin"))
 
-            if !appState.isRecording {
+            if !appState.isActivelyRecording {
                 Button {
                     RecordingLauncher.start(appState)
                 } label: {
@@ -117,6 +118,7 @@ private struct InnerOverlayView: View {
                         .foregroundStyle(Theme.recording)
                 }
                 .buttonStyle(.plain)
+                .disabled(appState.isStartingRecording || appState.isStoppingRecording)
                 .help(L10n.t("record.start"))
             } else {
                 Button {
