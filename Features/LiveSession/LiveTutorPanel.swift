@@ -1,5 +1,4 @@
 import SwiftUI
-import MarkdownView
 
 /// The AI tutor beside the live transcript: explains what the lecturer just
 /// said while the lecture is still going, and answers questions about it.
@@ -247,106 +246,8 @@ private struct LiveTutorCardView: View, Equatable {
             Text(L10n.t("liveTutor.card.thinking"))
                 .font(.callout)
                 .foregroundStyle(.tertiary)
-        } else if card.isStreaming {
-            let parts = LiveTutorStreaming.split(card.markdown)
-            VStack(alignment: .leading, spacing: 8) {
-                if !parts.settled.isEmpty {
-                    TutorMarkdown(markdown: parts.settled)
-                }
-                if !parts.pending.isEmpty {
-                    StreamingMarkdownPreview(markdown: parts.pending)
-                }
-            }
         } else {
-            TutorMarkdown(markdown: card.markdown)
+            RichMarkdownView(markdown: card.markdown, streaming: card.isStreaming)
         }
     }
 }
-
-/// A card's Markdown, rendered by the MarkdownView package: CommonMark with
-/// nested lists, GitHub-style tables and quotes, and LaTeX through SwiftMath.
-/// It parses on the spot, which a card of a few hundred words can afford on
-/// every delta.
-private struct TutorMarkdown: View {
-    let markdown: String
-
-    var body: some View {
-        MarkdownView(markdown)
-            .markdownMathRenderingEnabled()
-            .markdownTableStyle(.github)
-            .markdownBlockQuoteStyle(.github)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-/// A card still being written, split so it can be rendered as it arrives.
-///
-/// Everything is rendered as Markdown the moment it arrives, except a formula
-/// or code block that has not closed yet: that would show as raw `$$` or as a
-/// code block swallowing the rest of the card until it does, so it stays plain
-/// text until its closing fence comes in.
-enum LiveTutorStreaming {
-    static func split(_ markdown: String) -> (settled: String, pending: String) {
-        var settled = markdown
-        var pending = ""
-        for fence in ["```", "$$"] {
-            let fences = settled.components(separatedBy: fence).count - 1
-            guard fences % 2 == 1, let open = settled.range(of: fence, options: .backwards) else { continue }
-            pending = String(settled[open.lowerBound...]) + pending
-            settled = String(settled[..<open.lowerBound])
-        }
-        return (settled, pending)
-    }
-}
-
-#if DEBUG
-/// A tutor card that exercises everything the old renderer got wrong: inline
-/// math next to bold text, a price that is not math, a nested list, a display
-/// formula, a table and a quote.
-private enum LiveTutorPreviewSample {
-    static let markdown = #"""
-    **正在讲**：老师在讲**压缩器（compressor）**怎么控制音量的动态范围，接着上节课的 *EQ*。
-
-    **关键概念**
-    - **Threshold**（阈值）— 音量超过这条线，压缩器才开始工作。
-    - **Ratio**（压缩比）— 超过阈值的部分被压多少，比如 4:1：
-      - 超出 8 dB → 只剩 2 dB
-      - 超出 4 dB → 只剩 1 dB
-    - **Attack / Release**（启动 / 释放时间）— 压缩多快开始、多快松开。
-
-    **帮你理解**：分贝和振幅的关系是 $L = 20\log_{10}(A/A_0)$，所以振幅翻倍约等于多 **6 dB**。插件从 $5 涨到 $10 这种价格不会被当成公式。
-
-    $$
-    L_{out} = T + \frac{L_{in} - T}{R}
-    $$
-
-    | 参数 | 常见取值 | 听感 |
-    |---|---|---|
-    | Ratio | 2:1 – 4:1 | 自然 |
-    | Ratio | 10:1 以上 | 接近限制器 |
-
-    > 老师原话：“Don't over-compress the vocals.”
-    """#
-}
-
-#Preview("Tutor card: new renderer vs old") {
-    ScrollView {
-        HStack(alignment: .top, spacing: 20) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(verbatim: "MarkdownView (tutor cards)").font(.caption).foregroundStyle(.secondary)
-                TutorMarkdown(markdown: LiveTutorPreviewSample.markdown)
-                    .padding(12)
-                    .cardBackground()
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                Text(verbatim: "NotesMarkdownView (notes, unchanged)").font(.caption).foregroundStyle(.secondary)
-                NotesMarkdownView(markdown: LiveTutorPreviewSample.markdown)
-                    .padding(12)
-                    .cardBackground()
-            }
-        }
-        .padding(20)
-    }
-    .frame(width: 820, height: 760)
-}
-#endif

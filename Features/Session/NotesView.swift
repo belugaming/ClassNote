@@ -90,7 +90,7 @@ struct NotesView: View {
     private var content: some View {
         if vm.isShowingNoteStream {
             ScrollView {
-                StreamingMarkdownPreview(markdown: vm.streamingNoteMarkdown)
+                RichMarkdownView(markdown: vm.streamingNoteMarkdown, streaming: true)
                     .textSelection(.enabled)
                     .frame(maxWidth: Theme.readingWidth, alignment: .leading)
                     .padding(24)
@@ -98,7 +98,7 @@ struct NotesView: View {
             }
         } else if let markdown = vm.note?.markdown, !markdown.isEmpty {
             ScrollView {
-                NotesMarkdownView(markdown: markdown)
+                RichMarkdownView(markdown: markdown)
                     .textSelection(.enabled)
                     .frame(maxWidth: Theme.readingWidth, alignment: .leading)
                     .padding(24)

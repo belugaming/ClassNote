@@ -185,34 +185,6 @@ final class LiveTutorTests: XCTestCase {
         }
     }
 
-    // MARK: - Rendering while streaming
-
-    func testTextRendersAsMarkdownTheMomentItArrives() {
-        let text = "**正在讲**: compression.\n- **Ratio** — how m"
-        let parts = LiveTutorStreaming.split(text)
-        XCTAssertEqual(parts.settled, text)
-        XCTAssertEqual(parts.pending, "")
-    }
-
-    func testAnUnclosedFormulaOrCodeBlockWaitsUntilItCloses() {
-        let open = LiveTutorStreaming.split("Intro.\n$$\nL = 20\\log_{10}\nmore")
-        XCTAssertEqual(open.settled, "Intro.\n")
-        XCTAssertEqual(open.pending, "$$\nL = 20\\log_{10}\nmore")
-
-        let closed = LiveTutorStreaming.split("$$x^2$$\nnext")
-        XCTAssertEqual(closed.settled, "$$x^2$$\nnext", "a closed formula renders at once")
-        XCTAssertEqual(closed.pending, "")
-
-        let code = LiveTutorStreaming.split("Try:\n```\nlet x = 1\nlet")
-        XCTAssertEqual(code.settled, "Try:\n")
-        XCTAssertEqual(code.pending, "```\nlet x = 1\nlet")
-
-        for text in ["Intro.\n$$\nL = 20\\log_{10}\nmore", "a $$b$$ c\n```\nx", "plain"] {
-            let parts = LiveTutorStreaming.split(text)
-            XCTAssertEqual(parts.settled + parts.pending, text, "nothing is lost or added")
-        }
-    }
-
     // MARK: - The tutor
 
     @MainActor
@@ -402,5 +374,34 @@ private final class ScriptedLLM: LLMProvider, @unchecked Sendable {
             text += delta
         }
         return text
+    }
+}
+
+/// What a model is still writing: rendered as Markdown as it arrives, except a
+/// display formula that has not closed yet.
+final class MarkdownStreamingSplitTests: XCTestCase {
+    func testTextRendersAsMarkdownTheMomentItArrives() {
+        for text in ["**正在讲**: compression.\n- **Ratio** — how m",
+                     "Try:\n```\nlet x = 1\nlet",
+                     "$x$ and $5, $10"] {
+            let parts = MarkdownStreamingSplit.split(text)
+            XCTAssertEqual(parts.settled, text)
+            XCTAssertEqual(parts.pending, "")
+        }
+    }
+
+    func testAnUnclosedDisplayFormulaWaitsUntilItCloses() {
+        let open = MarkdownStreamingSplit.split("Intro.\n$$\nL = 20\\log_{10}\nmore")
+        XCTAssertEqual(open.settled, "Intro.\n")
+        XCTAssertEqual(open.pending, "$$\nL = 20\\log_{10}\nmore")
+
+        let closed = MarkdownStreamingSplit.split("$$x^2$$\nnext $$y")
+        XCTAssertEqual(closed.settled, "$$x^2$$\nnext ", "a closed formula renders at once")
+        XCTAssertEqual(closed.pending, "$$y")
+
+        for text in ["Intro.\n$$\nL = 20\\log_{10}\nmore", "a $$b$$ c\n$$\nx", "plain"] {
+            let parts = MarkdownStreamingSplit.split(text)
+            XCTAssertEqual(parts.settled + parts.pending, text, "nothing is lost or added")
+        }
     }
 }

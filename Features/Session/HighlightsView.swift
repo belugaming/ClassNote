@@ -187,11 +187,11 @@ private struct HighlightDetail: View {
         if vm.streamingHighlightId == h.id {
             VStack(alignment: .leading, spacing: 8) {
                 ProgressView().controlSize(.small)
-                StreamingMarkdownPreview(markdown: vm.streamingBuffer).textSelection(.enabled)
+                RichMarkdownView(markdown: vm.streamingBuffer, streaming: true).textSelection(.enabled)
             }
         } else if let md = h.explanationMd, !md.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                NotesMarkdownView(markdown: md).textSelection(.enabled)
+                RichMarkdownView(markdown: md).textSelection(.enabled)
                 if let footer = footer(h) {
                     Text(footer).font(.caption2).foregroundStyle(.tertiary)
                 }
