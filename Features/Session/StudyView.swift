@@ -168,7 +168,7 @@ private struct QABubble: View {
             if message.role == .user { Spacer(minLength: 60) }
             VStack(alignment: .leading, spacing: 6) {
                 if message.role == .assistant {
-                    MarkdownView(markdown: message.content).textSelection(.enabled)
+                    NotesMarkdownView(markdown: message.content).textSelection(.enabled)
                 } else {
                     Text(message.content)
                         .textSelection(.enabled)
@@ -384,7 +384,7 @@ struct StudyToolsPane: View {
                                 }
                                 StreamingMarkdownPreview(markdown: markdown).textSelection(.enabled)
                             } else {
-                                MarkdownView(markdown: markdown).textSelection(.enabled)
+                                NotesMarkdownView(markdown: markdown).textSelection(.enabled)
                             }
                         }
                         .frame(maxWidth: Theme.readingWidth, alignment: .leading)

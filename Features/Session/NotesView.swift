@@ -98,7 +98,7 @@ struct NotesView: View {
             }
         } else if let markdown = vm.note?.markdown, !markdown.isEmpty {
             ScrollView {
-                MarkdownView(markdown: markdown)
+                NotesMarkdownView(markdown: markdown)
                     .textSelection(.enabled)
                     .frame(maxWidth: Theme.readingWidth, alignment: .leading)
                     .padding(24)

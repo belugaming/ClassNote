@@ -187,11 +187,11 @@ final class LiveTutorTests: XCTestCase {
 
     // MARK: - Rendering while streaming
 
-    func testFinishedLinesRenderWhileTheLastOneIsStillArriving() {
-        XCTAssertEqual(LiveTutorStreaming.split("**正在讲**: compre").settled, "")
-        let parts = LiveTutorStreaming.split("**正在讲**: compression.\n- **Ratio** — how m")
-        XCTAssertEqual(parts.settled, "**正在讲**: compression.")
-        XCTAssertEqual(parts.pending, "- **Ratio** — how m")
+    func testTextRendersAsMarkdownTheMomentItArrives() {
+        let text = "**正在讲**: compression.\n- **Ratio** — how m"
+        let parts = LiveTutorStreaming.split(text)
+        XCTAssertEqual(parts.settled, text)
+        XCTAssertEqual(parts.pending, "")
     }
 
     func testAnUnclosedFormulaOrCodeBlockWaitsUntilItCloses() {
@@ -200,11 +200,17 @@ final class LiveTutorTests: XCTestCase {
         XCTAssertEqual(open.pending, "$$\nL = 20\\log_{10}\nmore")
 
         let closed = LiveTutorStreaming.split("$$x^2$$\nnext")
-        XCTAssertEqual(closed.settled, "$$x^2$$", "a closed formula renders at once")
+        XCTAssertEqual(closed.settled, "$$x^2$$\nnext", "a closed formula renders at once")
+        XCTAssertEqual(closed.pending, "")
 
         let code = LiveTutorStreaming.split("Try:\n```\nlet x = 1\nlet")
         XCTAssertEqual(code.settled, "Try:\n")
-        XCTAssertTrue(code.pending.hasPrefix("```"))
+        XCTAssertEqual(code.pending, "```\nlet x = 1\nlet")
+
+        for text in ["Intro.\n$$\nL = 20\\log_{10}\nmore", "a $$b$$ c\n```\nx", "plain"] {
+            let parts = LiveTutorStreaming.split(text)
+            XCTAssertEqual(parts.settled + parts.pending, text, "nothing is lost or added")
+        }
     }
 
     // MARK: - The tutor

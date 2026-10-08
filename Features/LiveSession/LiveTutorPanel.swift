@@ -1,4 +1,5 @@
 import SwiftUI
+import MarkdownView
 
 /// The AI tutor beside the live transcript: explains what the lecturer just
 /// said while the lecture is still going, and answers questions about it.
@@ -248,36 +249,50 @@ private struct LiveTutorCardView: View, Equatable {
                 .foregroundStyle(.tertiary)
         } else if card.isStreaming {
             let parts = LiveTutorStreaming.split(card.markdown)
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 8) {
                 if !parts.settled.isEmpty {
-                    MarkdownView(markdown: parts.settled)
+                    TutorMarkdown(markdown: parts.settled)
                 }
                 if !parts.pending.isEmpty {
                     StreamingMarkdownPreview(markdown: parts.pending)
                 }
             }
         } else {
-            MarkdownView(markdown: card.markdown)
+            TutorMarkdown(markdown: card.markdown)
         }
+    }
+}
+
+/// A card's Markdown, rendered by the MarkdownView package: CommonMark with
+/// nested lists, GitHub-style tables and quotes, and LaTeX through SwiftMath.
+/// It parses on the spot, which a card of a few hundred words can afford on
+/// every delta.
+private struct TutorMarkdown: View {
+    let markdown: String
+
+    var body: some View {
+        MarkdownView(markdown)
+            .markdownMathRenderingEnabled()
+            .markdownTableStyle(.github)
+            .markdownBlockQuoteStyle(.github)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
 /// A card still being written, split so it can be rendered as it arrives.
 ///
-/// Every finished line is full Markdown, formatted at once; the line still
-/// being written is shown as plain text, and so is a formula or code block
-/// that has not closed yet, which would otherwise render as garbage until it
-/// does. A card is a few hundred words, so re-rendering it per delta is cheap,
-/// unlike a full set of notes.
+/// Everything is rendered as Markdown the moment it arrives, except a formula
+/// or code block that has not closed yet: that would show as raw `$$` or as a
+/// code block swallowing the rest of the card until it does, so it stays plain
+/// text until its closing fence comes in.
 enum LiveTutorStreaming {
     static func split(_ markdown: String) -> (settled: String, pending: String) {
-        guard let lastNewline = markdown.lastIndex(of: "\n") else { return ("", markdown) }
-        var settled = String(markdown[..<lastNewline])
-        var pending = String(markdown[markdown.index(after: lastNewline)...])
-        for fence in ["$$", "```"] {
+        var settled = markdown
+        var pending = ""
+        for fence in ["```", "$$"] {
             let fences = settled.components(separatedBy: fence).count - 1
             guard fences % 2 == 1, let open = settled.range(of: fence, options: .backwards) else { continue }
-            pending = String(settled[open.lowerBound...]) + "\n" + pending
+            pending = String(settled[open.lowerBound...]) + pending
             settled = String(settled[..<open.lowerBound])
         }
         return (settled, pending)

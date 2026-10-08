@@ -29,6 +29,10 @@ packages:
   LaTeXSwiftUI:
     url: https://github.com/colinc86/LaTeXSwiftUI
     from: 1.5.0
+  # CommonMark/GFM renderer with LaTeX (SwiftMath), for the live tutor cards.
+  MarkdownView:
+    url: https://github.com/LiYanan2004/MarkdownView
+    from: 3.0.0
 
 targets:
   ClassNote:
@@ -89,6 +93,7 @@ targets:
       - package: GRDB
       - package: KeyboardShortcuts
       - package: LaTeXSwiftUI
+      - package: MarkdownView
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.beluga.classnote

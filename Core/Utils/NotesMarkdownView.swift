@@ -8,7 +8,10 @@ import LaTeXSwiftUI
 /// tables, and horizontal rules render as raw `#` / `-` / `|` characters.
 /// This view parses block structure ourselves and emits styled SwiftUI views,
 /// while delegating inline formatting on each line back to AttributedString.
-struct MarkdownView: View {
+///
+/// Not named `MarkdownView`: that is the type of the MarkdownView package the
+/// live tutor renders with, and a type of this module would shadow it.
+struct NotesMarkdownView: View {
     let markdown: String
 
     var body: some View {

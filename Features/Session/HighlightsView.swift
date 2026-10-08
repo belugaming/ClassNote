@@ -191,7 +191,7 @@ private struct HighlightDetail: View {
             }
         } else if let md = h.explanationMd, !md.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                MarkdownView(markdown: md).textSelection(.enabled)
+                NotesMarkdownView(markdown: md).textSelection(.enabled)
                 if let footer = footer(h) {
                     Text(footer).font(.caption2).foregroundStyle(.tertiary)
                 }
