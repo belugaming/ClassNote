@@ -69,6 +69,35 @@ struct ChatMessage: Sendable {
     enum Role: String, Sendable { case system, user, assistant }
     let role: Role
     let content: String
+    /// Marks the end of a prefix that later requests repeat word for word
+    /// (the lecture transcript, see `LecturePrompt`), where Claude puts its
+    /// cache breakpoint. Other engines ignore it.
+    var endsCachedPrefix: Bool = false
+}
+
+extension Array where Element == ChatMessage {
+    /// Back-to-back turns of one role joined into one. Some models' chat
+    /// templates (Mistral's and Gemma's among them) reject two user turns in a
+    /// row, and `LecturePrompt` sends the transcript and the instructions as
+    /// separate turns. The transcript still comes first, so a provider's own
+    /// prefix cache keeps matching.
+    var mergingConsecutiveRoles: [ChatMessage] {
+        reduce(into: [ChatMessage]()) { merged, message in
+            if let last = merged.last, last.role == message.role {
+                merged[merged.count - 1] = ChatMessage(role: last.role,
+                                                       content: last.content + "\n\n" + message.content)
+            } else {
+                merged.append(message)
+            }
+        }
+    }
+}
+
+/// One piece of a streamed reply: answer text, or a readable summary of the
+/// model's reasoning, shown as progress and never kept with the answer.
+enum ChatStreamEvent: Sendable, Equatable {
+    case text(String)
+    case thinking(String)
 }
 
 protocol LLMProvider: Sendable {
@@ -79,6 +108,42 @@ protocol LLMProvider: Sendable {
     func chatComplete(messages: [ChatMessage],
                       model: String,
                       temperature: Double) async throws -> String
+
+    /// `chat` with the model's reasoning summary alongside the text, for the
+    /// engines that expose one. The default carries the text only.
+    func chatEvents(messages: [ChatMessage],
+                    model: String,
+                    temperature: Double) -> AsyncThrowingStream<ChatStreamEvent, Error>
+}
+
+extension LLMProvider {
+    func chatEvents(messages: [ChatMessage],
+                    model: String,
+                    temperature: Double) -> AsyncThrowingStream<ChatStreamEvent, Error> {
+        .relaying(chat(messages: messages, model: model, temperature: temperature)) { .text($0) }
+    }
+}
+
+extension AsyncThrowingStream where Failure == Error, Element: Sendable {
+    /// Re-streams `upstream` through `transform`, dropping the elements it
+    /// maps to nil. Cancelling the result stops the upstream read.
+    static func relaying<Upstream: Sendable>(_ upstream: AsyncThrowingStream<Upstream, Error>,
+                                             _ transform: @escaping @Sendable (Upstream) -> Element?)
+        -> AsyncThrowingStream<Element, Error> {
+        AsyncThrowingStream<Element, Error> { continuation in
+            let task = Task {
+                do {
+                    for try await item in upstream {
+                        if let element = transform(item) { continuation.yield(element) }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
 }
 
 enum EngineError: Error, LocalizedError {
@@ -87,6 +152,8 @@ enum EngineError: Error, LocalizedError {
     case decodingError(String)
     case httpError(status: Int, body: String)
     case unsupported(String)
+    /// The model, or a safety classifier in front of it, declined the request.
+    case refused(category: String?)
 
     var errorDescription: String? {
         switch self {
@@ -95,6 +162,10 @@ enum EngineError: Error, LocalizedError {
         case .decodingError(let m): return Self.localized("engine.error.decodingError", m)
         case .httpError(let s, let b): return Self.localized("engine.error.httpError", "\(s)", String(b.prefix(200)))
         case .unsupported(let m): return Self.localized("engine.error.unsupported", m)
+        case .refused(let category):
+            let message = L10n.t("engine.error.refused")
+            guard let category, !category.isEmpty else { return message }
+            return "\(message) (\(category))"
         }
     }
 
@@ -170,6 +241,8 @@ struct EngineFactory {
         switch backend {
         case .openAICompatible:
             return OpenAICompatibleLLM(config: config)
+        case .anthropic:
+            return AnthropicLLM(config: config)
         case .localMLX:
             return LocalMLXLLM()
         }

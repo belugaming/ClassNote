@@ -308,7 +308,7 @@ struct LocalMLXLLM: LLMProvider {
                 let id = await LocalMLXLLMProcess.shared.register(continuation)
                 handle.id = id
                 await LocalMLXLLMProcess.shared.request(id: id,
-                                                        messages: messages,
+                                                        messages: messages.mergingConsecutiveRoles,
                                                         temperature: temperature,
                                                         maxTokens: LocalMLXLLMProcess.maxTokens)
             }

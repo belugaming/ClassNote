@@ -129,6 +129,10 @@ final class StorageRegressionTests: XCTestCase {
         XCTAssertEqual(decoded.baseUrl, "https://legacy.example.test/v1")
         XCTAssertEqual(decoded.translationBackend, "openai")
         XCTAssertEqual(decoded.llmBackend, "openai")
+        XCTAssertEqual(decoded.anthropicBaseUrl, ApiConfig.defaultAnthropicBaseUrl)
+        XCTAssertEqual(decoded.anthropicApiKey, "")
+        XCTAssertEqual(decoded.anthropicModel, ApiConfig.defaultAnthropicModel)
+        XCTAssertEqual(decoded.anthropicEffort, ApiConfig.defaultAnthropicEffort)
     }
 
     // MARK: - C9: a note belongs to its session, not to its id

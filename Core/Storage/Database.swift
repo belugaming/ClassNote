@@ -312,6 +312,17 @@ final class Database: @unchecked Sendable {
             }
         }
 
+        migrator.registerMigration("v14_anthropic_llm") { db in
+            try db.alter(table: "api_config") { t in
+                // Literals rather than ApiConfig's defaults: a migration must
+                // not change when those do.
+                t.add(column: "anthropic_base_url", .text).notNull().defaults(to: "https://api.anthropic.com")
+                t.add(column: "anthropic_api_key", .text).notNull().defaults(to: "")
+                t.add(column: "anthropic_model", .text).notNull().defaults(to: "claude-opus-5-5")
+                t.add(column: "anthropic_effort", .text).notNull().defaults(to: "medium")
+            }
+        }
+
         return migrator
     }
 }

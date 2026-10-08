@@ -12,7 +12,16 @@ struct ApiConfig: Codable, FetchableRecord, PersistableRecord, Hashable, Sendabl
     var targetLanguage: String
     var sourceLanguage: String
     var translationBackend: String  // "openai" | "apple"
-    var llmBackend: String  // "openai" | "mlx"
+    var llmBackend: String  // "openai" | "mlx" | "anthropic"
+    /// The Anthropic Messages API endpoint, separate from `baseUrl` so notes
+    /// can go to Claude while transcription stays on Whisper or a local engine.
+    var anthropicBaseUrl: String
+    var anthropicApiKey: String
+    var anthropicModel: String
+    /// `output_config.effort`: how much Claude thinks before answering, the
+    /// only thinking control on current models. Empty sends nothing, for a
+    /// model or relay that rejects the field.
+    var anthropicEffort: String
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -26,9 +35,20 @@ struct ApiConfig: Codable, FetchableRecord, PersistableRecord, Hashable, Sendabl
         case sourceLanguage = "source_language"
         case translationBackend = "translation_backend"
         case llmBackend = "llm_backend"
+        case anthropicBaseUrl = "anthropic_base_url"
+        case anthropicApiKey = "anthropic_api_key"
+        case anthropicModel = "anthropic_model"
+        case anthropicEffort = "anthropic_effort"
     }
 
     static let databaseTableName = "api_config"
+
+    static let defaultAnthropicBaseUrl = "https://api.anthropic.com"
+    static let defaultAnthropicModel = "claude-opus-5-5"
+    /// Opus 5.5's own default, sent explicitly: other models default higher,
+    /// so leaving it out would change behaviour with the model name.
+    static let defaultAnthropicEffort = "medium"
+    static let anthropicEffortLevels = ["low", "medium", "high", "xhigh", "max"]
 
     static var `default`: ApiConfig {
         ApiConfig(
@@ -42,7 +62,11 @@ struct ApiConfig: Codable, FetchableRecord, PersistableRecord, Hashable, Sendabl
             targetLanguage: "zh-Hans",
             sourceLanguage: "en",
             translationBackend: "openai",
-            llmBackend: "openai"
+            llmBackend: "openai",
+            anthropicBaseUrl: defaultAnthropicBaseUrl,
+            anthropicApiKey: "",
+            anthropicModel: defaultAnthropicModel,
+            anthropicEffort: defaultAnthropicEffort
         )
     }
 
@@ -72,7 +96,14 @@ extension ApiConfig {
             targetLanguage: try c.decode(String.self, forKey: .targetLanguage),
             sourceLanguage: try c.decode(String.self, forKey: .sourceLanguage),
             translationBackend: try c.decodeIfPresent(String.self, forKey: .translationBackend) ?? "openai",
-            llmBackend: try c.decodeIfPresent(String.self, forKey: .llmBackend) ?? "openai"
+            llmBackend: try c.decodeIfPresent(String.self, forKey: .llmBackend) ?? "openai",
+            anthropicBaseUrl: try c.decodeIfPresent(String.self, forKey: .anthropicBaseUrl)
+                ?? Self.defaultAnthropicBaseUrl,
+            anthropicApiKey: try c.decodeIfPresent(String.self, forKey: .anthropicApiKey) ?? "",
+            anthropicModel: try c.decodeIfPresent(String.self, forKey: .anthropicModel)
+                ?? Self.defaultAnthropicModel,
+            anthropicEffort: try c.decodeIfPresent(String.self, forKey: .anthropicEffort)
+                ?? Self.defaultAnthropicEffort
         )
     }
 }
@@ -140,6 +171,18 @@ extension ApiConfig {
     /// instead of "the key happens to be empty".
     var isCloudCredentialMissing: Bool {
         requiresApiKey && apiKey.isEmpty
+    }
+
+    /// The same test for the Anthropic endpoint. A relay on this machine or the
+    /// LAN may take no key; Anthropic's own API always does.
+    var isAnthropicCredentialMissing: Bool {
+        anthropicApiKey.isEmpty && !LocalNetworkAccess.isLocalNetworkHost(anthropicBaseUrl)
+    }
+
+    /// The model the notes & Q&A engine runs, for the request and for the
+    /// label stored with what it wrote.
+    var activeLLMModel: String {
+        LLMBackend(rawValue: llmBackend) == .anthropic ? anthropicModel : llmModel
     }
 }
 
