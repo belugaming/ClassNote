@@ -186,34 +186,61 @@ struct SessionDetailView: View {
             .fixedSize()
             .disabled(vm.isGeneratingNotes || !hasTranscript)
 
-            SessionMoreMenu(model: moreMenuModel, perform: perform)
-                .equatable()
+            PopUpMenuButton(entries: moreMenuEntries) {
+                if vm.isRetranslating {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "ellipsis.circle")
+                }
+            }
+            .fixedSize()
+            .help(L10n.t("record.more"))
         }
     }
 
-    private var moreMenuModel: SessionMoreMenu.Model {
-        SessionMoreMenu.Model(
-            // Lines still waiting on their translation count as unsettled, so
-            // while recording the number would tick up and down every few seconds.
-            failedTranslationCount: vm.isSessionRecording ? nil : vm.failedTranslationCount,
-            isRetranslating: vm.isRetranslating,
-            isSessionRecording: vm.isSessionRecording,
-            isLive: isLive,
-            hasTranscript: hasTranscript,
-            hasAudio: vm.hasAudio,
-            hasNote: vm.note != nil,
-            hasFlashcards: !vm.flashcards.isEmpty,
-            hasStudyTools: !vm.studyToolResults.isEmpty)
-    }
+    /// The "⋯" menu: translation, re-transcription, export and delete. Read
+    /// when the menu opens, so it shows the state at that moment.
+    private func moreMenuEntries() -> [PopUpMenuEntry] {
+        let busy = vm.isRetranslating || vm.isSessionRecording
+        let failed = vm.failedTranslationCount
+        let retryTitle = "\(L10n.t("session.action.retranslateFailed")) (\(failed))"
 
-    private func perform(_ action: SessionMoreMenu.Action) {
-        switch action {
-        case .retranslateFailed: Task { await vm.retranslate(failedOnly: true) }
-        case .retranslateAll: Task { await vm.retranslate(failedOnly: false) }
-        case .retranscribe: confirmingRetranscribe = true
-        case .export(let kind): vm.runExport(kind)
-        case .delete: confirmingDelete = true
-        }
+        var exports: [PopUpMenuEntry] = []
+        exports.append(.item(L10n.t("session.export.transcriptMd")) { vm.runExport(.transcriptMarkdown) })
+        exports.append(.item(L10n.t("session.export.transcriptTxt")) { vm.runExport(.transcriptPlain) })
+        exports.append(.item(L10n.t("session.export.transcriptSrt")) { vm.runExport(.transcriptSrt) })
+        exports.append(.separator)
+        exports.append(.item(L10n.t("session.export.notes"), enabled: vm.note != nil) {
+            vm.runExport(.notesMarkdown)
+        })
+        exports.append(.item(L10n.t("session.export.flashcards"), enabled: !vm.flashcards.isEmpty) {
+            vm.runExport(.flashcardsMarkdown)
+        })
+        exports.append(.item(L10n.t("session.export.studyTools"), enabled: !vm.studyToolResults.isEmpty) {
+            vm.runExport(.studyToolsMarkdown)
+        })
+        exports.append(.item(L10n.t("session.export.audio"), enabled: vm.hasAudio) { vm.runExport(.audio) })
+        exports.append(.separator)
+        exports.append(.item(L10n.t("session.export.bundle")) { vm.runExport(.bundle) })
+
+        var entries: [PopUpMenuEntry] = []
+        entries.append(.header(L10n.t("session.action.translation")))
+        entries.append(.item(retryTitle, enabled: failed > 0 && !busy) {
+            Task { await vm.retranslate(failedOnly: true) }
+        })
+        entries.append(.item(L10n.t("session.action.retranslateAll"), enabled: hasTranscript && !busy) {
+            Task { await vm.retranslate(failedOnly: false) }
+        })
+        entries.append(.item(L10n.t("session.action.retranscribe"), enabled: vm.hasAudio && !vm.isSessionRecording) {
+            confirmingRetranscribe = true
+        })
+        entries.append(.separator)
+        entries.append(.submenu(L10n.t("session.action.export"), enabled: hasTranscript, exports))
+        entries.append(.separator)
+        entries.append(.item(L10n.t("main.deleteSession"), enabled: !isLive) {
+            confirmingDelete = true
+        })
+        return entries
     }
 
     private var liveBanner: some View {
@@ -232,107 +259,6 @@ struct SessionDetailView: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 8)
         .background(Theme.recording.opacity(0.08))
-    }
-}
-
-// MARK: - More menu
-
-/// The "⋯" menu: translation, re-transcription, export and delete.
-///
-/// Built from plain values and compared by them, so it is left alone while the
-/// rest of the detail re-renders. On macOS an open menu is rebuilt each time its
-/// view is re-evaluated, which closes and reopens the Export submenu under the
-/// pointer, and the detail re-renders every few seconds while recording (new
-/// lines) and ten times a second while playing (the playhead).
-private struct SessionMoreMenu: View, Equatable {
-    enum Action {
-        case retranslateFailed, retranslateAll, retranscribe, delete
-        case export(SessionExporter.Kind)
-    }
-
-    struct Model: Equatable {
-        /// Nil hides the count.
-        var failedTranslationCount: Int?
-        var isRetranslating: Bool
-        var isSessionRecording: Bool
-        var isLive: Bool
-        var hasTranscript: Bool
-        var hasAudio: Bool
-        var hasNote: Bool
-        var hasFlashcards: Bool
-        var hasStudyTools: Bool
-    }
-
-    let model: Model
-    let perform: @MainActor (Action) -> Void
-
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.model == rhs.model }
-
-    var body: some View {
-        Menu {
-            Section(L10n.t("session.action.translation")) {
-                Button {
-                    perform(.retranslateFailed)
-                } label: {
-                    Label(retranslateFailedTitle, systemImage: "exclamationmark.arrow.triangle.2.circlepath")
-                }
-                .disabled((model.failedTranslationCount ?? 0) == 0 || model.isRetranslating || model.isSessionRecording)
-                Button {
-                    perform(.retranslateAll)
-                } label: {
-                    Label(L10n.t("session.action.retranslateAll"), systemImage: "arrow.triangle.2.circlepath")
-                }
-                .disabled(model.isRetranslating || model.isSessionRecording || !model.hasTranscript)
-            }
-            Button {
-                perform(.retranscribe)
-            } label: {
-                Label(L10n.t("session.action.retranscribe"), systemImage: "waveform.badge.magnifyingglass")
-            }
-            .disabled(!model.hasAudio || model.isSessionRecording)
-            Divider()
-            Menu {
-                Button(L10n.t("session.export.transcriptMd")) { perform(.export(.transcriptMarkdown)) }
-                Button(L10n.t("session.export.transcriptTxt")) { perform(.export(.transcriptPlain)) }
-                Button(L10n.t("session.export.transcriptSrt")) { perform(.export(.transcriptSrt)) }
-                Divider()
-                Button(L10n.t("session.export.notes")) { perform(.export(.notesMarkdown)) }
-                    .disabled(!model.hasNote)
-                Button(L10n.t("session.export.flashcards")) { perform(.export(.flashcardsMarkdown)) }
-                    .disabled(!model.hasFlashcards)
-                Button(L10n.t("session.export.studyTools")) { perform(.export(.studyToolsMarkdown)) }
-                    .disabled(!model.hasStudyTools)
-                Button(L10n.t("session.export.audio")) { perform(.export(.audio)) }
-                    .disabled(!model.hasAudio)
-                Divider()
-                Button(L10n.t("session.export.bundle")) { perform(.export(.bundle)) }
-            } label: {
-                Label(L10n.t("session.action.export"), systemImage: "square.and.arrow.up")
-            }
-            .disabled(!model.hasTranscript)
-            Divider()
-            Button(role: .destructive) {
-                perform(.delete)
-            } label: {
-                Label(L10n.t("main.deleteSession"), systemImage: "trash")
-            }
-            .disabled(model.isLive)
-        } label: {
-            if model.isRetranslating {
-                ProgressView().controlSize(.small)
-            } else {
-                Image(systemName: "ellipsis.circle")
-            }
-        }
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help(L10n.t("record.more"))
-    }
-
-    private var retranslateFailedTitle: String {
-        let title = L10n.t("session.action.retranslateFailed")
-        guard let count = model.failedTranslationCount else { return title }
-        return "\(title) (\(count))"
     }
 }
 
