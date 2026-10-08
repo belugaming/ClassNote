@@ -37,6 +37,8 @@ final class SessionDetailViewModel: ObservableObject {
     /// Audio transport. `playheadMs` is written by the ticker, except while the
     /// user drags the scrubber.
     @Published private(set) var hasAudio: Bool = false
+    /// The recording is only in iCloud and is being downloaded to play it.
+    @Published private(set) var isDownloadingAudio = false
     @Published var playheadMs: Int64 = 0
     @Published var playbackDurationMs: Int64 = 0
     @Published var isScrubbing = false
@@ -600,8 +602,15 @@ final class SessionDetailViewModel: ObservableObject {
         if let player { return player }
         guard let path = session?.session.audioPath,
               FileManager.default.fileExists(atPath: path) else { return nil }
+        let url = URL(fileURLWithPath: path)
+        // Opening a recording that is only in iCloud would block the UI for
+        // the whole download.
+        if CloudFile.needsDownload(url) {
+            downloadThenPlay(url)
+            return nil
+        }
         do {
-            let p = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
+            let p = try AVAudioPlayer(contentsOf: url)
             p.prepareToPlay()
             player = p
             playbackDurationMs = Int64(p.duration * 1000)
@@ -609,6 +618,23 @@ final class SessionDetailViewModel: ObservableObject {
         } catch {
             AppState.shared.setError("Playback failed: \(error.localizedDescription)")
             return nil
+        }
+    }
+
+    private func downloadThenPlay(_ url: URL) {
+        guard !isDownloadingAudio else { return }
+        isDownloadingAudio = true
+        let sessionId = currentSessionId
+        Task {
+            do {
+                try await CloudFile.ensureDownloaded(url)
+                isDownloadingAudio = false
+                // Play was what was asked for, unless another session is now on screen.
+                if currentSessionId == sessionId, !isPlaying { togglePlayPause() }
+            } catch {
+                isDownloadingAudio = false
+                AppState.shared.setError(error.localizedDescription)
+            }
         }
     }
 

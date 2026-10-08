@@ -98,6 +98,15 @@ struct MainWindowView: View {
         .onReceive(NotificationCenter.default.publisher(for: .requestImportFile)) { _ in
             importingInto = ImportRequest(courseId: currentCourseId)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .librarySyncDidChange)) { _ in
+            Task {
+                await vm.refresh()
+                // Deleted on another Mac.
+                if let sid = selectedSessionId, !vm.sessions.contains(where: { $0.id == sid }) {
+                    selectedSessionId = nil
+                }
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .requestVoiceMemosImport)) { _ in
             importingVoiceMemosInto = ImportRequest(courseId: currentCourseId)
         }

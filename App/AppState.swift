@@ -73,6 +73,8 @@ final class AppState: ObservableObject {
         await cleanupOrphanedRecordings()
         refreshMicrophoneDevices()
         await refreshInterruptedSessions()
+        // After the orphan sweep, which only ever looks at Application Support.
+        LibrarySyncCoordinator.shared.start()
         // Warm the local engine last, and without awaiting it: loading models
         // takes ~30s and must not delay the rest of startup.
         Task { await preloadLocalEngine() }
@@ -502,6 +504,10 @@ final class AppState: ObservableObject {
                                                                 detail: L10n.t("task.status.cancelled"))
                                     })
         do {
+            if let path = session.audioPath {
+                taskCenter.update(id: taskId, detail: L10n.t("player.downloading"), progress: nil)
+                try await CloudFile.ensureDownloaded(URL(fileURLWithPath: path))
+            }
             _ = try await worker.retranscribeSession(session)
             NotificationCenter.default.post(name: .openLiveSession, object: session.id)
             while worker.isImporting {

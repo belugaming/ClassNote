@@ -61,6 +61,11 @@ struct SessionDetailView: View {
             }
         }
         .onDisappear { vm.stopPlayback() }
+        // Another Mac changed this lecture, or its recording moved into iCloud.
+        .onReceive(NotificationCenter.default.publisher(for: .librarySyncDidChange)) { note in
+            guard let ids = note.userInfo?["sessionIds"] as? Set<String>, ids.contains(sessionId) else { return }
+            Task { await vm.load(sessionId: sessionId) }
+        }
         .confirmationDialog(L10n.t("session.action.retranscribe"),
                             isPresented: $confirmingRetranscribe, titleVisibility: .visible) {
             Button(L10n.t("session.action.retranscribe"), role: .destructive) {
@@ -355,12 +360,20 @@ private struct PlayerBar: View {
             Button {
                 vm.togglePlayPause()
             } label: {
-                Image(systemName: vm.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.title3)
-                    .frame(width: 24)
+                if vm.isDownloadingAudio {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 24)
+                } else {
+                    Image(systemName: vm.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.title3)
+                        .frame(width: 24)
+                }
             }
             .buttonStyle(.borderless)
-            .help(L10n.t(vm.isPlaying ? "session.action.pause" : "session.action.play"))
+            .disabled(vm.isDownloadingAudio)
+            .help(L10n.t(vm.isDownloadingAudio ? "player.downloading"
+                         : vm.isPlaying ? "session.action.pause" : "session.action.play"))
 
             Button {
                 vm.scrub(to: min(vm.playbackDurationMs, vm.playheadMs + 10_000))
