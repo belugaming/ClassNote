@@ -175,6 +175,38 @@ final class LiveTutorTests: XCTestCase {
         XCTAssertTrue(cut.hasPrefix("…\n["), "no line arrives without its timestamp")
     }
 
+    func testTheTutorIsToldItCanUseFormulasAndTables() {
+        let voice = LiveTutorPrompts.Voice(targetLanguage: "zh-Hans")
+        for system in [LiveTutorPrompts.explainSystem(voice: voice, courseBlock: ""),
+                       LiveTutorPrompts.questionSystem(voice: voice, courseBlock: "")] {
+            XCTAssertTrue(system.contains("LaTeX"))
+            XCTAssertTrue(system.contains("$L = 20\\log_{10}(A)$"))
+            XCTAssertTrue(system.contains("table"))
+        }
+    }
+
+    // MARK: - Rendering while streaming
+
+    func testFinishedLinesRenderWhileTheLastOneIsStillArriving() {
+        XCTAssertEqual(LiveTutorStreaming.split("**正在讲**: compre").settled, "")
+        let parts = LiveTutorStreaming.split("**正在讲**: compression.\n- **Ratio** — how m")
+        XCTAssertEqual(parts.settled, "**正在讲**: compression.")
+        XCTAssertEqual(parts.pending, "- **Ratio** — how m")
+    }
+
+    func testAnUnclosedFormulaOrCodeBlockWaitsUntilItCloses() {
+        let open = LiveTutorStreaming.split("Intro.\n$$\nL = 20\\log_{10}\nmore")
+        XCTAssertEqual(open.settled, "Intro.\n")
+        XCTAssertEqual(open.pending, "$$\nL = 20\\log_{10}\nmore")
+
+        let closed = LiveTutorStreaming.split("$$x^2$$\nnext")
+        XCTAssertEqual(closed.settled, "$$x^2$$", "a closed formula renders at once")
+
+        let code = LiveTutorStreaming.split("Try:\n```\nlet x = 1\nlet")
+        XCTAssertEqual(code.settled, "Try:\n")
+        XCTAssertTrue(code.pending.hasPrefix("```"))
+    }
+
     // MARK: - The tutor
 
     @MainActor

@@ -61,6 +61,13 @@ enum LiveTutorPrompts {
     If no course is given, work out the subject from the lecture itself.
     """
 
+    /// What the panel renders: Markdown, including tables and LaTeX.
+    private static let formatting = """
+    Format in Markdown. Write any formula in LaTeX: inline between single dollar \
+    signs, like $L = 20\\log_{10}(A)$, or on its own line between $$ and $$. A small \
+    table is fine when comparing two or three things side by side.
+    """
+
     // MARK: - Explaining the latest stretch
 
     static func explainSystem(voice: Voice, courseBlock: String) -> String {
@@ -90,6 +97,8 @@ enum LiveTutorPrompts {
         - Explain only what the lecturer actually said; do not invent content or jump ahead in the course.
         - If the stretch is only logistics, small talk or a pause, reply with the first line only.
         - Write in \(voice.languageName). Keep English technical terms inline next to their translation.
+
+        \(formatting)
         """
         if !courseBlock.isEmpty {
             system = courseBlock + "\n\n" + system
@@ -150,6 +159,8 @@ enum LiveTutorPrompts {
         answer from general knowledge and say so in one short clause. Plain language; \
         explain any jargon you use. Write in \(voice.languageName). Keep English \
         technical terms inline next to their translation.
+
+        \(formatting)
         """
         if !courseBlock.isEmpty {
             system = courseBlock + "\n\n" + system

@@ -163,7 +163,7 @@ private struct LiveTutorCardView: View, Equatable {
     let onSave: () -> Void
     let onRetry: () -> Void
 
-    static func == (lhs: LiveTutorCardView, rhs: LiveTutorCardView) -> Bool {
+    nonisolated static func == (lhs: LiveTutorCardView, rhs: LiveTutorCardView) -> Bool {
         lhs.card == rhs.card && lhs.canSave == rhs.canSave
     }
 
@@ -247,9 +247,39 @@ private struct LiveTutorCardView: View, Equatable {
                 .font(.callout)
                 .foregroundStyle(.tertiary)
         } else if card.isStreaming {
-            StreamingMarkdownPreview(markdown: card.markdown)
+            let parts = LiveTutorStreaming.split(card.markdown)
+            VStack(alignment: .leading, spacing: 10) {
+                if !parts.settled.isEmpty {
+                    MarkdownView(markdown: parts.settled)
+                }
+                if !parts.pending.isEmpty {
+                    StreamingMarkdownPreview(markdown: parts.pending)
+                }
+            }
         } else {
             MarkdownView(markdown: card.markdown)
         }
+    }
+}
+
+/// A card still being written, split so it can be rendered as it arrives.
+///
+/// Every finished line is full Markdown, formatted at once; the line still
+/// being written is shown as plain text, and so is a formula or code block
+/// that has not closed yet, which would otherwise render as garbage until it
+/// does. A card is a few hundred words, so re-rendering it per delta is cheap,
+/// unlike a full set of notes.
+enum LiveTutorStreaming {
+    static func split(_ markdown: String) -> (settled: String, pending: String) {
+        guard let lastNewline = markdown.lastIndex(of: "\n") else { return ("", markdown) }
+        var settled = String(markdown[..<lastNewline])
+        var pending = String(markdown[markdown.index(after: lastNewline)...])
+        for fence in ["$$", "```"] {
+            let fences = settled.components(separatedBy: fence).count - 1
+            guard fences % 2 == 1, let open = settled.range(of: fence, options: .backwards) else { continue }
+            pending = String(settled[open.lowerBound...]) + "\n" + pending
+            settled = String(settled[..<open.lowerBound])
+        }
+        return (settled, pending)
     }
 }
