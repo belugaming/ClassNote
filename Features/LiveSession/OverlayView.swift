@@ -297,13 +297,13 @@ private struct OverlaySentence: Identifiable {
     let id: Int64
     let original: String
     let translated: String
-    let isOpen: Bool
+    let translationState: LiveTranslationState
 
     init(_ block: SentenceBlock<LiveSegment>) {
         id = block.lines[0].rowId
         original = SentenceGroups.join(block.lines.map(\.original))
         translated = block.lines.last?.translated ?? ""
-        isOpen = block.lines.last?.continuesNext ?? false
+        translationState = block.lines.last?.translationState ?? .notSent
     }
 }
 
@@ -346,7 +346,11 @@ private struct OverlayCaptionSegmentView: View {
 
     private var translationText: String {
         if !segment.translated.isEmpty { return segment.translated }
-        return segment.isOpen ? "…" : L10n.t("overlay.translationPending")
+        switch segment.translationState {
+        case .pending: return L10n.t("overlay.translationPending")
+        case .failed: return L10n.t("session.translation.failed")
+        case .notSent, .done, .merged: return "…"
+        }
     }
 
     private func captionText(_ text: String,

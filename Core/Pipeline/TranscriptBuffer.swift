@@ -60,6 +60,26 @@ final class TranscriptBuffer: ObservableObject {
         segments[idx].translated += delta
     }
 
+    func setTranslationState(_ state: LiveTranslationState, rowIds: [Int64]) {
+        for rowId in rowIds {
+            guard let idx = indexById[rowId], idx < segments.count else { continue }
+            segments[idx].translationState = state
+        }
+    }
+
+    func translationState(rowId: Int64) -> LiveTranslationState {
+        guard let idx = indexById[rowId], idx < segments.count else { return .notSent }
+        return segments[idx].translationState
+    }
+
+    /// Marks every line still waiting on a translator as failed. For when the
+    /// translator is done and nothing more is coming for them.
+    func failPendingTranslations() {
+        for idx in segments.indices where segments[idx].translationState == .pending {
+            segments[idx].translationState = .failed
+        }
+    }
+
     func reset() {
         segments.removeAll()
         indexById.removeAll()
@@ -67,6 +87,22 @@ final class TranscriptBuffer: ObservableObject {
         draftTranslated = ""
     }
 
+}
+
+/// Where a committed line's translation stands. Only a line a translator is
+/// actually working on shows as pending: "no translation text yet" used to be
+/// the only signal, so a line whose translation failed, came back empty, was
+/// covered by a later T3PO translation or was never sent (translation off)
+/// showed as translating forever.
+enum LiveTranslationState: Hashable {
+    /// Not sent: translation was off, or the line's sentence has not ended.
+    case notSent
+    case pending
+    case done
+    case failed
+    /// Translated together with the lines after it (T3PO); the translation
+    /// is on the last of them.
+    case merged
 }
 
 struct LiveSegment: Identifiable, Hashable {
@@ -80,6 +116,7 @@ struct LiveSegment: Identifiable, Hashable {
     /// The line was cut mid-sentence; the sentence's translation arrives on
     /// the line that ends it.
     var continuesNext: Bool = false
+    var translationState: LiveTranslationState = .notSent
 
     init(rowId: Int64, startMs: Int64, endMs: Int64, original: String, translated: String, isFinal: Bool) {
         self.id = rowId

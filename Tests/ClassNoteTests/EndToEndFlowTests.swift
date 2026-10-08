@@ -112,6 +112,68 @@ final class EndToEndFlowTests: XCTestCase {
         XCTAssertEqual(hl.count, 1)
     }
 
+    /// An empty answer from the translator used to be saved as a finished
+    /// translation and shown live as translating forever. It is a failure,
+    /// marked so live and in the database, where "retry failed" finds it.
+    func testEmptyTranslationIsMarkedFailed() async throws {
+        await server.setHandler { requestLine, _ in
+            if requestLine.contains("/audio/transcriptions") {
+                let payload: [String: Any] = [
+                    "text": "Hello everyone. Today we'll cover linear algebra.",
+                    "segments": [
+                        ["id": 0, "start": 0.0, "end": 2.0, "text": "Hello everyone."],
+                        ["id": 1, "start": 2.0, "end": 4.0, "text": "Today we'll cover linear algebra."]
+                    ]
+                ]
+                let data = try! JSONSerialization.data(withJSONObject: payload)
+                return MockHTTPResponse(status: 200,
+                                        headers: ["Content-Type": "application/json"],
+                                        body: String(data: data, encoding: .utf8) ?? "")
+            }
+            // A stream that ends without a single delta.
+            return MockHTTPResponse(status: 200,
+                                    headers: ["Content-Type": "text/event-stream"],
+                                    body: "data: [DONE]\n\n")
+        }
+
+        var cfg = ApiConfig.default
+        cfg.baseUrl = "http://127.0.0.1:\(port)/v1"
+        cfg.apiKey = "test-key"
+        cfg.sttModel = "whisper-1"
+        cfg.translationModel = "test-translate"
+        cfg.llmModel = "test-llm"
+        try await ApiConfigRepository.shared.save(cfg)
+        addTeardownBlock { try? await ApiConfigRepository.shared.save(.default) }
+        await AppState.shared.loadConfig()
+        await MainActor.run { AppState.shared.translationEnabled = true }
+
+        let wavURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: wavURL) }
+        try Self.makeTestWav(to: wavURL, seconds: 4)
+
+        let orch = await AppState.shared.orchestrator
+        let sessionId = try await orch.ingestFile(url: wavURL, courseId: nil)
+        addTeardownBlock { try? await SessionRepository.shared.delete(id: sessionId, force: true) }
+        try await orch.waitForImportToFinish()
+
+        // Translations finish after the import does.
+        var segments: [Segment] = []
+        for _ in 0..<40 {
+            segments = try await SegmentRepository.shared.all(sessionId: sessionId)
+            if !segments.isEmpty && segments.allSatisfy({ $0.translationState == .failed }) { break }
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+        XCTAssertFalse(segments.isEmpty, "No segments landed in DB")
+        XCTAssertEqual(segments.map(\.translationState),
+                       Array(repeating: TranslationState.failed, count: segments.count))
+
+        let live = await MainActor.run { orch.transcript.segments.map(\.translationState) }
+        XCTAssertFalse(live.isEmpty)
+        XCTAssertEqual(live, Array(repeating: LiveTranslationState.failed, count: live.count),
+                       "an empty translation must not leave the live view translating")
+    }
+
     static func makeTestWav(to url: URL, seconds: Int) throws {
         let sampleRate = 16000
         let count = sampleRate * seconds
