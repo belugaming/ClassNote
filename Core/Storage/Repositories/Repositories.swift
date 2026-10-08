@@ -223,6 +223,38 @@ actor SessionRepository {
                                                       referencedSessionIds: referenced.sessionIds)
     }
 
+    /// An imported file is referenced where it lies, so it can be moved or
+    /// renamed behind ClassNote's back. The bookmark taken at import still finds
+    /// it: this follows it, stores the new path and returns the session as it
+    /// now is. A file that went to the Trash counts as gone.
+    func relocatingMovedAudio(_ session: Session) async -> Session {
+        guard let bookmark = session.audioBookmark,
+              let path = session.audioPath,
+              !FileManager.default.fileExists(atPath: path) else { return session }
+        var stale = false
+        guard let url = try? URL(resolvingBookmarkData: bookmark,
+                                 options: [.withoutUI, .withoutMounting],
+                                 relativeTo: nil,
+                                 bookmarkDataIsStale: &stale),
+              FileManager.default.fileExists(atPath: url.path),
+              !url.standardizedFileURL.pathComponents.contains(where: { $0 == ".Trash" || $0 == ".Trashes" })
+        else { return session }
+
+        var moved = session
+        moved.audioPath = url.path
+        if stale, let fresh = try? url.bookmarkData() { moved.audioBookmark = fresh }
+        let relocated = moved
+        do {
+            try await Database.shared.dbPool.write { db in
+                try db.execute(sql: "UPDATE session SET audio_path=?, audio_bookmark=? WHERE id=?",
+                               arguments: [relocated.audioPath, relocated.audioBookmark, relocated.id])
+            }
+        } catch {
+            NSLog("[ClassNote] Failed to store the moved recording's path: \(error)")
+        }
+        return relocated
+    }
+
     func audioPath(id: String) async throws -> String? {
         try await Database.shared.dbPool.read { db in
             try String.fetchOne(db,

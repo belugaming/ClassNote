@@ -323,6 +323,14 @@ final class Database: @unchecked Sendable {
             }
         }
 
+        migrator.registerMigration("v15_session_audio_bookmark") { db in
+            try db.alter(table: "session") { t in
+                // Bookmark of an imported file, which is referenced in place
+                // and so can be moved or renamed; see relocatingMovedAudio.
+                t.add(column: "audio_bookmark", .blob)
+            }
+        }
+
         return migrator
     }
 }

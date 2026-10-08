@@ -166,6 +166,10 @@ private struct AppCommands: Commands {
                 NotificationCenter.default.post(name: .requestImportFile, object: nil)
             }
             .keyboardShortcut("i", modifiers: .command)
+            Button(L10n.t("voiceMemos.menu")) {
+                WindowRouter.shared.openMain()
+                NotificationCenter.default.post(name: .requestVoiceMemosImport, object: nil)
+            }
         }
         CommandMenu(L10n.t("menu.recording")) {
             Button(L10n.t("live.highlight")) { appState.markHighlight() }

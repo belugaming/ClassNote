@@ -24,6 +24,7 @@ struct MainWindowView: View {
     @State private var showingDiagnostics = false
     @State private var showingFirstLaunchGuide = false
     @State private var importingInto: ImportRequest?
+    @State private var importingVoiceMemosInto: ImportRequest?
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @AppStorage("hasCompletedFirstLaunchTutorial.v1", store: AppEnvironment.defaults)
     private var hasCompletedFirstLaunchTutorial = false
@@ -32,7 +33,8 @@ struct MainWindowView: View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             LibrarySidebar(filter: $filter, vm: vm,
                            onRecord: { courseId in RecordingLauncher.start(appState, courseId: courseId) },
-                           onImport: { courseId in importingInto = ImportRequest(courseId: courseId) })
+                           onImport: { courseId in importingInto = ImportRequest(courseId: courseId) },
+                           onImportVoiceMemos: { courseId in importingVoiceMemosInto = ImportRequest(courseId: courseId) })
                 .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 300)
         } content: {
             SessionListView(title: filterTitle,
@@ -95,6 +97,13 @@ struct MainWindowView: View {
             .removeDuplicates()) { _ in Task { await vm.refresh() } }
         .onReceive(NotificationCenter.default.publisher(for: .requestImportFile)) { _ in
             importingInto = ImportRequest(courseId: currentCourseId)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .requestVoiceMemosImport)) { _ in
+            importingVoiceMemosInto = ImportRequest(courseId: currentCourseId)
+        }
+        .sheet(isPresented: Binding(get: { importingVoiceMemosInto != nil },
+                                    set: { if !$0 { importingVoiceMemosInto = nil } })) {
+            voiceMemosSheet
         }
         .fileImporter(isPresented: Binding(get: { importingInto != nil },
                                            set: { if !$0 { importingInto = nil } }),
@@ -193,6 +202,11 @@ struct MainWindowView: View {
                 } label: {
                     Label(L10n.t("toolbar.import"), systemImage: "square.and.arrow.down")
                 }
+                Button {
+                    importingVoiceMemosInto = ImportRequest(courseId: currentCourseId)
+                } label: {
+                    Label(L10n.t("voiceMemos.menu"), systemImage: "waveform")
+                }
                 Divider()
                 Button {
                     showingDiagnostics = true
@@ -213,6 +227,16 @@ struct MainWindowView: View {
                 Label(L10n.t("record.more"), systemImage: "ellipsis.circle")
             }
         }
+    }
+
+    private var voiceMemosSheet: some View {
+        VoiceMemosImportSheet(onImport: { memos in
+            let courseId = importingVoiceMemosInto?.courseId
+            importingVoiceMemosInto = nil
+            Task { await vm.importVoiceMemos(memos, courseId: courseId) }
+        }, onCancel: {
+            importingVoiceMemosInto = nil
+        })
     }
 
     // MARK: - Helpers
@@ -519,6 +543,12 @@ final class MainWindowViewModel: ObservableObject {
 
     func importFiles(urls: [URL], courseId: String?) async {
         await AppState.shared.importFiles(urls: urls, courseId: courseId)
+        await refresh()
+    }
+
+    func importVoiceMemos(_ memos: [VoiceMemo], courseId: String?) async {
+        let items = memos.map { ImportItem(url: $0.url, title: $0.title, recordedAt: $0.recordedAt) }
+        await AppState.shared.importItems(items, courseId: courseId)
         await refresh()
     }
 }

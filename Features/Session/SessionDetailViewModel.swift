@@ -126,7 +126,8 @@ final class SessionDetailViewModel: ObservableObject {
         if currentSessionId != sessionId { stopPlayback() }
         currentSessionId = sessionId
         do {
-            guard let s = try await SessionRepository.shared.get(id: sessionId) else { return }
+            guard let stored = try await SessionRepository.shared.get(id: sessionId) else { return }
+            let s = await SessionRepository.shared.relocatingMovedAudio(stored)
             let segs = try await SegmentRepository.shared.all(sessionId: sessionId)
             self.session = SessionWithSegments(session: s, segments: segs)
             // Stat the recording once per load instead of on every body pass —
