@@ -26,9 +26,11 @@ packages:
   KeyboardShortcuts:
     url: https://github.com/sindresorhus/KeyboardShortcuts
     from: 2.2.0
-  LaTeXSwiftUI:
-    url: https://github.com/colinc86/LaTeXSwiftUI
-    from: 1.5.0
+  # Renders every piece of Markdown in the app: CommonMark/GFM, LaTeX through
+  # SwiftMath. See RichMarkdownView.
+  MarkdownView:
+    url: https://github.com/LiYanan2004/MarkdownView
+    from: 3.0.0
 
 targets:
   ClassNote:
@@ -88,7 +90,7 @@ targets:
     dependencies:
       - package: GRDB
       - package: KeyboardShortcuts
-      - package: LaTeXSwiftUI
+      - package: MarkdownView
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.beluga.classnote

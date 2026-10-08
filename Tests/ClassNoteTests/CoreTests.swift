@@ -315,32 +315,6 @@ final class DatabaseTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: target.appendingPathComponent("mine.txt").path))
     }
 
-    func testStreamingMarkdownPreviewStabilizesPartialMarkdown() {
-        let partial = """
-        - **目标
-        - **
-        | English Term | Chinese Translation | Context/Note |
-        | --- | --- | --- |
-        | AWS | 亚马逊云 |
-        """
-
-        let preview = MarkdownParser.streamingPreviewText(partial)
-        XCTAssertTrue(preview.contains("• 目标"))
-        XCTAssertTrue(preview.contains("English Term  /  Chinese Translation  /  Context/Note"))
-        XCTAssertTrue(preview.contains("AWS  /  亚马逊云"))
-        XCTAssertFalse(preview.contains("**"))
-        XCTAssertFalse(preview.contains("| ---"))
-        XCTAssertFalse(preview.contains("• \n"))
-        XCTAssertFalse(preview.hasSuffix("•"))
-    }
-
-    func testInlineMarkdownRenderingDropsOnlyUnbalancedMarkers() {
-        XCTAssertEqual(MarkdownParser.inlineMarkdownForRendering("**目标"), "目标")
-        XCTAssertEqual(MarkdownParser.inlineMarkdownForRendering("**目标**"), "**目标**")
-        XCTAssertEqual(MarkdownParser.inlineMarkdownForRendering("Use `code"), "Use code")
-        XCTAssertEqual(MarkdownParser.inlineMarkdownForRendering("Use `code`"), "Use `code`")
-    }
-
     func testStudyToolResultPersistence() async throws {
         try Database.shared.setup()
         let session = Session.new(courseId: nil, title: "Study tool source")

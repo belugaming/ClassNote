@@ -15,6 +15,9 @@ final class SessionOrchestrator: ObservableObject {
     @Published private(set) var importErrorMessage: String?
     @Published var source: AudioSourceKind = .microphone
     @Published var transcript = TranscriptBuffer()
+    /// The AI tutor beside the live transcript. Lazy because it reads the
+    /// buffer, which a stored property's initial value cannot.
+    lazy var tutor = LiveTutor(transcript: transcript)
 
     var importProgress: Double? {
         guard isImporting, importTotal > 0 else { return nil }
@@ -142,6 +145,7 @@ final class SessionOrchestrator: ObservableObject {
 
         startTicker()
         startPipeline(config: config, persistSegments: true)
+        tutor.begin(sessionId: sess.id, courseContext: courseContext)
 
         return sess.id
     }
@@ -187,6 +191,7 @@ final class SessionOrchestrator: ObservableObject {
 
         startTicker()
         startPipeline(config: config, persistSegments: false)
+        tutor.begin(sessionId: nil, courseContext: courseContext)
 
         return "ephemeral-translation"
     }
@@ -480,6 +485,8 @@ final class SessionOrchestrator: ObservableObject {
                                                           durationMs: duration,
                                                           audioPath: audioPath)
         }
+        // The last lines are in; nothing more is explained on its own.
+        tutor.end()
         // Release ownership last. Anything above still needs the session id.
         currentSessionId = nil
         currentSession = nil
@@ -688,6 +695,7 @@ final class SessionOrchestrator: ObservableObject {
                                            endMs: event.endMs,
                                            original: polishedText,
                                            continuesNext: event.continuesSentence)
+                    tutor.transcriptDidAdvance()
                     continue
                 }
             } else {
@@ -699,6 +707,7 @@ final class SessionOrchestrator: ObservableObject {
                                    endMs: event.endMs,
                                    original: polishedText,
                                    continuesNext: event.continuesSentence)
+            tutor.transcriptDidAdvance()
             if AppState.shared.translationEnabled {
                 self.enqueueForTranslation(rowId: rowId,
                                            text: polishedText,

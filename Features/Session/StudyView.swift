@@ -168,7 +168,7 @@ private struct QABubble: View {
             if message.role == .user { Spacer(minLength: 60) }
             VStack(alignment: .leading, spacing: 6) {
                 if message.role == .assistant {
-                    MarkdownView(markdown: message.content).textSelection(.enabled)
+                    RichMarkdownView(markdown: message.content).textSelection(.enabled)
                 } else {
                     Text(message.content)
                         .textSelection(.enabled)
@@ -208,7 +208,7 @@ private struct QAStreamingBubble: View {
                 } else if text.isEmpty {
                     ProgressView().controlSize(.small)
                 } else {
-                    StreamingMarkdownPreview(markdown: text).textSelection(.enabled)
+                    RichMarkdownView(markdown: text, streaming: true).textSelection(.enabled)
                 }
             }
             .padding(12)
@@ -385,9 +385,9 @@ struct StudyToolsPane: View {
                                 if !vm.transcriptTruncatedNotice.isEmpty {
                                     LocalContextNotice(text: vm.transcriptTruncatedNotice)
                                 }
-                                StreamingMarkdownPreview(markdown: markdown).textSelection(.enabled)
+                                RichMarkdownView(markdown: markdown, streaming: true).textSelection(.enabled)
                             } else {
-                                MarkdownView(markdown: markdown).textSelection(.enabled)
+                                RichMarkdownView(markdown: markdown).textSelection(.enabled)
                             }
                         }
                         .frame(maxWidth: Theme.readingWidth, alignment: .leading)
