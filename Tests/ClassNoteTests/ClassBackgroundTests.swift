@@ -99,7 +99,8 @@ final class ClassBackgroundTests: XCTestCase {
             s.startedAt = startedAt
             s.briefing = briefing
             try await SessionRepository.shared.insert(s)
-            addTeardownBlock { try? await SessionRepository.shared.delete(id: s.id, force: true) }
+            let id = s.id
+            addTeardownBlock { try? await SessionRepository.shared.delete(id: id, force: true) }
             return s
         }
         _ = try await lesson(piano, at: 1_000, "Pieces I played: Bach")
@@ -123,7 +124,8 @@ final class ClassBackgroundTests: XCTestCase {
         var course = Course.new(name: "Orchestra", instructor: "Dr. Park")
         course.glossary = "tutti = 全奏"
         try await CourseRepository.shared.insert(course)
-        addTeardownBlock { try? await CourseRepository.shared.delete(id: course.id) }
+        let courseId = course.id
+        addTeardownBlock { try? await CourseRepository.shared.delete(id: courseId) }
 
         try await CourseRepository.shared.setFormat(course.id, format: .ensemble)
         var stored = try await CourseRepository.shared.get(id: course.id)
