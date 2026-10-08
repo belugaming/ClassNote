@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// The menu bar panel: start and stop, a glance at what is being said, and the
 /// way back into the app.
@@ -20,6 +21,8 @@ private struct MenuBarPanel: View {
     @ObservedObject var prefs: RecordingPreferences
     @ObservedObject private var router = WindowRouter.shared
     let openSettings: OpenSettingsAction
+    /// Bumped each time the panel comes on screen; see `body`.
+    @State private var timesShown = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -49,6 +52,12 @@ private struct MenuBarPanel: View {
         }
         .padding(14)
         .frame(width: 320)
+        // Rebuilt from the current state every time the panel opens. A change
+        // made while it was closed was not always drawn when it reopened, so
+        // it went on showing a recording the rest of the app had already
+        // stopped.
+        .id(timesShown)
+        .background(WindowShowObserver { timesShown &+= 1 })
     }
 
     private var header: some View {
@@ -184,5 +193,51 @@ private struct MenuRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+    }
+}
+
+/// Calls `onShow` each time the window holding this view comes on screen.
+private struct WindowShowObserver: NSViewRepresentable {
+    let onShow: @MainActor () -> Void
+
+    func makeNSView(context: Context) -> ObserverView {
+        ObserverView(onShow: onShow)
+    }
+
+    func updateNSView(_ nsView: ObserverView, context: Context) {
+        nsView.onShow = onShow
+    }
+
+    final class ObserverView: NSView {
+        var onShow: @MainActor () -> Void
+        private var observers: [NSObjectProtocol] = []
+
+        init(onShow: @escaping @MainActor () -> Void) {
+            self.onShow = onShow
+            super.init(frame: .zero)
+        }
+
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) is not supported")
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            let center = NotificationCenter.default
+            observers.forEach { center.removeObserver($0) }
+            observers.removeAll()
+            guard let window else { return }
+            observers.append(center.addObserver(forName: NSWindow.didChangeOcclusionStateNotification,
+                                                object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.window?.occlusionState.contains(.visible) == true else { return }
+                    self.onShow()
+                }
+            })
+            observers.append(center.addObserver(forName: NSWindow.didBecomeKeyNotification,
+                                                object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.onShow() }
+            })
+        }
     }
 }

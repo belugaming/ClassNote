@@ -198,8 +198,9 @@ struct MainWindowView: View {
             // A toolbar menu's items are built once and not refreshed when the
             // choices change: picking another source or mode was used by the
             // next recording, but the menu kept checking the old one. A new
-            // identity for each set of choices makes SwiftUI build it again.
-            .id("\(prefs.source.rawValue)|\(prefs.intent.rawValue)|\(appState.translationEnabled)")
+            // identity whenever anything it shows changes makes SwiftUI build
+            // it again.
+            .id(recordControlIdentity)
 
             Button {
                 WindowRouter.shared.toggleOverlay()
@@ -254,6 +255,17 @@ struct MainWindowView: View {
     }
 
     // MARK: - Helpers
+
+    /// Everything the toolbar record control shows: the menu's choices and
+    /// the recording state on its button.
+    private var recordControlIdentity: String {
+        [prefs.source.rawValue,
+         prefs.intent.rawValue,
+         "\(appState.translationEnabled)",
+         "\(appState.isActivelyRecording)",
+         "\(appState.isStartingRecording)",
+         "\(appState.isStoppingRecording)"].joined(separator: "|")
+    }
 
     private var currentCourseId: String? {
         if case .course(let id) = filter { return id }
