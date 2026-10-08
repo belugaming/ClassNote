@@ -323,6 +323,18 @@ final class Database: @unchecked Sendable {
             }
         }
 
+        // What kind of class a course is, and what the student says about one
+        // session before the AI writes about it. Both optional free text, so a
+        // course or session that never had them reads as nil.
+        migrator.registerMigration("v15_class_background") { db in
+            try db.alter(table: "course") { t in
+                t.add(column: "format", .text)
+            }
+            try db.alter(table: "session") { t in
+                t.add(column: "briefing", .text)
+            }
+        }
+
         return migrator
     }
 }

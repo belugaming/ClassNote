@@ -34,6 +34,15 @@ actor CourseRepository {
         }
     }
 
+    /// Only the format column, so a session view that sets it cannot write a
+    /// stale copy of the rest of the course over an edit made elsewhere.
+    func setFormat(_ id: String, format: CourseFormat?) async throws {
+        let value: String? = format?.rawValue
+        try await Database.shared.dbPool.write { db in
+            try db.execute(sql: "UPDATE course SET format=? WHERE id=?", arguments: [value, id])
+        }
+    }
+
     /// The course a session is filed under, resolved in one query so prompt
     /// builders do not have to carry the course id around.
     func forSession(id sessionId: String) async throws -> Course? {
@@ -110,6 +119,30 @@ actor SessionRepository {
                 try db.execute(sql: "UPDATE session SET state=? WHERE id=?", arguments: [state, id])
             }
         }.value
+    }
+
+    /// Empty text clears it, so a session never carries a blank briefing that
+    /// would still count as "the student said something".
+    func setBriefing(_ id: String, briefing: String) async throws {
+        let trimmed = briefing.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value: String? = trimmed.isEmpty ? nil : trimmed
+        try await Database.shared.dbPool.write { db in
+            try db.execute(sql: "UPDATE session SET briefing=? WHERE id=?", arguments: [value, id])
+        }
+    }
+
+    /// The briefing of the latest earlier session of the same course that has
+    /// one. Lessons run in a series: last week's pieces are usually this week's.
+    func previousBriefing(courseId: String, before session: Session) async throws -> String? {
+        try await Database.shared.dbPool.read { db in
+            try String.fetchOne(db, sql: """
+                SELECT briefing FROM session
+                WHERE course_id = ? AND id != ? AND started_at <= ?
+                  AND briefing IS NOT NULL AND briefing != ''
+                ORDER BY started_at DESC
+                LIMIT 1
+                """, arguments: [courseId, session.id, session.startedAt])
+        }
     }
 
     func setAudioPath(_ id: String, audioPath: String) async throws {
