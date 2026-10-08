@@ -70,10 +70,27 @@ struct ChatMessage: Sendable {
     let role: Role
     let content: String
     /// Marks the end of a prefix that later requests repeat word for word
-    /// (the lecture transcript, see `LecturePrompt`), so an engine with prompt
-    /// caching can reuse it instead of paying for it again. Engines without
-    /// caching ignore it.
+    /// (the lecture transcript, see `LecturePrompt`), where Claude puts its
+    /// cache breakpoint. Other engines ignore it.
     var endsCachedPrefix: Bool = false
+}
+
+extension Array where Element == ChatMessage {
+    /// Back-to-back turns of one role joined into one. Some models' chat
+    /// templates (Mistral's and Gemma's among them) reject two user turns in a
+    /// row, and `LecturePrompt` sends the transcript and the instructions as
+    /// separate turns. The transcript still comes first, so a provider's own
+    /// prefix cache keeps matching.
+    var mergingConsecutiveRoles: [ChatMessage] {
+        reduce(into: [ChatMessage]()) { merged, message in
+            if let last = merged.last, last.role == message.role {
+                merged[merged.count - 1] = ChatMessage(role: last.role,
+                                                       content: last.content + "\n\n" + message.content)
+            } else {
+                merged.append(message)
+            }
+        }
+    }
 }
 
 /// One piece of a streamed reply: answer text, or a readable summary of the
@@ -97,15 +114,9 @@ protocol LLMProvider: Sendable {
     func chatEvents(messages: [ChatMessage],
                     model: String,
                     temperature: Double) -> AsyncThrowingStream<ChatStreamEvent, Error>
-
-    /// True when the engine caches repeated prompt prefixes, so features lay
-    /// out their prompts to share one (see `LecturePrompt`).
-    var cachesPrompts: Bool { get }
 }
 
 extension LLMProvider {
-    var cachesPrompts: Bool { false }
-
     func chatEvents(messages: [ChatMessage],
                     model: String,
                     temperature: Double) -> AsyncThrowingStream<ChatStreamEvent, Error> {

@@ -203,10 +203,6 @@ final class SessionDetailViewModel: ObservableObject {
         let config = AppState.shared.apiConfig
         let backend = AppState.shared.llmBackend
         let llm = EngineFactory.makeLLM(config: config, backend: backend)
-        let transcriptText = s.segments.map { seg in
-            "[\(formatTimecode(seg.startMs))] \(seg.textOriginal)"
-        }.joined(separator: "\n")
-
         let instructions = """
         You are an academic note-taking assistant for a Chinese student studying in the US.
         \(template.systemPrompt)
@@ -215,9 +211,15 @@ final class SessionDetailViewModel: ObservableObject {
         do {
             let md: String
             if backend == .localMLX {
+                // A 4B model cannot hold a whole lecture, so the local path
+                // goes part by part (no translations, to fit more per part)
+                // and cannot share the opening the other features use.
                 let system = courseContext.promptBlock.isEmpty
                     ? instructions
                     : courseContext.promptBlock + "\n\n" + instructions
+                let transcriptText = s.segments.map { seg in
+                    "[\(formatTimecode(seg.startMs))] \(seg.textOriginal)"
+                }.joined(separator: "\n")
                 md = try await generateNotesInParts(system: system,
                                                     transcript: transcriptText,
                                                     llm: llm,
@@ -226,10 +228,8 @@ final class SessionDetailViewModel: ObservableObject {
             } else {
                 md = try await streamNotePass(
                     messages: LecturePrompt.messages(courseContext: courseContext.promptBlock,
-                                                     instructions: instructions,
-                                                     legacyUser: "Transcript:\n\(transcriptText)",
-                                                     segments: s.segments,
-                                                     sharedCache: llm.cachesPrompts),
+                                                     transcript: StudyTools.transcriptForLLM(s.segments),
+                                                     instructions: instructions),
                     llm: llm,
                     config: config,
                     target: target,
@@ -352,7 +352,7 @@ final class SessionDetailViewModel: ObservableObject {
         }
         let config = AppState.shared.apiConfig
         let llm = EngineFactory.makeLLM(config: config, backend: AppState.shared.llmBackend)
-        let transcriptText = budgetedTranscript(transcriptForLLM(s.segments))
+        let transcriptText = budgetedTranscript(StudyTools.transcriptForLLM(s.segments))
         let createdAt = Int64(Date().timeIntervalSince1970 * 1000)
         let userMessage = QAMessage(id: UUID().uuidString,
                                     sessionId: target,
@@ -375,11 +375,9 @@ final class SessionDetailViewModel: ObservableObject {
                             content: message.content)
             }
             let messages = LecturePrompt.messages(courseContext: courseContext.promptBlock,
+                                                  transcript: transcriptText,
                                                   instructions: instructions,
-                                                  legacyUser: "Lecture transcript:\n\(transcriptText)",
-                                                  segments: s.segments,
-                                                  followUp: history + [.init(role: .user, content: question)],
-                                                  sharedCache: llm.cachesPrompts)
+                                                  followUp: history + [.init(role: .user, content: question)])
             for try await event in llm.chatEvents(messages: messages, model: config.activeLLMModel, temperature: 0.2)
             {
                 guard currentSessionId == target else {
@@ -452,10 +450,8 @@ final class SessionDetailViewModel: ObservableObject {
         Front should be a question or term. Back should be concise Chinese with key English terms preserved.
         """
         let messages = LecturePrompt.messages(courseContext: courseContext.promptBlock,
-                                              instructions: instructions,
-                                              legacyUser: budgetedTranscript(transcriptForLLM(s.segments)),
-                                              segments: s.segments,
-                                              sharedCache: llm.cachesPrompts)
+                                              transcript: budgetedTranscript(StudyTools.transcriptForLLM(s.segments)),
+                                              instructions: instructions)
         do {
             var raw = ""
             for try await delta in llm.chat(messages: messages, model: config.activeLLMModel, temperature: 0.25)
@@ -516,12 +512,9 @@ final class SessionDetailViewModel: ObservableObject {
         }
         let config = AppState.shared.apiConfig
         let llm = EngineFactory.makeLLM(config: config, backend: AppState.shared.llmBackend)
-        let transcript = budgetedTranscript(StudyTools.transcriptForLLM(s.segments))
         let messages = LecturePrompt.messages(courseContext: courseContext.promptBlock,
-                                              instructions: tool.systemPrompt,
-                                              legacyUser: "Lecture transcript:\n\(transcript)",
-                                              segments: s.segments,
-                                              sharedCache: llm.cachesPrompts)
+                                              transcript: budgetedTranscript(StudyTools.transcriptForLLM(s.segments)),
+                                              instructions: tool.systemPrompt)
         do {
             var markdown = ""
             for try await delta in llm.chat(messages: messages, model: config.activeLLMModel, temperature: 0.25)
@@ -840,6 +833,7 @@ final class SessionDetailViewModel: ObservableObject {
         // Captured now: a session switch mid-stream would otherwise explain
         // this range with another course's glossary.
         let coursePrompt = courseContext.promptBlock
+        let transcript = Self.fitToEngine(StudyTools.transcriptForLLM(segments)).text
 
         let task = Task { [weak self] in
             guard let self else { return }
@@ -848,6 +842,7 @@ final class SessionDetailViewModel: ObservableObject {
                     rangeStartMs: range.start,
                     rangeEndMs: range.end,
                     allSegments: segments,
+                    transcript: transcript,
                     preset: preset,
                     config: config,
                     llm: llm,
@@ -992,24 +987,19 @@ final class SessionDetailViewModel: ObservableObject {
         return String(format: "%02d:%02d", m, sec)
     }
 
-    private func transcriptForLLM(_ segments: [Segment]) -> String {
-        segments.map { seg in
-            "[\(formatTimecode(seg.startMs))] \(seg.textOriginal)" +
-            (seg.textTranslated.isEmpty ? "" : "\n译文: \(seg.textTranslated)")
-        }.joined(separator: "\n")
-    }
-
     /// Transcript for a one-shot prompt. The cloud path is untouched; the local
     /// sidecar gets a head-and-tail shortening and the UI says so, because a
     /// silently halved lecture reads as a bad model rather than a full context.
     private func budgetedTranscript(_ text: String) -> String {
-        guard AppState.shared.llmBackend == .localMLX else {
-            transcriptTruncatedNotice = ""
-            return text
-        }
-        let result = TranscriptChunker.truncate(text: text, maxChars: Self.localPromptChars)
+        let result = Self.fitToEngine(text)
         transcriptTruncatedNotice = result.wasTruncated ? L10n.t("notes.local.truncated") : ""
         return result.text
+    }
+
+    /// The shortening alone, for a caller with no notice to show.
+    private static func fitToEngine(_ text: String) -> (text: String, wasTruncated: Bool) {
+        guard AppState.shared.llmBackend == .localMLX else { return (text, false) }
+        return TranscriptChunker.truncate(text: text, maxChars: localPromptChars)
     }
 }
 

@@ -11,8 +11,6 @@ final class AnthropicLLM: LLMProvider, Sendable {
         self.config = config
     }
 
-    var cachesPrompts: Bool { true }
-
     /// `temperature` is not sent: current Claude models reject sampling
     /// parameters with a 400, and the callers' 0.2–0.3 is only a nudge.
     func chat(messages: [ChatMessage],

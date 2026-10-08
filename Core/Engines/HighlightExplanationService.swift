@@ -6,30 +6,21 @@ actor HighlightExplanationService {
     ///   including the local sidecar, which has no API key to be missing.
     /// - Parameter courseContext: the course's own facts (glossary, instructor,
     ///   notes), already rendered as a prompt block, or empty.
+    /// - Parameter transcript: the whole lecture as every feature's prompt
+    ///   opens with it (see `LecturePrompt`), fitted to the engine.
     func generate(rangeStartMs: Int64,
                   rangeEndMs: Int64,
                   allSegments: [Segment],
+                  transcript: String,
                   preset: PromptPreset,
                   config: ApiConfig,
                   llm: LLMProvider,
                   courseContext: String = "") -> AsyncThrowingStream<ChatStreamEvent, Error> {
-        let fullTranscript = Self.renderSegments(allSegments)
         let rangeSegments = allSegments.filter { seg in
             seg.startMs <= rangeEndMs && seg.endMs >= rangeStartMs
         }
-        let rangeText = Self.renderSegments(rangeSegments)
-
-        let userContent = """
-        Full transcript (for context only):
-        \(fullTranscript)
-
-        The range the student marked (explain THIS):
-        ===
-        \(rangeText)
-        ===
-        """
-        // In the shared layout the full transcript is already the cached
-        // opening, so only the range follows, in the same rendering.
+        // The whole transcript is the opening every feature shares, so only
+        // the range follows, in the same rendering.
         let range = """
         The range the student marked (explain THIS):
         ===
@@ -37,27 +28,10 @@ actor HighlightExplanationService {
         ===
         """
         let messages = LecturePrompt.messages(courseContext: courseContext,
+                                              transcript: transcript,
                                               instructions: HighlightPrompts.systemPrefix + "\n\n" + preset.systemBody,
-                                              legacyUser: userContent,
-                                              segments: allSegments,
-                                              task: range,
-                                              sharedCache: llm.cachesPrompts)
+                                              task: range)
         return llm.chatEvents(messages: messages, model: config.activeLLMModel, temperature: 0.3)
-    }
-
-    private static func renderSegments(_ segments: [Segment]) -> String {
-        segments.map { seg in
-            "[\(formatTs(seg.startMs))] \(seg.textOriginal)"
-        }.joined(separator: "\n")
-    }
-
-    private static func formatTs(_ ms: Int64) -> String {
-        let s = Int(ms / 1000)
-        let h = s / 3600
-        let m = (s % 3600) / 60
-        let sec = s % 60
-        if h > 0 { return String(format: "%d:%02d:%02d", h, m, sec) }
-        return String(format: "%02d:%02d", m, sec)
     }
 }
 
