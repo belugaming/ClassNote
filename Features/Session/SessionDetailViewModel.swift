@@ -5,7 +5,9 @@ import AppKit
 
 @MainActor
 final class SessionDetailViewModel: ObservableObject {
-    @Published var session: SessionWithSegments?
+    @Published var session: SessionWithSegments? {
+        didSet { updatePlayingSegment() }
+    }
     @Published var note: Note?
     @Published var noteVersions: [NoteVersion] = []
     @Published var highlights: [Highlight] = []
@@ -15,7 +17,9 @@ final class SessionDetailViewModel: ObservableObject {
     /// one (Claude), shown until the first words of the answer arrive.
     @Published var streamingNoteThinking: String = ""
     @Published var isRetranslating: Bool = false
-    @Published var isPlaying: Bool = false
+    @Published var isPlaying: Bool = false {
+        didSet { updatePlayingSegment() }
+    }
     @Published var isAnsweringQuestion: Bool = false
     @Published var qaMessages: [QAMessage] = []
     @Published var streamingQAResponse: String = ""
@@ -39,7 +43,17 @@ final class SessionDetailViewModel: ObservableObject {
     @Published private(set) var hasAudio: Bool = false
     /// The recording is only in iCloud and is being downloaded to play it.
     @Published private(set) var isDownloadingAudio = false
-    @Published var playheadMs: Int64 = 0
+    /// The playhead lives in its own object: it moves ten times a second
+    /// during playback, and as a property of this one it redrew every view of
+    /// the session on each tick, the notes or answer being scrolled included.
+    let clock = PlaybackClock()
+    var playheadMs: Int64 {
+        get { clock.playheadMs }
+        set {
+            clock.playheadMs = newValue
+            updatePlayingSegment()
+        }
+    }
     @Published var playbackDurationMs: Int64 = 0
     @Published var isScrubbing = false
 
@@ -116,10 +130,16 @@ final class SessionDetailViewModel: ObservableObject {
         (session?.segments ?? []).filter { !$0.translationState.isSettled && !$0.textOriginal.isEmpty }.count
     }
 
-    /// Segment under the playhead, for the transcript highlight.
-    var playingSegmentId: Int64? {
-        guard isPlaying || playheadMs > 0, let segs = session?.segments else { return nil }
-        return segs.last(where: { $0.startMs <= playheadMs })?.id
+    /// Segment under the playhead, for the transcript highlight. Published
+    /// only when the playhead crosses into another line.
+    @Published private(set) var playingSegmentId: Int64?
+
+    private func updatePlayingSegment() {
+        var id: Int64?
+        if isPlaying || playheadMs > 0, let segs = session?.segments {
+            id = segs.last(where: { $0.startMs <= playheadMs })?.id
+        }
+        if id != playingSegmentId { playingSegmentId = id }
     }
 
     func load(sessionId: String) async {
@@ -1104,4 +1124,9 @@ final class SessionDetailViewModel: ObservableObject {
 struct SessionWithSegments {
     let session: Session
     let segments: [Segment]
+}
+
+/// Where playback is. Only the views that show the playhead observe it.
+final class PlaybackClock: ObservableObject {
+    @Published var playheadMs: Int64 = 0
 }

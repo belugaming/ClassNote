@@ -71,6 +71,7 @@ struct QAPane: View {
     @FocusState private var focused: Bool
 
     var body: some View {
+        let rows = QARow.rows(for: vm.qaMessages)
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
                 ScrollView {
@@ -80,15 +81,16 @@ struct QAPane: View {
                                        message: L10n.t("qa.empty.desc"))
                             .frame(minHeight: 280)
                     } else {
-                        LazyVStack(spacing: 14) {
-                            ForEach(vm.qaMessages) { message in
-                                QABubble(message: message) {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(rows) { row in
+                                QARowView(row: row) { message in
                                     Task { await vm.deleteQAMessage(message) }
                                 }
-                                .id(message.id)
+                                .equatable()
+                                .id(row.id)
                             }
                             if vm.isAnsweringQuestion {
-                                QAStreamingBubble(text: vm.streamingQAResponse, thinking: vm.streamingQAThinking)
+                                QAStreamingAnswer(text: vm.streamingQAResponse, thinking: vm.streamingQAThinking)
                                     .id("streaming")
                             }
                         }
@@ -97,8 +99,8 @@ struct QAPane: View {
                         .frame(maxWidth: .infinity)
                     }
                 }
-                .onChange(of: vm.qaMessages.count) { _, _ in scrollToBottom(proxy) }
-                .onChange(of: vm.streamingQAResponse) { _, _ in scrollToBottom(proxy) }
+                .onChange(of: vm.qaMessages.count) { _, _ in scrollToBottom(proxy, lastRowId: rows.last?.id) }
+                .onChange(of: vm.streamingQAResponse) { _, _ in scrollToBottom(proxy, lastRowId: rows.last?.id) }
             }
             if !vm.transcriptTruncatedNotice.isEmpty && vm.isAnsweringQuestion {
                 LocalContextNotice(text: vm.transcriptTruncatedNotice).padding(.bottom, 4)
@@ -120,6 +122,13 @@ struct QAPane: View {
                 .disabled(question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || vm.isAnsweringQuestion)
                 .help(L10n.t("qa.ask"))
                 Menu {
+                    Button {
+                        Clipboard.copy(SessionExporter.qaMarkdown(vm.qaMessages))
+                    } label: {
+                        Label(L10n.t("qa.copyConversation"), systemImage: "doc.on.doc")
+                    }
+                    .disabled(vm.qaMessages.isEmpty)
+                    Divider()
                     Button(L10n.t("qa.clearHistory"), role: .destructive) { confirmingClear = true }
                         .disabled(vm.qaMessages.isEmpty || vm.isAnsweringQuestion)
                 } label: {
@@ -147,74 +156,151 @@ struct QAPane: View {
         Task { await vm.askQuestion(q) }
     }
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+    private func scrollToBottom(_ proxy: ScrollViewProxy, lastRowId: String?) {
         Task { @MainActor in
             if vm.isAnsweringQuestion {
                 proxy.scrollTo("streaming", anchor: .bottom)
-            } else if let last = vm.qaMessages.last {
-                proxy.scrollTo(last.id, anchor: .bottom)
+            } else if let lastRowId {
+                proxy.scrollTo(lastRowId, anchor: .bottom)
             }
         }
     }
 }
 
-private struct QABubble: View {
+/// One row of the Q&A list: a question, one top-level block of an answer, or
+/// the actions under an answer.
+///
+/// An answer is split into its blocks, each its own row of the lazy list, so
+/// only the blocks near the screen are laid out. As a single MarkdownView, a
+/// long answer (a lecture summary with tables and formulas) was laid out whole
+/// and dragged along in full on every scroll.
+struct QARow: Identifiable, Equatable {
+    enum Kind: Equatable {
+        case question(QAMessage)
+        case answerBlock(String)
+        case answerActions(QAMessage)
+    }
+
+    let id: String
+    let kind: Kind
+
+    static func rows(for messages: [QAMessage]) -> [QARow] {
+        var rows: [QARow] = []
+        for message in messages {
+            switch message.role {
+            case .user:
+                rows.append(QARow(id: message.id, kind: .question(message)))
+            case .assistant:
+                for (index, block) in MarkdownBlocks.split(message.content).enumerated() {
+                    rows.append(QARow(id: "\(message.id)#\(index)", kind: .answerBlock(block)))
+                }
+                rows.append(QARow(id: "\(message.id)#actions", kind: .answerActions(message)))
+            }
+        }
+        return rows
+    }
+}
+
+/// Equatable on the row alone, so the rows on screen are not rebuilt each
+/// time something else in the session changes.
+private struct QARowView: View, Equatable {
+    let row: QARow
+    let delete: (QAMessage) -> Void
+
+    nonisolated static func == (lhs: QARowView, rhs: QARowView) -> Bool {
+        lhs.row == rhs.row
+    }
+
+    var body: some View {
+        switch row.kind {
+        case .question(let message):
+            QAQuestionBubble(message: message) { delete(message) }
+                .padding(.bottom, 16)
+        case .answerBlock(let markdown):
+            RichMarkdownView(markdown: markdown)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 12)
+        case .answerActions(let message):
+            QAAnswerActions(message: message) { delete(message) }
+                .padding(.bottom, 28)
+        }
+    }
+}
+
+private struct QAQuestionBubble: View {
     let message: QAMessage
     let delete: () -> Void
     @State private var hovering = false
 
     var body: some View {
         HStack(alignment: .top) {
-            if message.role == .user { Spacer(minLength: 60) }
-            VStack(alignment: .leading, spacing: 6) {
-                if message.role == .assistant {
-                    RichMarkdownView(markdown: message.content).textSelection(.enabled)
-                } else {
-                    Text(message.content)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .padding(12)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
-                    .fill(message.role == .user ? Theme.accentSoft : Theme.surface)
-            )
-            .overlay(alignment: .topTrailing) {
-                if hovering {
-                    Button(action: delete) {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+            Spacer(minLength: 60)
+            Text(message.content)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(12)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
+                        .fill(Theme.accentSoft)
+                )
+                .overlay(alignment: .topTrailing) {
+                    if hovering {
+                        Button(action: delete) {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help(L10n.t("qa.deleteMessage"))
+                        .offset(x: 6, y: -6)
                     }
-                    .buttonStyle(.plain)
-                    .help(L10n.t("qa.deleteMessage"))
-                    .offset(x: 6, y: -6)
                 }
-            }
-            if message.role == .assistant { Spacer(minLength: 60) }
+                .contextMenu {
+                    Button(L10n.t("common.copy")) { Clipboard.copy(message.content) }
+                    Button(L10n.t("qa.deleteMessage"), role: .destructive, action: delete)
+                }
         }
         .onHover { hovering = $0 }
     }
 }
 
-private struct QAStreamingBubble: View {
+/// Under every answer: copy the whole answer in one click, or delete it.
+private struct QAAnswerActions: View {
+    let message: QAMessage
+    let delete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            CopyButton(title: L10n.t("qa.copyAnswer")) { message.content }
+            Button(action: delete) {
+                Image(systemName: "trash")
+            }
+            .help(L10n.t("qa.deleteMessage"))
+            Spacer()
+        }
+        .buttonStyle(.borderless)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+}
+
+/// The answer still being written, in the same place and style the finished
+/// answer will take.
+private struct QAStreamingAnswer: View {
     let text: String
     let thinking: String
 
     var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 6) {
-                if text.isEmpty && !thinking.isEmpty {
-                    ThinkingPreview(text: thinking)
-                } else if text.isEmpty {
-                    ProgressView().controlSize(.small)
-                } else {
-                    RichMarkdownView(markdown: text, streaming: true).textSelection(.enabled)
-                }
+        Group {
+            if text.isEmpty && !thinking.isEmpty {
+                ThinkingPreview(text: thinking)
+            } else if text.isEmpty {
+                ProgressView().controlSize(.small)
+            } else {
+                RichMarkdownView(markdown: text, streaming: true).textSelection(.enabled)
             }
-            .padding(12)
-            .background(RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous).fill(Theme.surface))
-            Spacer(minLength: 60)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.bottom, 12)
     }
 }
 
@@ -364,6 +450,9 @@ struct StudyToolsPane: View {
                         Label(L10n.t(tool.labelKey), systemImage: tool.icon).font(.headline)
                     }
                     Spacer()
+                    CopyButton(title: L10n.t("studyTools.copy")) { vm.selectedStudyToolMarkdown ?? "" }
+                        .disabled((vm.selectedStudyToolMarkdown ?? "").isEmpty
+                                  || vm.streamingStudyToolId == vm.selectedStudyToolId)
                     Button {
                         Task { await vm.generateSelectedStudyTool() }
                     } label: {

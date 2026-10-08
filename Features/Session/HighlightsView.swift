@@ -164,6 +164,9 @@ private struct HighlightDetail: View {
                     .tint(h.explanationPrompt == preset.key ? Theme.accent : nil)
                 }
                 Spacer()
+                if let md = h.explanationMd, !md.isEmpty {
+                    CopyButton(title: L10n.t("highlight.action.copy")) { md }
+                }
                 if h.explanationPrompt != nil {
                     Button {
                         Task { await vm.regenerate(h) }
@@ -195,7 +198,7 @@ private struct HighlightDetail: View {
             }
         } else if let md = h.explanationMd, !md.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                RichMarkdownView(markdown: md).textSelection(.enabled)
+                RichMarkdownDocument(markdown: md).textSelection(.enabled)
                 if let footer = footer(h) {
                     Text(footer).font(.caption2).foregroundStyle(.tertiary)
                 }

@@ -442,3 +442,29 @@ final class MarkdownBlocksTests: XCTestCase {
         XCTAssertEqual(MarkdownBlocks.split("\n\nOnly.\n\n"), ["Only."])
     }
 }
+
+final class QARowTests: XCTestCase {
+    private func message(_ id: String, _ role: QAMessage.Role, _ content: String) -> QAMessage {
+        QAMessage(id: id, sessionId: "s", role: role, content: content, model: nil, createdAt: 0)
+    }
+
+    func testAnAnswerBecomesOneRowPerBlockThenItsActions() {
+        let question = message("q", .user, "压缩器是什么？")
+        let answer = message("a", .assistant, "## 压缩器\n\n控制动态范围。\n\n| 参数 | 取值 |\n|---|---|\n| Ratio | 4:1 |")
+        let rows = QARow.rows(for: [question, answer])
+
+        XCTAssertEqual(rows.map(\.kind), [
+            .question(question),
+            .answerBlock("## 压缩器"),
+            .answerBlock("控制动态范围。"),
+            .answerBlock("| 参数 | 取值 |\n|---|---|\n| Ratio | 4:1 |"),
+            .answerActions(answer),
+        ])
+        XCTAssertEqual(Set(rows.map(\.id)).count, rows.count, "row ids must be unique for the lazy list")
+    }
+
+    func testTheSameAnswerTextInTwoMessagesKeepsDistinctRows() {
+        let rows = QARow.rows(for: [message("a1", .assistant, "Same."), message("a2", .assistant, "Same.")])
+        XCTAssertEqual(rows.map(\.id), ["a1#0", "a1#actions", "a2#0", "a2#actions"])
+    }
+}

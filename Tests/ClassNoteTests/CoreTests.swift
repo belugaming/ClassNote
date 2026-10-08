@@ -299,6 +299,43 @@ final class DatabaseTests: XCTestCase {
         XCTAssertTrue(srt.contains("2\n00:00:03,000"))
     }
 
+    func testTranscriptCopiesAsOneParagraphPerSentence() {
+        func line(_ id: Int64, _ text: String, _ translated: String, continues: Bool = false) -> Segment {
+            Segment(id: id, sessionId: "s", startMs: id * 1000, endMs: id * 1000 + 900,
+                    speakerId: nil, textOriginal: text, textTranslated: translated, isFinal: true,
+                    confidence: 0, version: 1, continuesNext: continues)
+        }
+        let segments = [line(1, "First part of it,", "", continues: true),
+                        line(2, "and the rest.", "第一部分和其余部分。"),
+                        line(3, "Next.", ""),
+                        line(4, "   ", "")]
+
+        XCTAssertEqual(SessionExporter.transcriptText(segments, includeTranslation: true),
+                       "[00:01] First part of it, and the rest.\n第一部分和其余部分。\n\n[00:03] Next.")
+        XCTAssertEqual(SessionExporter.transcriptText(segments, includeTranslation: false),
+                       "[00:01] First part of it, and the rest.\n\n[00:03] Next.")
+        XCTAssertEqual(SessionExporter.transcriptText([], includeTranslation: true), "")
+    }
+
+    func testQuestionsAndAnswersCopyInOrderWithARuleBetweenPairs() {
+        func message(_ role: QAMessage.Role, _ content: String) -> QAMessage {
+            QAMessage(id: UUID().uuidString, sessionId: "s", role: role, content: content,
+                      model: nil, createdAt: 0)
+        }
+        let markdown = SessionExporter.qaMarkdown([
+            message(.user, "What is a knee?"),
+            message(.assistant, "Where compression **starts**.\n\n| Knee | Feel |\n|---|---|\n| Soft | Gentle |\n"),
+            message(.user, "  And attack?  "),
+            message(.assistant, ""),
+        ])
+        let q = { (text: String) in String(format: L10n.t("qa.copy.question"), text) }
+        XCTAssertEqual(markdown, [q("What is a knee?"),
+                                  "Where compression **starts**.\n\n| Knee | Feel |\n|---|---|\n| Soft | Gentle |",
+                                  "---",
+                                  q("And attack?")].joined(separator: "\n\n"))
+        XCTAssertEqual(SessionExporter.qaMarkdown([]), "")
+    }
+
     func testBundleExportNeverReplacesAnExistingFolder() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

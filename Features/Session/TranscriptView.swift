@@ -41,6 +41,10 @@ struct TranscriptView: View {
                     .foregroundStyle(Theme.warning)
                     .font(.caption)
             }
+            CopyButton(title: L10n.t("transcript.copyAll")) {
+                SessionExporter.transcriptText(vm.session?.segments ?? [], includeTranslation: showTranslation)
+            }
+            .disabled(vm.session?.segments.isEmpty ?? true)
             ControlGroup {
                 Button {
                     fontSize = max(12, fontSize - 1)
@@ -66,6 +70,8 @@ struct TranscriptView: View {
     private func transcript(_ segments: [Segment]) -> some View {
         let blocks = segments.sentenceBlocks
         let highlightStarts = Set(vm.highlights.map(\.timestampMs))
+        let playingId = vm.playingSegmentId
+        let flashId = vm.flashSegmentId
         return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -73,13 +79,14 @@ struct TranscriptView: View {
                         SentenceBlockView(block: block,
                                           fontSize: fontSize,
                                           showTranslation: showTranslation,
-                                          playingId: vm.playingSegmentId,
-                                          flashId: vm.flashSegmentId,
+                                          playingId: lineId(playingId, in: block),
+                                          flashId: lineId(flashId, in: block),
                                           hasHighlight: containsHighlight(block, highlightStarts),
                                           retrying: block.lines.contains { vm.retryingSegmentIds.contains($0.rowKey) },
                                           canSeek: vm.hasAudio && !vm.isSessionRecording,
                                           onSeek: { vm.seek(to: $0.startMs) },
                                           onRetry: { line in Task { await vm.retryTranslation(for: line) } })
+                        .equatable()
                         .id(block.lines[0].rowKey)
                     }
                 }
@@ -98,6 +105,13 @@ struct TranscriptView: View {
                 }
             }
         }
+    }
+
+    /// `id` if that line is in `block`, so a row only sees the playhead while
+    /// it is on one of its own lines and the others are left alone as it moves.
+    private func lineId(_ id: Int64?, in block: SentenceBlock<Segment>) -> Int64? {
+        guard let id, block.lines.contains(where: { $0.rowKey == id }) else { return nil }
+        return id
     }
 
     private func containsHighlight(_ block: SentenceBlock<Segment>, _ starts: Set<Int64>) -> Bool {
@@ -121,8 +135,9 @@ struct TranscriptView: View {
     }
 }
 
-/// One sentence of a saved transcript.
-struct SentenceBlockView: View {
+/// One sentence of a saved transcript. Equatable on what it shows, not on its
+/// actions, so the rows on screen are not all redrawn when one of them changes.
+struct SentenceBlockView: View, Equatable {
     let block: SentenceBlock<Segment>
     var fontSize: Double = 16
     var showTranslation = true
@@ -135,6 +150,17 @@ struct SentenceBlockView: View {
     var onRetry: (Segment) -> Void = { _ in }
 
     @State private var hovering = false
+
+    nonisolated static func == (lhs: SentenceBlockView, rhs: SentenceBlockView) -> Bool {
+        lhs.block.lines == rhs.block.lines
+            && lhs.fontSize == rhs.fontSize
+            && lhs.showTranslation == rhs.showTranslation
+            && lhs.playingId == rhs.playingId
+            && lhs.flashId == rhs.flashId
+            && lhs.hasHighlight == rhs.hasHighlight
+            && lhs.retrying == rhs.retrying
+            && lhs.canSeek == rhs.canSeek
+    }
 
     private var last: Segment { block.lines[block.lines.count - 1] }
 
