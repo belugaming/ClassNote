@@ -579,10 +579,11 @@ final class AppState: ObservableObject {
     /// is not stored. Not simply `apiKey.isEmpty`: a fully local setup needs no
     /// key at all, and some presets are keyless.
     var isMissingCloudCredential: Bool {
-        apiConfig.isCloudCredentialMissing
+        (apiConfig.isCloudCredentialMissing
             && (sttBackend == .openAICompatible
                 || translationBackend == .openAICompatible
-                || llmBackend == .openAICompatible)
+                || llmBackend == .openAICompatible))
+            || (llmBackend == .anthropic && apiConfig.isAnthropicCredentialMissing)
     }
 
     /// The same question for the record button: only the engines a recording
@@ -698,11 +699,14 @@ enum SttBackend: String, CaseIterable, Identifiable {
 /// the other way round on a machine with memory to spare.
 enum LLMBackend: String, CaseIterable, Identifiable {
     case openAICompatible = "openai"
+    /// Claude through the Anthropic Messages API, with its own endpoint and key.
+    case anthropic = "anthropic"
     case localMLX = "mlx"
     var id: String { rawValue }
     var displayName: String {
         switch self {
         case .openAICompatible: return L10n.t("settings.engines.llmBackend.openai")
+        case .anthropic: return L10n.t("settings.engines.llmBackend.anthropic")
         case .localMLX: return L10n.t("settings.engines.llmBackend.mlx")
         }
     }

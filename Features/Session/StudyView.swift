@@ -88,7 +88,7 @@ struct QAPane: View {
                                 .id(message.id)
                             }
                             if vm.isAnsweringQuestion {
-                                QAStreamingBubble(text: vm.streamingQAResponse)
+                                QAStreamingBubble(text: vm.streamingQAResponse, thinking: vm.streamingQAThinking)
                                     .id("streaming")
                             }
                         }
@@ -198,11 +198,14 @@ private struct QABubble: View {
 
 private struct QAStreamingBubble: View {
     let text: String
+    let thinking: String
 
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 6) {
-                if text.isEmpty {
+                if text.isEmpty && !thinking.isEmpty {
+                    ThinkingPreview(text: thinking)
+                } else if text.isEmpty {
                     ProgressView().controlSize(.small)
                 } else {
                     RichMarkdownView(markdown: text, streaming: true).textSelection(.enabled)

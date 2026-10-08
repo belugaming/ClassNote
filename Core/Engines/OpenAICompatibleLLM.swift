@@ -52,7 +52,9 @@ enum OpenAIChatClient {
 
                     let payload: [String: Any] = [
                         "model": model,
-                        "messages": messages.map { ["role": $0.role.rawValue, "content": $0.content] },
+                        "messages": messages.mergingConsecutiveRoles.map {
+                            ["role": $0.role.rawValue, "content": $0.content]
+                        },
                         "temperature": temperature,
                         "stream": true
                     ]

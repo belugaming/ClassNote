@@ -210,11 +210,15 @@ final class LiveTutor: ObservableObject {
     /// Whether a card can be kept as a highlight of the session.
     var canSave: Bool { sessionId != nil }
 
-    /// Notes engine is the cloud one and has no key: every request would fail.
+    /// The notes engine needs a key that is not stored: every request would fail.
     var isMissingCredential: Bool {
-        llmOverride == nil
-            && AppState.shared.llmBackend == .openAICompatible
-            && AppState.shared.apiConfig.isCloudCredentialMissing
+        guard llmOverride == nil else { return false }
+        let config = AppState.shared.apiConfig
+        switch AppState.shared.llmBackend {
+        case .openAICompatible: return config.isCloudCredentialMissing
+        case .anthropic: return config.isAnthropicCredentialMissing
+        case .localMLX: return false
+        }
     }
 
     var usesLocalModel: Bool { AppState.shared.llmBackend == .localMLX }
@@ -328,13 +332,13 @@ final class LiveTutor: ObservableObject {
         let llm = llmOverride ?? EngineFactory.makeLLM(config: config, backend: backend)
         let model = backend == .localMLX
             ? (LocalMLXLLMProcess.modelRepo.split(separator: "/").last.map(String.init) ?? "local")
-            : config.llmModel
+            : config.activeLLMModel
         update(cardId) { $0.model = model }
         tasks[cardId]?.cancel()
         tasks[cardId] = Task { @MainActor [weak self] in
             var text = ""
             do {
-                for try await delta in llm.chat(messages: messages, model: config.llmModel, temperature: 0.3) {
+                for try await delta in llm.chat(messages: messages, model: config.activeLLMModel, temperature: 0.3) {
                     text += delta
                     self?.update(cardId) { $0.markdown = text }
                 }
