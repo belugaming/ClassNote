@@ -12,6 +12,7 @@ struct SessionDetailView: View {
     @StateObject private var vm = SessionDetailViewModel()
     @State private var tab: DetailTab = .transcript
     @State private var confirmingRetranscribe = false
+    @State private var showingBriefing = false
     @State private var confirmingDelete = false
 
     enum DetailTab: String, CaseIterable, Identifiable {
@@ -35,7 +36,7 @@ struct SessionDetailView: View {
             Group {
                 switch tab {
                 case .transcript: TranscriptView(vm: vm)
-                case .notes: NotesView(vm: vm)
+                case .notes: NotesView(vm: vm, onEditBriefing: { showingBriefing = true })
                 case .study: StudyView(vm: vm)
                 case .highlights: HighlightsView(vm: vm)
                 }
@@ -61,6 +62,14 @@ struct SessionDetailView: View {
             }
         }
         .onDisappear { vm.stopPlayback() }
+        .sheet(isPresented: $showingBriefing) {
+            SessionBriefingSheet(vm: vm,
+                                 onGenerate: { template in
+                                     tab = .notes
+                                     Task { await vm.generateNotes(template: template) }
+                                 },
+                                 onCourseChanged: onChanged)
+        }
         .confirmationDialog(L10n.t("session.action.retranscribe"),
                             isPresented: $confirmingRetranscribe, titleVisibility: .visible) {
             Button(L10n.t("session.action.retranscribe"), role: .destructive) {
@@ -167,6 +176,12 @@ struct SessionDetailView: View {
     private var actions: some View {
         HStack(spacing: 8) {
             Menu {
+                Button {
+                    showingBriefing = true
+                } label: {
+                    Label(L10n.t("briefing.menuItem"), systemImage: "person.text.rectangle")
+                }
+                Divider()
                 ForEach(NoteTemplates.all) { template in
                     Button(L10n.t(template.labelKey)) {
                         tab = .notes
@@ -179,7 +194,7 @@ struct SessionDetailView: View {
                       systemImage: "sparkles")
             } primaryAction: {
                 tab = .notes
-                Task { await vm.generateNotes() }
+                Task { await vm.generateNotes(template: vm.recommendedTemplate) }
             }
             .menuStyle(.button)
             .buttonStyle(.borderedProminent)

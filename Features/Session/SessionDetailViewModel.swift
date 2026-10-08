@@ -145,7 +145,7 @@ final class SessionDetailViewModel: ObservableObject {
             } else {
                 self.course = nil
             }
-            self.courseContext = CourseContext(course: self.course)
+            self.courseContext = CourseContext(course: self.course, session: s)
             self.note = try await NoteRepository.shared.get(sessionId: sessionId)
             self.noteVersions = try await NoteRepository.shared.versions(sessionId: sessionId)
             self.highlights = try await HighlightRepository.shared.all(sessionId: sessionId)
@@ -155,6 +155,77 @@ final class SessionDetailViewModel: ObservableObject {
         } catch {
             NSLog("SessionDetail load error: \(error)")
         }
+    }
+
+    // MARK: - Class background
+
+    /// What the student said about this session; see `Session.briefing`.
+    var briefing: String { session?.session.briefing ?? "" }
+
+    /// The note template that suits this course's kind of class.
+    var recommendedTemplate: NoteTemplate {
+        NoteTemplates.find(course?.formatValue?.recommendedTemplateId ?? "study")
+    }
+
+    func saveBriefing(_ text: String) async {
+        guard let current = session else { return }
+        let sid = current.session.id
+        do {
+            try await SessionRepository.shared.setBriefing(sid, briefing: text)
+            guard currentSessionId == sid, let latest = session, latest.session.id == sid else { return }
+            var updated = latest.session
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            updated.briefing = trimmed.isEmpty ? nil : trimmed
+            session = SessionWithSegments(session: updated, segments: latest.segments)
+            courseContext = CourseContext(course: course, session: updated)
+        } catch {
+            AppState.shared.setError(error.localizedDescription)
+        }
+    }
+
+    /// Sets the course's kind of class, which every session of it shares.
+    func setCourseFormat(_ format: CourseFormat?) async {
+        guard var updated = course else { return }
+        do {
+            try await CourseRepository.shared.setFormat(updated.id, format: format)
+            guard course?.id == updated.id else { return }
+            updated.format = format?.rawValue
+            course = updated
+            courseContext = CourseContext(course: updated, session: session?.session)
+        } catch {
+            AppState.shared.setError(error.localizedDescription)
+        }
+    }
+
+    /// The background of the last earlier session of this course, if it had one.
+    func previousBriefing() async -> String? {
+        guard let s = session?.session, let courseId = s.courseId else { return nil }
+        return try? await SessionRepository.shared.previousBriefing(courseId: courseId, before: s)
+    }
+
+    /// A first draft of the session background, read off the transcript, for
+    /// the student to correct rather than write from scratch.
+    func briefingDraft(format: CourseFormat?) -> AsyncThrowingStream<String, Error> {
+        guard let s = session, !s.segments.isEmpty else {
+            return AsyncThrowingStream { $0.finish() }
+        }
+        let config = AppState.shared.apiConfig
+        let backend = AppState.shared.llmBackend
+        let llm = EngineFactory.makeLLM(config: config, backend: backend)
+        var transcript = StudyTools.transcriptForLLM(s.segments)
+        if backend == .localMLX {
+            transcript = TranscriptChunker.truncate(text: transcript, maxChars: Self.localPromptChars).text
+        }
+        // The course as it stands, minus the background being drafted.
+        var context = courseContext
+        context.format = format
+        context.sessionBriefing = ""
+        let starters = (format?.briefingStarterKeys ?? CourseFormat.generalStarterKeys).map(L10n.t)
+        let messages = LecturePrompt.messages(
+            courseContext: context.promptBlock,
+            transcript: transcript,
+            instructions: BriefingPrompt.draftInstructions(labels: starters, chinese: L10n.isChinese))
+        return llm.chat(messages: messages, model: config.activeLLMModel, temperature: 0.2)
     }
 
     func previewNoteVersion(_ version: NoteVersion) {

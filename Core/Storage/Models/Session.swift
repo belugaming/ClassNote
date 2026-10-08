@@ -31,9 +31,13 @@ struct Session: Codable, FetchableRecord, PersistableRecord, Identifiable, Hasha
     var sttModel: String?
     var llmModel: String?
     var durationMs: Int64
+    /// What the student says about this session before the AI writes about it:
+    /// the pieces they played, the chapter, what the teacher stressed. Goes into
+    /// every prompt over this session's transcript.
+    var briefing: String? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, title, state
+        case id, title, state, briefing
         case courseId = "course_id"
         case startedAt = "started_at"
         case endedAt = "ended_at"

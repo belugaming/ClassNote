@@ -9,21 +9,28 @@ struct CourseContext: Sendable, Equatable {
     var instructor = ""
     var glossary = ""
     var notes = ""
+    var format: CourseFormat?
+    /// What the student said about this one session (`Session.briefing`).
+    var sessionBriefing = ""
 
     static let empty = CourseContext()
 
     var isEmpty: Bool {
         courseName.isEmpty && instructor.isEmpty && glossary.isEmpty && notes.isEmpty
+            && format == nil && sessionBriefing.isEmpty
     }
 
     init() {}
 
-    init(course: Course?) {
-        guard let course else { return }
-        courseName = course.name
-        instructor = course.instructor ?? ""
-        glossary = course.glossary ?? ""
-        notes = course.notes ?? ""
+    init(course: Course?, session: Session? = nil) {
+        if let course {
+            courseName = course.name
+            instructor = course.instructor ?? ""
+            glossary = course.glossary ?? ""
+            notes = course.notes ?? ""
+            format = course.formatValue
+        }
+        sessionBriefing = (session?.briefing ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Block for a notes / QA / study-tool / highlight system prompt.
@@ -31,8 +38,13 @@ struct CourseContext: Sendable, Equatable {
         guard !isEmpty else { return "" }
         var lines = ["Course context (authoritative — prefer it over your own guesses):"]
         if !courseName.isEmpty { lines.append("- Course: \(courseName)") }
+        if let format { lines.append("- Kind of class: \(format.promptDescription)") }
         if !instructor.isEmpty { lines.append("- Instructor: \(instructor)") }
-        if !notes.isEmpty { lines.append("- Notes from the student: \(notes)") }
+        if !notes.isEmpty { lines.append("- About the course and the student, in the student's words: \(notes)") }
+        if !sessionBriefing.isEmpty {
+            lines.append("- About this session, in the student's words (trust it over the transcript where "
+                         + "speech recognition misheard a name, title or term):\n\(sessionBriefing)")
+        }
         if !glossary.isEmpty { lines.append("- Glossary (use these renderings verbatim):\n\(glossary)") }
         return lines.joined(separator: "\n")
     }
