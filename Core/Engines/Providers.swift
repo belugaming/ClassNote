@@ -70,8 +70,9 @@ struct ChatMessage: Sendable {
     let role: Role
     let content: String
     /// Marks the end of a prefix that later requests repeat word for word
-    /// (the transcript in Q&A), so an engine with prompt caching can reuse it
-    /// instead of paying for it again. Engines without caching ignore it.
+    /// (the lecture transcript, see `LecturePrompt`), so an engine with prompt
+    /// caching can reuse it instead of paying for it again. Engines without
+    /// caching ignore it.
     var endsCachedPrefix: Bool = false
 }
 
@@ -96,9 +97,15 @@ protocol LLMProvider: Sendable {
     func chatEvents(messages: [ChatMessage],
                     model: String,
                     temperature: Double) -> AsyncThrowingStream<ChatStreamEvent, Error>
+
+    /// True when the engine caches repeated prompt prefixes, so features lay
+    /// out their prompts to share one (see `LecturePrompt`).
+    var cachesPrompts: Bool { get }
 }
 
 extension LLMProvider {
+    var cachesPrompts: Bool { false }
+
     func chatEvents(messages: [ChatMessage],
                     model: String,
                     temperature: Double) -> AsyncThrowingStream<ChatStreamEvent, Error> {

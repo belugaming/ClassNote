@@ -207,29 +207,33 @@ final class SessionDetailViewModel: ObservableObject {
             "[\(formatTimecode(seg.startMs))] \(seg.textOriginal)"
         }.joined(separator: "\n")
 
-        var system = """
+        let instructions = """
         You are an academic note-taking assistant for a Chinese student studying in the US.
         \(template.systemPrompt)
         Do NOT paraphrase the transcript word-for-word. Do synthesize and organize.
         """
-        if !courseContext.promptBlock.isEmpty {
-            system = courseContext.promptBlock + "\n\n" + system
-        }
         do {
             let md: String
             if backend == .localMLX {
+                let system = courseContext.promptBlock.isEmpty
+                    ? instructions
+                    : courseContext.promptBlock + "\n\n" + instructions
                 md = try await generateNotesInParts(system: system,
                                                     transcript: transcriptText,
                                                     llm: llm,
                                                     config: config,
                                                     target: target)
             } else {
-                md = try await streamNotePass(system: system,
-                                              user: "Transcript:\n\(transcriptText)",
-                                              llm: llm,
-                                              config: config,
-                                              target: target,
-                                              header: "")
+                md = try await streamNotePass(
+                    messages: LecturePrompt.messages(courseContext: courseContext.promptBlock,
+                                                     instructions: instructions,
+                                                     legacyUser: "Transcript:\n\(transcriptText)",
+                                                     segments: s.segments,
+                                                     sharedCache: llm.cachesPrompts),
+                    llm: llm,
+                    config: config,
+                    target: target,
+                    header: "")
             }
             let noteEntity = Note(id: existingNoteId ?? UUID().uuidString,
                                    sessionId: target,
@@ -263,8 +267,10 @@ final class SessionDetailViewModel: ObservableObject {
                                       target: String) async throws -> String {
         let chunks = TranscriptChunker.split(text: transcript, maxChars: Self.localChunkChars)
         guard chunks.count > 1 else {
-            return try await streamNotePass(system: system,
-                                            user: "Transcript:\n\(chunks.first ?? transcript)",
+            return try await streamNotePass(messages: [
+                                                .init(role: .system, content: system),
+                                                .init(role: .user, content: "Transcript:\n\(chunks.first ?? transcript)"),
+                                            ],
                                             llm: llm,
                                             config: config,
                                             target: target,
@@ -275,8 +281,10 @@ final class SessionDetailViewModel: ObservableObject {
             let header = String(format: L10n.t("notes.local.chunkProgress"),
                                 "\(index + 1)", "\(chunks.count)")
             let part = try await streamNotePass(
-                system: system,
-                user: "Transcript (part \(index + 1) of \(chunks.count)):\n\(chunk)",
+                messages: [
+                    .init(role: .system, content: system),
+                    .init(role: .user, content: "Transcript (part \(index + 1) of \(chunks.count)):\n\(chunk)"),
+                ],
                 llm: llm,
                 config: config,
                 target: target,
@@ -294,8 +302,10 @@ final class SessionDetailViewModel: ObservableObject {
         let merged = partials.enumerated()
             .map { "## Part \($0.offset + 1)\n\($0.element)" }
             .joined(separator: "\n\n")
-        return try await streamNotePass(system: mergeSystem,
-                                        user: merged,
+        return try await streamNotePass(messages: [
+                                            .init(role: .system, content: mergeSystem),
+                                            .init(role: .user, content: merged),
+                                        ],
                                         llm: llm,
                                         config: config,
                                         target: target,
@@ -305,17 +315,13 @@ final class SessionDetailViewModel: ObservableObject {
     /// One streaming pass, mirrored into `streamingNoteMarkdown` under `header`
     /// so a multi-pass local run still looks alive. Publishes only while the
     /// session it belongs to is the one on screen.
-    private func streamNotePass(system: String,
-                                user: String,
+    private func streamNotePass(messages: [ChatMessage],
                                 llm: LLMProvider,
                                 config: ApiConfig,
                                 target: String,
                                 header: String) async throws -> String {
         var md = ""
-        for try await event in llm.chatEvents(messages: [
-            .init(role: .system, content: system),
-            .init(role: .user, content: user)
-        ], model: config.activeLLMModel, temperature: 0.3)
+        for try await event in llm.chatEvents(messages: messages, model: config.activeLLMModel, temperature: 0.3)
         {
             guard currentSessionId == target else {
                 if case .text(let delta) = event { md += delta }
@@ -356,28 +362,24 @@ final class SessionDetailViewModel: ObservableObject {
                                     createdAt: createdAt)
         let recentHistory = qaMessages.suffix(10)
         qaMessages.append(userMessage)
-        var system = """
+        let instructions = """
         You answer questions about one lecture transcript for a Chinese student studying in the US.
         Answer in Chinese, cite useful timecodes, and keep technical terms bilingual.
         If the transcript does not contain enough evidence, say so.
         """
-        if !courseContext.promptBlock.isEmpty {
-            system = courseContext.promptBlock + "\n\n" + system
-        }
         do {
             try await QAMessageRepository.shared.insert(userMessage)
             var answer = ""
-            // The system prompt and transcript repeat word for word on every
-            // question about this lecture; only the history after them moves.
-            let messages = [
-                .init(role: .system, content: system),
-                .init(role: .user, content: "Lecture transcript:\n\(transcriptText)", endsCachedPrefix: true)
-            ] + recentHistory.map { message in
+            let history: [ChatMessage] = recentHistory.map { message in
                 ChatMessage(role: message.role == .user ? .user : .assistant,
                             content: message.content)
-            } + [
-                .init(role: .user, content: question)
-            ]
+            }
+            let messages = LecturePrompt.messages(courseContext: courseContext.promptBlock,
+                                                  instructions: instructions,
+                                                  legacyUser: "Lecture transcript:\n\(transcriptText)",
+                                                  segments: s.segments,
+                                                  followUp: history + [.init(role: .user, content: question)],
+                                                  sharedCache: llm.cachesPrompts)
             for try await event in llm.chatEvents(messages: messages, model: config.activeLLMModel, temperature: 0.2)
             {
                 guard currentSessionId == target else {
@@ -444,20 +446,19 @@ final class SessionDetailViewModel: ObservableObject {
         }
         let config = AppState.shared.apiConfig
         let llm = EngineFactory.makeLLM(config: config, backend: AppState.shared.llmBackend)
-        var system = """
+        let instructions = """
         Generate 8-12 high-value review flashcards from this lecture.
         Return one card per line exactly as: front || back
         Front should be a question or term. Back should be concise Chinese with key English terms preserved.
         """
-        if !courseContext.promptBlock.isEmpty {
-            system = courseContext.promptBlock + "\n\n" + system
-        }
+        let messages = LecturePrompt.messages(courseContext: courseContext.promptBlock,
+                                              instructions: instructions,
+                                              legacyUser: budgetedTranscript(transcriptForLLM(s.segments)),
+                                              segments: s.segments,
+                                              sharedCache: llm.cachesPrompts)
         do {
             var raw = ""
-            for try await delta in llm.chat(messages: [
-                .init(role: .system, content: system),
-                .init(role: .user, content: budgetedTranscript(transcriptForLLM(s.segments)))
-            ], model: config.activeLLMModel, temperature: 0.25)
+            for try await delta in llm.chat(messages: messages, model: config.activeLLMModel, temperature: 0.25)
             {
                 raw += delta
                 guard currentSessionId == target else { continue }
@@ -515,16 +516,15 @@ final class SessionDetailViewModel: ObservableObject {
         }
         let config = AppState.shared.apiConfig
         let llm = EngineFactory.makeLLM(config: config, backend: AppState.shared.llmBackend)
-        let system = courseContext.promptBlock.isEmpty
-            ? tool.systemPrompt
-            : courseContext.promptBlock + "\n\n" + tool.systemPrompt
         let transcript = budgetedTranscript(StudyTools.transcriptForLLM(s.segments))
+        let messages = LecturePrompt.messages(courseContext: courseContext.promptBlock,
+                                              instructions: tool.systemPrompt,
+                                              legacyUser: "Lecture transcript:\n\(transcript)",
+                                              segments: s.segments,
+                                              sharedCache: llm.cachesPrompts)
         do {
             var markdown = ""
-            for try await delta in llm.chat(messages: [
-                .init(role: .system, content: system),
-                .init(role: .user, content: "Lecture transcript:\n\(transcript)")
-            ], model: config.activeLLMModel, temperature: 0.25)
+            for try await delta in llm.chat(messages: messages, model: config.activeLLMModel, temperature: 0.25)
             {
                 markdown += delta
                 guard currentSessionId == target else { continue }

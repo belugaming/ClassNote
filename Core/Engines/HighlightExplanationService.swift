@@ -28,15 +28,20 @@ actor HighlightExplanationService {
         \(rangeText)
         ===
         """
-
-        var system = HighlightPrompts.systemPrefix + "\n\n" + preset.systemBody
-        if !courseContext.isEmpty {
-            system = courseContext + "\n\n" + system
-        }
-        let messages: [ChatMessage] = [
-            .init(role: .system, content: system),
-            .init(role: .user, content: userContent),
-        ]
+        // In the shared layout the full transcript is already the cached
+        // opening, so only the range follows, in the same rendering.
+        let range = """
+        The range the student marked (explain THIS):
+        ===
+        \(StudyTools.transcriptForLLM(rangeSegments))
+        ===
+        """
+        let messages = LecturePrompt.messages(courseContext: courseContext,
+                                              instructions: HighlightPrompts.systemPrefix + "\n\n" + preset.systemBody,
+                                              legacyUser: userContent,
+                                              segments: allSegments,
+                                              task: range,
+                                              sharedCache: llm.cachesPrompts)
         return llm.chatEvents(messages: messages, model: config.activeLLMModel, temperature: 0.3)
     }
 

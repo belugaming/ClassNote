@@ -295,3 +295,65 @@ final class ChatEventsDefaultTests: XCTestCase {
         XCTAssertEqual(events, [.text("a"), .text("b")])
     }
 }
+
+final class LecturePromptTests: XCTestCase {
+    private let segments: [Segment] = [
+        Segment(id: 1, sessionId: "s", startMs: 0, endMs: 900, speakerId: nil,
+                textOriginal: "Today: eigenvalues.", textTranslated: "今天：特征值。",
+                isFinal: true, confidence: 0, version: 1),
+        Segment(id: 2, sessionId: "s", startMs: 61_000, endMs: 62_000, speakerId: nil,
+                textOriginal: "A matrix acts on a vector.", textTranslated: "",
+                isFinal: true, confidence: 0, version: 1),
+    ]
+
+    /// The rendered request body up to and including the cache breakpoint.
+    private func cachedPrefix(_ messages: [ChatMessage]) throws -> String {
+        let body = AnthropicMessagesClient.requestBody(messages: messages, model: "claude-opus-5-5",
+                                                       effort: "medium", serverFallback: false)
+        let turns = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let opening: [String: Any] = ["system": body["system"] ?? "", "first": turns[0]]
+        let data = try JSONSerialization.data(withJSONObject: opening, options: [.sortedKeys])
+        return try XCTUnwrap(String(data: data, encoding: .utf8))
+    }
+
+    func testEveryFeatureSharesOneCachedOpening() throws {
+        let notes = LecturePrompt.messages(courseContext: "Course: Linear Algebra", instructions: "Write notes.",
+                                           legacyUser: "unused", segments: segments, sharedCache: true)
+        let highlight = LecturePrompt.messages(courseContext: "Course: Linear Algebra", instructions: "Explain.",
+                                               legacyUser: "unused", segments: segments,
+                                               task: "The range: …", sharedCache: true)
+        let qa = LecturePrompt.messages(courseContext: "Course: Linear Algebra", instructions: "Answer.",
+                                        legacyUser: "unused", segments: segments,
+                                        followUp: [.init(role: .user, content: "Why?")], sharedCache: true)
+
+        XCTAssertEqual(try cachedPrefix(notes), try cachedPrefix(highlight))
+        XCTAssertEqual(try cachedPrefix(notes), try cachedPrefix(qa))
+
+        XCTAssertTrue(notes[1].endsCachedPrefix)
+        XCTAssertTrue(notes[1].content.contains("[01:01] A matrix acts on a vector."), notes[1].content)
+        XCTAssertTrue(notes[1].content.contains("译文: 今天：特征值。"), notes[1].content)
+        XCTAssertEqual(notes[2].content, "Write notes.")
+        XCTAssertEqual(highlight[2].content, "Explain.\n\nThe range: …")
+        XCTAssertEqual(qa.last?.content, "Why?")
+        XCTAssertEqual(notes.filter(\.endsCachedPrefix).count, 1)
+    }
+
+    func testEnginesWithoutACacheKeepTheirLayout() {
+        let messages = LecturePrompt.messages(courseContext: "Course: Linear Algebra", instructions: "Write notes.",
+                                              legacyUser: "Transcript:\n[00:00] Today: eigenvalues.",
+                                              segments: segments, sharedCache: false)
+        XCTAssertEqual(messages.map(\.role), [.system, .user])
+        XCTAssertEqual(messages[0].content, "Course: Linear Algebra\n\nWrite notes.")
+        XCTAssertEqual(messages[1].content, "Transcript:\n[00:00] Today: eigenvalues.")
+        XCTAssertFalse(messages.contains(where: \.endsCachedPrefix))
+
+        let noCourse = LecturePrompt.messages(courseContext: "", instructions: "Write notes.",
+                                              legacyUser: "x", segments: segments, sharedCache: false)
+        XCTAssertEqual(noCourse[0].content, "Write notes.")
+    }
+
+    func testOnlyClaudeCachesPrompts() {
+        XCTAssertTrue(AnthropicLLM(config: .default).cachesPrompts)
+        XCTAssertFalse(OpenAICompatibleLLM(config: .default).cachesPrompts)
+    }
+}
