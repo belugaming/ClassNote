@@ -325,7 +325,19 @@ final class Database: @unchecked Sendable {
             }
         }
 
-        migrator.registerMigration("v15_session_audio_bookmark") { db in
+        // What kind of class a course is, and what the student says about one
+        // session before the AI writes about it. Both optional free text, so a
+        // course or session that never had them reads as nil.
+        migrator.registerMigration("v15_class_background") { db in
+            try db.alter(table: "course") { t in
+                t.add(column: "format", .text)
+            }
+            try db.alter(table: "session") { t in
+                t.add(column: "briefing", .text)
+            }
+        }
+
+        migrator.registerMigration("v16_session_audio_bookmark") { db in
             try db.alter(table: "session") { t in
                 // Bookmark of an imported file, which is referenced in place
                 // and so can be moved or renamed; see relocatingMovedAudio.
@@ -333,7 +345,7 @@ final class Database: @unchecked Sendable {
             }
         }
 
-        migrator.registerMigration("v16_library_sync") { db in
+        migrator.registerMigration("v17_library_sync") { db in
             // Change tracking for LibrarySync. Triggers keep it, so no write
             // path in the app has to remember to.
             try db.alter(table: "session") { t in

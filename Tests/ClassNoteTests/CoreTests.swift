@@ -426,6 +426,23 @@ final class TranscriptBufferTests: XCTestCase {
         XCTAssertEqual(buf.translatedText(rowId: 1), "你好世界")
         XCTAssertEqual(buf.translatedText(rowId: 999), "")
     }
+
+    /// A line shows as translating only while a translator has it. One that
+    /// was never sent (translation off, sentence not ended) must not.
+    @MainActor
+    func testOnlyLinesSentToATranslatorArePending() {
+        let buf = TranscriptBuffer()
+        buf.appendFinal(rowId: 1, startMs: 0, endMs: 1000, original: "Translation was off.")
+        buf.appendFinal(rowId: 2, startMs: 1000, endMs: 2000, original: "Sent.")
+        buf.setTranslationState(.pending, rowIds: [2])
+        XCTAssertEqual(buf.translationState(rowId: 1), .notSent)
+        XCTAssertEqual(buf.translationState(rowId: 2), .pending)
+
+        // The translator is done and nothing more is coming.
+        buf.failPendingTranslations()
+        XCTAssertEqual(buf.translationState(rowId: 1), .notSent)
+        XCTAssertEqual(buf.translationState(rowId: 2), .failed)
+    }
 }
 
 final class OverlayCaptionFormatterTests: XCTestCase {

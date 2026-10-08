@@ -537,10 +537,17 @@ final class AppState: ObservableObject {
                                     sourceKind: orchestrator.source.rawValue)
             try await SessionRepository.shared.insert(saved)
             let segments = orchestrator.transcript.segments.map { line -> Segment in
-                // A line cut mid-sentence has its translation on the line that
-                // ends the sentence; one with a translation of its own is done.
-                let state: TranslationState = !line.translated.isEmpty ? .ok
-                    : (line.continuesNext ? .merged : .notAttempted)
+                // A line cut mid-sentence, or one T3PO translated together
+                // with the lines after it, has its translation on a later
+                // line; one with a translation of its own is done.
+                let state: TranslationState
+                switch line.translationState {
+                case .failed: state = .failed
+                case .merged: state = .merged
+                case .notSent, .pending, .done:
+                    state = !line.translated.isEmpty ? .ok
+                        : (line.continuesNext ? .merged : .notAttempted)
+                }
                 return Segment(id: nil,
                                sessionId: saved.id,
                                startMs: line.startMs,

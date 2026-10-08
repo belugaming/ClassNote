@@ -11,10 +11,18 @@ struct Course: Codable, FetchableRecord, PersistableRecord, Identifiable, Hashab
     /// translator and to every AI prompt so course jargon renders consistently.
     var glossary: String?
     var createdAt: Int64
+    /// `CourseFormat.rawValue`: lecture, seminar, one-on-one lesson… Nil until
+    /// the student says. Stored as text so a format added later never fails to
+    /// decode an older build's value.
+    var format: String? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, name, semester, instructor, notes, glossary
+        case id, name, semester, instructor, notes, glossary, format
         case createdAt = "created_at"
+    }
+
+    var formatValue: CourseFormat? {
+        format.flatMap(CourseFormat.init(rawValue:))
     }
 
     static let databaseTableName = "course"

@@ -14,8 +14,9 @@ import Foundation
 enum LecturePrompt {
     static let sharedSystem = """
     You are a study assistant for a Chinese student studying in the US. The conversation opens \
-    with the transcript of one of their lectures: a timecode and the original text per line, with \
-    a Chinese translation (译文) under lines that have one. What follows it says what to do.
+    with the transcript of one of their classes (a lecture, seminar, lab or lesson): a timecode and \
+    the original text per line, with a Chinese translation (译文) under lines that have one. What \
+    follows it says what to do.
     """
 
     /// - Parameter courseContext: the course's facts as a prompt block, or empty.

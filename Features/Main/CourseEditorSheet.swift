@@ -41,6 +41,18 @@ struct CourseEditorSheet: View {
                 }
             }
 
+            LabeledRow(label: L10n.t("course.field.format")) {
+                Picker("", selection: $draft.format) {
+                    Text(L10n.t("course.format.none")).tag(String?.none)
+                    ForEach(CourseFormat.allCases) { format in
+                        Text(L10n.t(format.titleKey)).tag(String?.some(format.rawValue))
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
+            }
+
             LabeledRow(label: L10n.t("course.field.glossary")) {
                 VStack(alignment: .leading, spacing: 6) {
                     // Monospaced because the content is `term = 译名` pairs, one
@@ -59,12 +71,18 @@ struct CourseEditorSheet: View {
             }
 
             LabeledRow(label: L10n.t("course.field.notes")) {
-                TextEditor(text: optionalBinding(\.notes))
-                    .font(.callout)
-                    .scrollContentBackground(.hidden)
-                    .frame(height: 70)
-                    .padding(6)
-                    .cardBackground(radius: Theme.cornerSmall)
+                VStack(alignment: .leading, spacing: 6) {
+                    TextEditor(text: optionalBinding(\.notes))
+                        .font(.callout)
+                        .scrollContentBackground(.hidden)
+                        .frame(height: 80)
+                        .padding(6)
+                        .cardBackground(radius: Theme.cornerSmall)
+                    Text(L10n.t("course.field.notes.help"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             HStack {

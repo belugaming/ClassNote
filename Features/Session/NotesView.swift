@@ -3,6 +3,8 @@ import SwiftUI
 /// AI notes for the session, with the versions generated so far.
 struct NotesView: View {
     @ObservedObject var vm: SessionDetailViewModel
+    /// Opens the session background ("tell the AI about this class").
+    var onEditBriefing: () -> Void = {}
     @State private var confirmingDelete = false
     @State private var showingHistory = false
 
@@ -42,6 +44,12 @@ struct NotesView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Button(action: onEditBriefing) {
+                Label(L10n.t("briefing.current"),
+                      systemImage: vm.briefing.isEmpty ? "person.text.rectangle" : "person.text.rectangle.fill")
+            }
+            .help(L10n.t(vm.briefing.isEmpty ? "briefing.add" : "briefing.edit"))
+            .disabled(vm.isShowingNoteStream)
             if let note = vm.note, !vm.isShowingNoteStream {
                 Button {
                     Clipboard.copy(note.markdown)
@@ -114,20 +122,54 @@ struct NotesView: View {
             VStack(spacing: 16) {
                 EmptyStateView(systemImage: "sparkles",
                                title: L10n.t("session.empty.notes.title"),
-                               message: L10n.t("session.empty.notes.desc"))
-                    .frame(maxHeight: 260)
+                               message: L10n.t("notes.empty.briefingHint"))
+                    .frame(maxHeight: 220)
+                if !vm.briefing.isEmpty { briefingCard }
                 HStack(spacing: 8) {
-                    ForEach(NoteTemplates.all) { template in
-                        Button(L10n.t(template.labelKey)) {
-                            Task { await vm.generateNotes(template: template) }
-                        }
+                    Button(action: onEditBriefing) {
+                        Label(L10n.t(vm.briefing.isEmpty ? "briefing.add" : "briefing.edit"),
+                              systemImage: "person.text.rectangle")
                     }
+                    Group {
+                        Button {
+                            Task { await vm.generateNotes(template: vm.recommendedTemplate) }
+                        } label: {
+                            Label(L10n.t(vm.recommendedTemplate.labelKey), systemImage: "sparkles")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Menu(L10n.t("notes.moreTemplates")) {
+                            ForEach(NoteTemplates.all.filter { $0.id != vm.recommendedTemplate.id }) { template in
+                                Button(L10n.t(template.labelKey)) {
+                                    Task { await vm.generateNotes(template: template) }
+                                }
+                            }
+                        }
+                        .fixedSize()
+                    }
+                    .disabled(vm.isGeneratingNotes || (vm.session?.segments.isEmpty ?? true))
                 }
-                .disabled(vm.isGeneratingNotes || (vm.session?.segments.isEmpty ?? true))
                 Spacer()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    /// What the student said about the session, so it is visible before the
+    /// notes that will be written from it.
+    private var briefingCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(L10n.t("briefing.current"), systemImage: "person.text.rectangle")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(vm.briefing)
+                .font(.callout)
+                .lineLimit(6)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(12)
+        .frame(maxWidth: 520)
+        .cardBackground()
     }
 
     private var history: some View {
