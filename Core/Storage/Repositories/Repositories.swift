@@ -421,6 +421,34 @@ actor HighlightRepository {
         }
     }
 
+    /// A highlight that arrives already explained: a live tutor card the
+    /// student kept. One insert, so the highlight never shows up without its
+    /// explanation.
+    func insertExplained(sessionId: String,
+                         timestampMs: Int64,
+                         rangeStartMs: Int64,
+                         rangeEndMs: Int64,
+                         note: String,
+                         promptKey: String,
+                         model: String,
+                         markdown: String,
+                         generatedAt: Int64) async throws {
+        try await Database.shared.dbPool.write { db in
+            var h = Highlight(id: nil,
+                              sessionId: sessionId,
+                              timestampMs: timestampMs,
+                              userNote: note,
+                              createdAt: Int64(Date().timeIntervalSince1970 * 1000),
+                              rangeStartMs: rangeStartMs,
+                              rangeEndMs: rangeEndMs,
+                              explanationMd: markdown,
+                              explanationPrompt: promptKey,
+                              explanationModel: model,
+                              explanationGeneratedAt: generatedAt)
+            try h.insert(db)
+        }
+    }
+
     func all(sessionId: String) async throws -> [Highlight] {
         try await Database.shared.dbPool.read { db in
             try Highlight

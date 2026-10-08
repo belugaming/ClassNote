@@ -94,7 +94,8 @@ struct ClassNoteApp: App {
                     .id(appState.languageRefreshToken)
             }
         }
-        .defaultSize(width: 920, height: 640)
+        // Wide enough for the transcript and the AI tutor beside it.
+        .defaultSize(width: 1240, height: 700)
         .defaultPosition(.center)
 
         Window(L10n.t("overlay.windowTitle"), id: WindowRouter.overlayWindowId) {

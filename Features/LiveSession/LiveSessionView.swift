@@ -29,6 +29,7 @@ private struct LiveContent: View {
     @ObservedObject var orchestrator: SessionOrchestrator
     @AppStorage("liveFontSize", store: AppEnvironment.defaults) private var fontSize: Double = 22
     @AppStorage("liveDisplayMode", store: AppEnvironment.defaults) private var displayModeRaw = OverlayCaptionDisplayMode.bilingual.rawValue
+    @AppStorage("liveTutorVisible", store: AppEnvironment.defaults) private var tutorVisible = true
     @State private var savedTemporary = false
     @State private var showHighlightConfirmation = false
 
@@ -41,16 +42,25 @@ private struct LiveContent: View {
     private var displayMode: OverlayCaptionDisplayMode {
         OverlayCaptionDisplayMode(rawValue: displayModeRaw) ?? .bilingual
     }
+    /// The tutor belongs to the live recording: an import runs faster than
+    /// anyone reads along, and its session has highlights and Q&A afterwards.
+    private var showsTutor: Bool { isLiveWindow && tutorVisible }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             if orchestrator.isImporting { importProgress }
             Divider()
-            LiveTranscript(buffer: orchestrator.transcript,
-                           fontSize: fontSize,
-                           displayMode: displayMode,
-                           engineStatus: appState.localEngineStatus)
+            if showsTutor {
+                HSplitView {
+                    transcriptView
+                        .frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
+                    LiveTutorPanel(tutor: orchestrator.tutor)
+                        .frame(minWidth: 280, idealWidth: 360, maxWidth: 560, maxHeight: .infinity)
+                }
+            } else {
+                transcriptView
+            }
         }
         .navigationTitle(title)
         .overlay(alignment: .top) {
@@ -71,6 +81,13 @@ private struct LiveContent: View {
                 withAnimation { showHighlightConfirmation = false }
             }
         }
+    }
+
+    private var transcriptView: some View {
+        LiveTranscript(buffer: orchestrator.transcript,
+                       fontSize: fontSize,
+                       displayMode: displayMode,
+                       engineStatus: appState.localEngineStatus)
     }
 
     private var title: String {
@@ -167,6 +184,12 @@ private struct LiveContent: View {
                     Image(systemName: "captions.bubble")
                 }
                 .help(L10n.t("menubar.toggleOverlay"))
+
+                Toggle(isOn: $tutorVisible) {
+                    Image(systemName: "sparkles")
+                }
+                .toggleStyle(.button)
+                .help(L10n.t("liveTutor.toggle"))
             }
 
             if isLiveWindow && isActive && !orchestrator.isEphemeralTranslation {
