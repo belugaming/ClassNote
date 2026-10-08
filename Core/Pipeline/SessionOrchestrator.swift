@@ -517,6 +517,10 @@ final class SessionOrchestrator: ObservableObject {
             Task { @MainActor in simul.abandon() }
         }
         watchdog.cancel()
+        // Lines T3PO was still holding when it failed or was abandoned: no
+        // translation is coming for them now. All lines go through T3PO while
+        // it runs, so nothing else can be pending.
+        transcript.failPendingTranslations()
     }
 
     /// Awaits `task`, cancelling it only if it outstays `timeout`.
@@ -763,11 +767,18 @@ final class SessionOrchestrator: ObservableObject {
     /// ones before are marked as covered by it.
     private func applySimultaneousTranslation(rows: [Int64], text: String, persist: Bool) {
         guard let last = rows.last else { return }
-        transcript.updateTranslation(rowId: last, translated: text)
-        guard persist else { return }
         let leading = Array(rows.dropLast())
+        let landed = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        transcript.updateTranslation(rowId: last, translated: text)
+        transcript.setTranslationState(landed ? .done : .failed, rowIds: [last])
+        // These may end sentences of their own, so they are separate blocks in
+        // the live view; without this they would wait for a translation that
+        // already arrived on `last`.
+        transcript.setTranslationState(.merged, rowIds: leading)
+        guard persist else { return }
         let task = Task {
-            try? await SegmentRepository.shared.updateTranslation(id: last, textTranslated: text, state: .ok)
+            try? await SegmentRepository.shared.updateTranslation(id: last, textTranslated: text,
+                                                                   state: landed ? .ok : .failed)
             try? await SegmentRepository.shared.markMerged(ids: leading)
         }
         translateTasks[last] = task
@@ -781,6 +792,7 @@ final class SessionOrchestrator: ObservableObject {
                                        translator: TranslationProvider,
                                        config: ApiConfig) {
         if let simul = simultaneousSession(config: config) {
+            transcript.setTranslationState(.pending, rowIds: [rowId])
             simul.feed(rowId: rowId, text: text)
             return
         }
@@ -823,6 +835,7 @@ final class SessionOrchestrator: ObservableObject {
                            config: ApiConfig,
                            persistTranslation: Bool) {
         let glossary = courseContext.translationGlossary
+        transcript.setTranslationState(.pending, rowIds: [rowId])
         let task = Task { @MainActor [transcript] in
             let stream = translator.translate(text: text,
                                                sourceLanguage: config.sourceLanguage,
@@ -838,22 +851,34 @@ final class SessionOrchestrator: ObservableObject {
                     accumulated += delta
                     transcript.appendTranslationDelta(rowId: rowId, delta: delta)
                 }
+                // Cancelling the consumer ends the loop instead of throwing, so
+                // ask the task: a translation Stop cut short is not finished.
+                try Task.checkCancellation()
+                // An empty answer is a failure too, as in `translateOne`: saved
+                // as `.ok` it would never be retried, and live it would show
+                // as still translating.
+                let landed = !accumulated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                transcript.setTranslationState(landed ? .done : .failed, rowIds: [rowId])
                 if persistTranslation {
                     try? await SegmentRepository.shared.updateTranslation(id: rowId,
                                                                            textTranslated: accumulated,
-                                                                           state: .ok)
-                    try? await SegmentRepository.shared.markMerged(ids: leadingRowIds)
+                                                                           state: landed ? .ok : .failed)
+                    if landed {
+                        try? await SegmentRepository.shared.markMerged(ids: leadingRowIds)
+                    }
                 }
             } catch is CancellationError {
                 // Stop() cancels in-flight translations; keep what arrived and
                 // mark the row so the retry can find it instead of leaving it
                 // indistinguishable from a line with nothing to translate.
+                transcript.setTranslationState(.failed, rowIds: [rowId])
                 if persistTranslation {
                     try? await SegmentRepository.shared.updateTranslation(id: rowId,
                                                                            textTranslated: accumulated,
                                                                            state: .failed)
                 }
             } catch {
+                transcript.setTranslationState(.failed, rowIds: [rowId])
                 if persistTranslation {
                     try? await SegmentRepository.shared.updateTranslation(id: rowId,
                                                                            textTranslated: accumulated,

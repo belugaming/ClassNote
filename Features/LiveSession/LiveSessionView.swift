@@ -340,9 +340,9 @@ private struct LiveSentenceView: View {
 
     private var original: String { SentenceGroups.join(block.lines.map(\.original)) }
     private var translation: String { block.lines.last?.translated ?? "" }
-    /// The sentence is still being spoken: its lines so far are committed but
-    /// its last line has not arrived, so no translation is coming yet.
-    private var isOpen: Bool { block.lines.last?.continuesNext ?? false }
+    /// Read off the last line, which is the one a sentence's translation lands
+    /// on. A sentence still being spoken has not been sent, so it is `.notSent`.
+    private var translationState: LiveTranslationState { block.lines.last?.translationState ?? .notSent }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 16) {
@@ -362,8 +362,14 @@ private struct LiveSentenceView: View {
                         Text(translation)
                             .font(.system(size: fontSize, weight: .medium))
                             .foregroundStyle(Theme.translation)
-                    } else if !isOpen {
+                    } else if translationState == .pending {
                         TranslationPendingDots()
+                    }
+                    if translationState == .failed {
+                        // Retried from the session once it is saved.
+                        Label(L10n.t("session.translation.failed"), systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(Theme.warning)
                     }
                 }
             }
