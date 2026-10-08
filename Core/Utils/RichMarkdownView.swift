@@ -43,6 +43,109 @@ private struct RichMarkdownBody: View, Equatable {
     }
 }
 
+/// A long finished document (notes, a study tool's output), rendered one
+/// top-level block at a time in a lazy stack.
+///
+/// One `MarkdownView` over a whole set of notes lays out every block at once:
+/// consecutive paragraphs become a single tall `Text`, and every formula is its
+/// own AppKit view (SwiftMath), so scrolling drags all of it along. Here only
+/// the blocks near the screen exist. A selection no longer runs across blocks,
+/// which the notes' Copy button covers.
+struct RichMarkdownDocument: View {
+    let markdown: String
+
+    var body: some View {
+        RichMarkdownDocumentBody(markdown: markdown)
+            .equatable()
+    }
+}
+
+private struct RichMarkdownDocumentBody: View, Equatable {
+    let markdown: String
+
+    nonisolated static func == (lhs: RichMarkdownDocumentBody, rhs: RichMarkdownDocumentBody) -> Bool {
+        lhs.markdown == rhs.markdown
+    }
+
+    var body: some View {
+        let blocks = MarkdownBlocks.split(markdown)
+        LazyVStack(alignment: .leading, spacing: 12) {
+            ForEach(blocks.indices, id: \.self) { index in
+                RichMarkdownView(markdown: blocks[index])
+            }
+        }
+    }
+}
+
+/// Splits Markdown into top-level blocks that each render the same on their
+/// own as they do in the whole document. A split is made only at a blank line
+/// followed by an unindented line, outside a code fence and outside an open
+/// `$$` display formula, so an indented list continuation, a fenced block with
+/// blank lines in it and a multi-line formula all stay whole. A list is never
+/// split between its items either: MarkdownView numbers every ordered list
+/// from 1, whatever number it starts at.
+enum MarkdownBlocks {
+    static func split(_ markdown: String) -> [String] {
+        var blocks: [String] = []
+        var current: [Substring] = []
+        var fence: Substring?
+        var openDisplayMath = false
+        var sawBlankLine = false
+        var inList = false
+
+        func flush() {
+            let text = current.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty { blocks.append(text) }
+            current.removeAll()
+            inList = false
+        }
+
+        for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.drop { $0 == " " }
+            if let open = fence {
+                current.append(line)
+                if trimmed.hasPrefix(open) { fence = nil }
+                continue
+            }
+            if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                sawBlankLine = true
+                current.append(line)
+                continue
+            }
+            let indented = line.first == " " || line.first == "\t"
+            let listItem = !indented && isListItem(line)
+            if sawBlankLine, !indented, !openDisplayMath, !(inList && listItem), !current.isEmpty {
+                flush()
+            }
+            sawBlankLine = false
+            current.append(line)
+            if listItem { inList = true }
+            if line.prefix(while: { $0 == " " }).count <= 3,
+               let marker = ["```", "~~~"].first(where: { trimmed.hasPrefix($0) }) {
+                fence = Substring(marker)
+            } else if line.components(separatedBy: "$$").count % 2 == 0 {
+                openDisplayMath.toggle()
+            }
+        }
+        flush()
+        return blocks
+    }
+
+    /// `- item`, `* item`, `+ item`, `1. item` or `1) item`.
+    private static func isListItem(_ line: Substring) -> Bool {
+        if let first = line.first, "-*+".contains(first) {
+            let rest = line.dropFirst()
+            return rest.isEmpty || rest.first == " " || rest.first == "\t"
+        }
+        let digits = line.prefix(while: \.isASCII).prefix(while: \.isNumber)
+        guard !digits.isEmpty, digits.count <= 9 else { return false }
+        let rest = line.dropFirst(digits.count)
+        guard let marker = rest.first, marker == "." || marker == ")" else { return false }
+        let after = rest.dropFirst()
+        return after.isEmpty || after.first == " " || after.first == "\t"
+    }
+}
+
 /// Text still being written. A display formula that has not closed yet is held
 /// back as plain source until its closing `$$` arrives, rather than showing up
 /// as raw `$$` in the middle of the rendered text and then jumping.

@@ -387,7 +387,7 @@ struct StudyToolsPane: View {
                                 }
                                 RichMarkdownView(markdown: markdown, streaming: true).textSelection(.enabled)
                             } else {
-                                RichMarkdownView(markdown: markdown).textSelection(.enabled)
+                                RichMarkdownDocument(markdown: markdown).textSelection(.enabled)
                             }
                         }
                         .frame(maxWidth: Theme.readingWidth, alignment: .leading)
