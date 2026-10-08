@@ -71,6 +71,13 @@ The Python sidecars have their own tests:
 python3 -m unittest discover -s Tests/PythonTests
 ```
 
+## Release
+
+1. On `main`, set `MARKETING_VERSION` to the new version in `project.yml` and bump `CURRENT_PROJECT_VERSION`.
+2. Tag that commit and push the tag: `git tag v0.16.0 && git push origin v0.16.0`. The tag must match `MARKETING_VERSION`, or the release stops at its first step.
+
+The Release workflow runs the tests, then builds two DMGs and attaches them to a GitHub Release: `ClassNote-<version>-arm64.dmg` for Apple Silicon and `ClassNote-<version>-x86_64.dmg` for Intel Macs. The local engines need Apple Silicon; on Intel, use the cloud API or Apple's on-device speech. The app is not notarized, so the first launch has to be allowed in System Settings → Privacy & Security.
+
 ## Configure
 
 1. Launch the app, open **Settings → Cloud API**.

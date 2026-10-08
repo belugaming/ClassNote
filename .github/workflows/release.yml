@@ -7,15 +7,51 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Seconds, not the ten minutes of a build: a tag that disagrees with
+  # project.yml fails here before anything is compiled.
+  version:
+    name: Tag matches MARKETING_VERSION
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve the version (tag, or MARKETING_VERSION for a manual run)
+        id: resolve
+        run: |
+          set -euo pipefail
+          APP_VERSION="$(grep -E '^\s*MARKETING_VERSION:' project.yml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            if [[ "$TAG_VERSION" != "$APP_VERSION" ]]; then
+              echo "::error::tag v$TAG_VERSION does not match MARKETING_VERSION $APP_VERSION in project.yml. Bump MARKETING_VERSION (and CURRENT_PROJECT_VERSION) on main first, then tag that commit."
+              exit 1
+            fi
+            VERSION="$TAG_VERSION"
+          else
+            # workflow_dispatch on a branch: build the DMGs as artifacts only.
+            VERSION="$APP_VERSION"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
   test:
     name: Tests must pass before a release is cut
     uses: ./.github/workflows/ci.yml
 
+  # One DMG per architecture rather than a universal app: each download is
+  # half the size, and the Intel build says plainly that it cannot run the
+  # local MLX engines.
   build:
-    needs: test
+    name: Build DMG (${{ matrix.arch }})
+    needs: [version, test]
     runs-on: macos-15
-    permissions:
-      contents: write
+    strategy:
+      matrix:
+        arch: [arm64, x86_64]
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,32 +74,30 @@ jobs:
             -project ClassNote.xcodeproj \
             -scheme ClassNote
 
-      - name: Build Release
+      # The runner is Apple Silicon; x86_64 is cross-compiled. ARCHS pins the
+      # slice, since a Release build would otherwise make a universal binary.
+      - name: Build Release (${{ matrix.arch }})
         run: |
           xcodebuild -project ClassNote.xcodeproj \
                      -scheme ClassNote \
                      -configuration Release \
-                     -destination 'platform=macOS,arch=arm64' \
+                     -destination 'generic/platform=macOS' \
                      -derivedDataPath build/DerivedData \
                      -skipMacroValidation \
+                     ARCHS=${{ matrix.arch }} \
+                     ONLY_ACTIVE_ARCH=NO \
                      build
 
-      - name: Resolve the version (tag, or MARKETING_VERSION for a manual run)
+      - name: Check the binary is ${{ matrix.arch }} only
         run: |
           set -euo pipefail
-          APP_VERSION="$(grep -E '^\s*MARKETING_VERSION:' project.yml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            TAG_VERSION="${GITHUB_REF_NAME#v}"
-            if [[ "$TAG_VERSION" != "$APP_VERSION" ]]; then
-              echo "✗ tag v$TAG_VERSION does not match MARKETING_VERSION $APP_VERSION in project.yml"
-              exit 1
-            fi
-            VERSION="$TAG_VERSION"
-          else
-            # workflow_dispatch on a branch: build the DMG as an artifact only.
-            VERSION="$APP_VERSION"
+          BINARY="build/DerivedData/Build/Products/Release/ClassNote.app/Contents/MacOS/ClassNote"
+          ARCHS="$(lipo -archs "$BINARY")"
+          echo "ClassNote binary: $ARCHS"
+          if [[ "$ARCHS" != "${{ matrix.arch }}" ]]; then
+            echo "::error::expected only ${{ matrix.arch }}, got: $ARCHS"
+            exit 1
           fi
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Package DMG
         run: |
@@ -80,7 +114,7 @@ jobs:
           cp -R "$APP_PATH" "$STAGE_DIR/"
           ln -s /Applications "$STAGE_DIR/Applications"
 
-          DMG_NAME="ClassNote-${VERSION}.dmg"
+          DMG_NAME="ClassNote-${VERSION}-${{ matrix.arch }}.dmg"
           hdiutil create -volname "ClassNote" \
                           -srcfolder "$STAGE_DIR" \
                           -ov -format UDZO \
@@ -91,12 +125,26 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ClassNote-dmg
+          name: ClassNote-dmg-${{ matrix.arch }}
           path: ${{ env.DMG_NAME }}
 
+  # Once, after both builds: two matrix jobs creating the same release race.
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the DMGs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ClassNote-dmg-*
+          merge-multiple: true
+
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.DMG_NAME }}
+          files: ClassNote-*.dmg
           generate_release_notes: true
