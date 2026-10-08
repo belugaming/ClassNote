@@ -37,7 +37,7 @@ private struct LiveContent: View {
     /// Whether this window's work is running. An import window must not read
     /// the app-wide recording flag: that belongs to the live window.
     private var isActive: Bool {
-        isLiveWindow ? appState.isRecording : orchestrator.isImporting
+        isLiveWindow ? appState.isActivelyRecording : orchestrator.isImporting
     }
     private var displayMode: OverlayCaptionDisplayMode {
         OverlayCaptionDisplayMode(rawValue: displayModeRaw) ?? .bilingual
@@ -136,6 +136,7 @@ private struct LiveContent: View {
 
     private var statusLabel: String {
         if orchestrator.isImporting { return L10n.t("live.statusImporting") }
+        if isLiveWindow && appState.isStoppingRecording { return L10n.t("record.finishing") }
         guard isActive else { return L10n.t("live.statusIdle") }
         if orchestrator.isEphemeralTranslation { return L10n.t("live.statusEphemeral") }
         return L10n.t("live.statusLive")
@@ -236,7 +237,7 @@ private struct LiveContent: View {
                     Label(L10n.t("live.start"), systemImage: "record.circle")
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(appState.isStartingRecording)
+                .disabled(appState.isStartingRecording || appState.isStoppingRecording)
             }
         }
         .controlSize(.regular)

@@ -185,16 +185,21 @@ struct MainWindowView: View {
                                             intent: $prefs.intent,
                                             translationEnabled: $appState.translationEnabled)
             } label: {
-                Label(appState.isRecording ? L10n.t("record.stop") : L10n.t("record.start"),
-                      systemImage: appState.isRecording ? "stop.circle.fill" : "record.circle")
+                Label(appState.isActivelyRecording ? L10n.t("record.stop") : L10n.t("record.start"),
+                      systemImage: appState.isActivelyRecording ? "stop.circle.fill" : "record.circle")
             } primaryAction: {
                 RecordingLauncher.toggle(appState, courseId: currentCourseId)
             }
-            .disabled(appState.isStartingRecording
-                      || (!appState.isRecording && appState.isMissingCloudCredentialForRecording))
-            .help(appState.isMissingCloudCredentialForRecording && !appState.isRecording
+            .disabled(appState.isStartingRecording || appState.isStoppingRecording
+                      || (!appState.isActivelyRecording && appState.isMissingCloudCredentialForRecording))
+            .help(appState.isMissingCloudCredentialForRecording && !appState.isActivelyRecording
                   ? L10n.t("toolbar.help.configureKey")
                   : L10n.t("toolbar.record.help"))
+            // A toolbar menu's items are built once and not refreshed when the
+            // choices change: picking another source or mode was used by the
+            // next recording, but the menu kept checking the old one. A new
+            // identity for each set of choices makes SwiftUI build it again.
+            .id("\(prefs.source.rawValue)|\(prefs.intent.rawValue)|\(appState.translationEnabled)")
 
             Button {
                 WindowRouter.shared.toggleOverlay()

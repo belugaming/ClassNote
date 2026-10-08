@@ -264,6 +264,18 @@ final class AppState: ObservableObject {
     /// start another recording, whose `stop()` ended the first.
     @Published private(set) var isStartingRecording = false
 
+    /// True from Stop until the pipeline has drained. Capture ends at once, but
+    /// the last sentence can take several more seconds to be transcribed,
+    /// translated and saved, and `isRecording` stays true all that time because
+    /// the engines are still in use. The record controls read
+    /// `isActivelyRecording` instead, or the menu bar went on showing a
+    /// recording the user had already stopped.
+    @Published private(set) var isStoppingRecording = false
+
+    /// What the record controls show: a recording that is running and has not
+    /// been asked to stop.
+    var isActivelyRecording: Bool { isRecording && !isStoppingRecording }
+
     func startNewSession(courseId: String?,
                          source: AudioSourceKind,
                          translationEnabled: Bool? = nil) async -> String? {
@@ -306,10 +318,12 @@ final class AppState: ObservableObject {
     }
 
     func stopRecording() {
+        isStoppingRecording = true
         Task { @MainActor in
             await orchestrator.stop()
             self.isRecording = false
             self.currentSessionId = nil
+            self.isStoppingRecording = false
             if self.needsEngineReloadAfterRecording {
                 self.needsEngineReloadAfterRecording = false
                 await self.reloadLocalEngine()

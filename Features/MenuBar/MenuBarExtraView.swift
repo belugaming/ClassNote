@@ -24,7 +24,7 @@ private struct MenuBarPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            if appState.isRecording {
+            if appState.isActivelyRecording {
                 recordingSection
             } else {
                 idleSection
@@ -53,12 +53,12 @@ private struct MenuBarPanel: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: appState.isRecording ? "record.circle.fill" : "waveform")
+            Image(systemName: appState.isActivelyRecording ? "record.circle.fill" : "waveform")
                 .font(.title2)
-                .foregroundStyle(appState.isRecording ? Theme.recording : Theme.accent)
-                .symbolEffect(.pulse, isActive: appState.isRecording)
+                .foregroundStyle(appState.isActivelyRecording ? Theme.recording : Theme.accent)
+                .symbolEffect(.pulse, isActive: appState.isActivelyRecording)
             VStack(alignment: .leading, spacing: 2) {
-                Text(appState.isRecording ? activeTitle : L10n.t("app.name"))
+                Text(appState.isActivelyRecording ? activeTitle : L10n.t("app.name"))
                     .font(.headline)
                     .lineLimit(1)
                 Text(subtitle)
@@ -76,7 +76,8 @@ private struct MenuBarPanel: View {
     }
 
     private var subtitle: String {
-        if appState.isRecording {
+        if appState.isStoppingRecording { return L10n.t("record.finishing") }
+        if appState.isActivelyRecording {
             // What is actually recording, not the remembered preference.
             return "\(TimeLabel.string(ms: orchestrator.currentTimestampMs)) · \(orchestrator.source.shortTitle)"
         }
@@ -141,7 +142,8 @@ private struct MenuBarPanel: View {
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
-        .disabled(appState.isStartingRecording || appState.isMissingCloudCredentialForRecording)
+        .disabled(appState.isStartingRecording || appState.isStoppingRecording
+                  || appState.isMissingCloudCredentialForRecording)
 
         RecordingOptionsView(source: $prefs.source,
                              intent: $prefs.intent,
