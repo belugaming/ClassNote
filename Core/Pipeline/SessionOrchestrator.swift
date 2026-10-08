@@ -200,16 +200,28 @@ final class SessionOrchestrator: ObservableObject {
 
     @discardableResult
     func ingestFile(url: URL, courseId: String?) async throws -> String {
-        let sess = Session.new(courseId: courseId,
-                               title: url.deletingPathExtension().lastPathComponent,
+        try await ingestFile(ImportItem(url: url), courseId: courseId)
+    }
+
+    /// The file is referenced where it lies, never copied: the session's audio
+    /// is the imported file itself.
+    @discardableResult
+    func ingestFile(_ item: ImportItem, courseId: String?) async throws -> String {
+        let url = item.url
+        var sess = Session.new(courseId: courseId,
+                               title: item.title ?? url.deletingPathExtension().lastPathComponent,
                                sourceKind: "file")
+        if let recordedAt = item.recordedAt {
+            sess.startedAt = Int64(recordedAt.timeIntervalSince1970 * 1000)
+        }
+        sess.audioBookmark = try? url.bookmarkData()
         try await SessionRepository.shared.insert(sess)
         self.currentSession = sess
         return try await runFileTranscription(sessionId: sess.id,
                                               url: url,
                                               replaceExisting: false,
                                               finalAudioPath: url.path,
-                                              sourceLabel: url.lastPathComponent)
+                                              sourceLabel: item.title ?? url.lastPathComponent)
     }
 
     /// Re-runs transcription over a session's own recording, replacing its
@@ -1161,6 +1173,16 @@ extension TranscriptEvent {
                                speakerId: speakerId,
                                continuesSentence: continuesSentence)
     }
+}
+
+/// A file to import, with what its name cannot tell.
+struct ImportItem: Sendable {
+    let url: URL
+    /// Used as the session title instead of the file name, e.g. a Voice Memos title.
+    var title: String? = nil
+    /// When the audio was recorded, if known. The session is dated by it, so it
+    /// sorts with the day of the lecture rather than the day of the import.
+    var recordedAt: Date? = nil
 }
 
 enum TranscriptTextPolisher {

@@ -27,11 +27,13 @@ final class Database: @unchecked Sendable {
             try db.execute(sql: "PRAGMA foreign_keys = ON;")
         }
         let pool = try DatabasePool(path: dbURL.path, configuration: config)
-        try migrator.migrate(pool)
+        try Self.migrator.migrate(pool)
         _dbPool = pool
     }
 
-    private var migrator: DatabaseMigrator {
+    /// Internal so a test can build a second, independent library (a second
+    /// Mac, for the sync tests) with the same schema.
+    static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
 
         migrator.registerMigration("v1_initial") { db in
@@ -332,6 +334,79 @@ final class Database: @unchecked Sendable {
             }
             try db.alter(table: "session") { t in
                 t.add(column: "briefing", .text)
+            }
+        }
+
+        migrator.registerMigration("v16_session_audio_bookmark") { db in
+            try db.alter(table: "session") { t in
+                // Bookmark of an imported file, which is referenced in place
+                // and so can be moved or renamed; see relocatingMovedAudio.
+                t.add(column: "audio_bookmark", .blob)
+            }
+        }
+
+        migrator.registerMigration("v17_library_sync") { db in
+            // Change tracking for LibrarySync. Triggers keep it, so no write
+            // path in the app has to remember to.
+            try db.alter(table: "session") { t in
+                t.add(column: "modified_at", .integer).notNull().defaults(to: 0)
+            }
+            try db.alter(table: "course") { t in
+                t.add(column: "modified_at", .integer).notNull().defaults(to: 0)
+            }
+            try db.execute(sql: "UPDATE session SET modified_at = COALESCE(ended_at, started_at)")
+            try db.execute(sql: "UPDATE course SET modified_at = created_at")
+
+            // What this Mac last exchanged with the sync folder, per item.
+            try db.create(table: "sync_state") { t in
+                t.column("kind", .text).notNull()
+                t.column("id", .text).notNull()
+                t.column("local_modified_at", .integer).notNull()
+                t.column("remote_revision", .text).notNull()
+                t.column("remote_fingerprint", .text).notNull()
+                t.primaryKey(["kind", "id"])
+            }
+            // Deletions not yet passed on to the sync folder.
+            try db.create(table: "sync_tombstone") { t in
+                t.column("kind", .text).notNull()
+                t.column("id", .text).notNull()
+                t.column("deleted_at", .integer).notNull()
+                t.primaryKey(["kind", "id"])
+            }
+
+            let now = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)"
+            // Strictly increasing, so two changes in one millisecond still
+            // read as a change.
+            func touchSession(_ id: String) -> String {
+                "UPDATE session SET modified_at = MAX(\(now), modified_at + 1) WHERE id = \(id);"
+            }
+            for table in ["segment", "highlight", "note", "note_version",
+                          "flashcard", "study_tool_result", "qa_message"] {
+                try db.execute(sql: """
+                    CREATE TRIGGER sync_\(table)_ai AFTER INSERT ON \(table)
+                    BEGIN \(touchSession("new.session_id")) END;
+                    CREATE TRIGGER sync_\(table)_au AFTER UPDATE ON \(table)
+                    BEGIN \(touchSession("new.session_id")) END;
+                    CREATE TRIGGER sync_\(table)_ad AFTER DELETE ON \(table)
+                    BEGIN \(touchSession("old.session_id")) END;
+                    """)
+            }
+            for table in ["session", "course"] {
+                // An update that sets modified_at itself (a child's trigger, or
+                // the sync applying another Mac's version) is left alone.
+                try db.execute(sql: """
+                    CREATE TRIGGER sync_\(table)_ai AFTER INSERT ON \(table) BEGIN
+                        UPDATE \(table) SET modified_at = MAX(\(now), new.modified_at) WHERE id = new.id;
+                    END;
+                    CREATE TRIGGER sync_\(table)_au AFTER UPDATE ON \(table)
+                    WHEN new.modified_at IS old.modified_at BEGIN
+                        UPDATE \(table) SET modified_at = MAX(\(now), old.modified_at + 1) WHERE id = new.id;
+                    END;
+                    CREATE TRIGGER sync_\(table)_ad AFTER DELETE ON \(table) BEGIN
+                        INSERT OR REPLACE INTO sync_tombstone(kind, id, deleted_at)
+                        VALUES ('\(table)', old.id, \(now));
+                    END;
+                    """)
             }
         }
 

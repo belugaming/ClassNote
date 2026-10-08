@@ -7,6 +7,7 @@ struct LibrarySidebar: View {
     @ObservedObject var vm: MainWindowViewModel
     let onRecord: (String?) -> Void
     let onImport: (String?) -> Void
+    let onImportVoiceMemos: (String?) -> Void
 
     @State private var newCourseName = ""
     @State private var presentingNewCourse = false
@@ -127,6 +128,11 @@ struct LibrarySidebar: View {
             onImport(course.id)
         } label: {
             Label(L10n.t("library.importHere"), systemImage: "square.and.arrow.down")
+        }
+        Button {
+            onImportVoiceMemos(course.id)
+        } label: {
+            Label(L10n.t("voiceMemos.menuHere"), systemImage: "waveform")
         }
         Divider()
         Button {

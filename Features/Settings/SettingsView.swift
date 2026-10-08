@@ -81,6 +81,7 @@ enum LectureLanguage {
 
 struct GeneralSettingsView: View {
     @EnvironmentObject var appState: AppState
+    @ObservedObject private var sync = LibrarySyncCoordinator.shared
     @State private var uiLanguage: L10n.LanguageOverride = L10n.override
     @AppStorage("overlayCaptionDisplayMode", store: AppEnvironment.defaults) private var displayModeRaw = OverlayCaptionDisplayMode.bilingual.rawValue
     @AppStorage("overlayCaptionTextSize", store: AppEnvironment.defaults) private var textSizeRaw = OverlayCaptionTextSize.medium.rawValue
@@ -134,6 +135,10 @@ struct GeneralSettingsView: View {
                 }
             }
 
+            SettingsSection(title: L10n.t("settings.sync.title"), footer: L10n.t("settings.sync.footer")) {
+                syncControls
+            }
+
             SettingsSection(title: L10n.t("settings.appearance.overlay"),
                             footer: L10n.t("settings.appearance.overlayNote")) {
                 Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
@@ -174,6 +179,48 @@ struct GeneralSettingsView: View {
             }
         }
         .onAppear { appState.refreshMicrophoneDevices() }
+    }
+
+    @ViewBuilder
+    private var syncControls: some View {
+        let available = LibrarySyncCoordinator.isICloudDriveAvailable
+        Toggle(L10n.t("settings.sync.toggle"),
+               isOn: Binding(get: { sync.isEnabled }, set: { sync.isEnabled = $0 }))
+            .disabled(!available && !sync.isEnabled)
+        if !available {
+            Label(L10n.t("sync.error.noICloudDrive"), systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(Theme.warning)
+        } else if sync.isEnabled {
+            HStack(spacing: 8) {
+                if sync.isSyncing {
+                    ProgressView().controlSize(.small)
+                }
+                Text(syncStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(L10n.t("settings.sync.reveal")) {
+                    NSWorkspace.shared.open(LibrarySync.defaultRoot)
+                }
+                Button(L10n.t("settings.sync.now")) {
+                    Task { await sync.syncNow() }
+                }
+                .disabled(sync.isSyncing)
+            }
+            if let error = sync.lastError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(Theme.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var syncStatus: String {
+        if sync.isSyncing { return L10n.t("settings.sync.syncing") }
+        guard let last = sync.lastSyncedAt else { return L10n.t("settings.sync.never") }
+        return String(format: L10n.t("settings.sync.last"), DateLabels.time(last))
     }
 
     private func languageBinding(_ keyPath: WritableKeyPath<ApiConfig, String>) -> Binding<String> {

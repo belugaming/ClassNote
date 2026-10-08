@@ -26,6 +26,8 @@ struct Session: Codable, FetchableRecord, PersistableRecord, Identifiable, Hasha
     var startedAt: Int64
     var endedAt: Int64?
     var audioPath: String?
+    /// Only for an imported file: finds it again after a move or rename.
+    var audioBookmark: Data?
     var sourceKind: String   // "mic" | "system" | "mixed" | "file"
     var state: String        // See SessionState.
     var sttModel: String?
@@ -42,6 +44,7 @@ struct Session: Codable, FetchableRecord, PersistableRecord, Identifiable, Hasha
         case startedAt = "started_at"
         case endedAt = "ended_at"
         case audioPath = "audio_path"
+        case audioBookmark = "audio_bookmark"
         case sourceKind = "source_kind"
         case sttModel = "stt_model"
         case llmModel = "llm_model"
@@ -57,6 +60,7 @@ struct Session: Codable, FetchableRecord, PersistableRecord, Identifiable, Hasha
                 startedAt: Int64(Date().timeIntervalSince1970 * 1000),
                 endedAt: nil,
                 audioPath: nil,
+                audioBookmark: nil,
                 sourceKind: sourceKind,
                 state: "recording",
                 sttModel: nil,

@@ -175,6 +175,44 @@ final class PipelineRegressionTests: XCTestCase {
         XCTAssertEqual(event.shifted(by: 0).id, event.id)
     }
 
+    // MARK: - An import named and dated by its source
+
+    @MainActor
+    func testImportItemTitleAndRecordingDateNameTheSession() async throws {
+        try ClassNote.Database.shared.setup()
+        let wasTranslating = AppState.shared.translationEnabled
+        AppState.shared.translationEnabled = false
+        defer { AppState.shared.translationEnabled = wasTranslating }
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("20260901 090000-\(UUID().uuidString).m4a")
+        try Data("not audio, the engine is a stub".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let recordedAt = Date(timeIntervalSince1970: 1_788_000_000)
+        let orchestrator = SessionOrchestrator()
+        orchestrator.sttProviderOverride = ParkingSTTProvider()
+        let sessionId = try await orchestrator.ingestFile(ImportItem(url: url,
+                                                                     title: "Linear Algebra",
+                                                                     recordedAt: recordedAt),
+                                                          courseId: nil)
+        addTeardownBlock {
+            try? await SessionRepository.shared.delete(id: sessionId, force: true)
+        }
+        var waited = 0
+        while orchestrator.transcript.segments.isEmpty, waited < 100 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+            waited += 1
+        }
+        await orchestrator.stop()
+
+        let session = try await SessionRepository.shared.get(id: sessionId)
+        XCTAssertEqual(session?.title, "Linear Algebra")
+        XCTAssertEqual(session?.startedAt, 1_788_000_000_000)
+        // Referenced in place, not copied.
+        XCTAssertEqual(session?.audioPath, url.path)
+    }
+
     // MARK: - C18: a cancelled task stays cancelled
 
     @MainActor

@@ -73,6 +73,8 @@ final class AppState: ObservableObject {
         await cleanupOrphanedRecordings()
         refreshMicrophoneDevices()
         await refreshInterruptedSessions()
+        // After the orphan sweep, which only ever looks at Application Support.
+        LibrarySyncCoordinator.shared.start()
         // Warm the local engine last, and without awaiting it: loading models
         // takes ~30s and must not delay the rest of startup.
         Task { await preloadLocalEngine() }
@@ -345,19 +347,21 @@ final class AppState: ObservableObject {
         _ = await (asr, translator, simul, llm)
     }
 
-    func importFile(url: URL,
+    func importFile(_ item: ImportItem,
                     courseId: String?,
                     parentTaskId: String? = nil,
                     countLabel: String? = nil,
                     onWorkerReady: ((SessionOrchestrator) -> Void)? = nil) async -> String? {
+        // A Voice Memos file name is a timestamp; its title is what the user knows it by.
+        let name = item.title ?? item.url.lastPathComponent
         var importOrchestrator: SessionOrchestrator?
         let taskId = taskCenter.start(title: L10n.t("task.import.title"),
-                                      detail: countLabel.map { "\($0) · \(url.lastPathComponent)" } ?? url.lastPathComponent,
+                                      detail: countLabel.map { "\($0) · \(name)" } ?? name,
                                       icon: "square.and.arrow.down",
                                       progress: 0)
         taskCenter.configureActions(id: taskId,
                                     retry: { [weak self] in
-                                        _ = await self?.importFile(url: url, courseId: courseId)
+                                        _ = await self?.importFile(item, courseId: courseId)
                                     },
                                     cancel: { [weak self] in
                                         await importOrchestrator?.stop()
@@ -376,10 +380,10 @@ final class AppState: ObservableObject {
             let worker = SessionOrchestrator()
             importOrchestrator = worker
             onWorkerReady?(worker)
-            let sessionId = try await worker.ingestFile(url: url, courseId: courseId)
+            let sessionId = try await worker.ingestFile(item, courseId: courseId)
             taskCenter.configureActions(id: taskId,
                                         retry: { [weak self] in
-                                            _ = await self?.importFile(url: url, courseId: courseId)
+                                            _ = await self?.importFile(item, courseId: courseId)
                                         },
                                         cancel: { [weak self, weak worker] in
                                             await worker?.stop()
@@ -397,7 +401,7 @@ final class AppState: ObservableObject {
                                   progress: worker.importProgress)
                 if let parentTaskId {
                     taskCenter.update(id: parentTaskId,
-                                      detail: countLabel ?? url.lastPathComponent,
+                                      detail: countLabel ?? name,
                                       progress: nil)
                 }
                 try? await Task.sleep(nanoseconds: 300_000_000)
@@ -409,23 +413,27 @@ final class AppState: ObservableObject {
             taskCenter.cancel(id: taskId, detail: L10n.t("task.import.cancelled"))
             return nil
         } catch {
-            taskCenter.fail(id: taskId, detail: url.lastPathComponent, error: error)
+            taskCenter.fail(id: taskId, detail: name, error: error)
             setError(error.localizedDescription)
             return nil
         }
     }
 
     func importFiles(urls: [URL], courseId: String?) async {
-        guard !urls.isEmpty else { return }
+        await importItems(urls.map { ImportItem(url: $0) }, courseId: courseId)
+    }
+
+    func importItems(_ items: [ImportItem], courseId: String?) async {
+        guard !items.isEmpty else { return }
         var cancelled = false
         var currentImport: SessionOrchestrator?
         let taskId = taskCenter.start(title: L10n.t("task.batchImport.title"),
-                                      detail: "\(urls.count)",
+                                      detail: "\(items.count)",
                                       icon: "tray.and.arrow.down",
                                       progress: 0)
         taskCenter.configureActions(id: taskId,
                                     retry: { [weak self] in
-                                        await self?.importFiles(urls: urls, courseId: courseId)
+                                        await self?.importItems(items, courseId: courseId)
                                     },
                                     cancel: { [weak self] in
                                         cancelled = true
@@ -433,10 +441,10 @@ final class AppState: ObservableObject {
                                         self?.taskCenter.cancel(id: taskId, detail: L10n.t("task.status.cancelled"))
                                     })
         var completed = 0
-        for url in urls {
+        for item in items {
             if cancelled { break }
-            let label = "\(completed + 1)/\(urls.count)"
-            let result = await importFile(url: url,
+            let label = "\(completed + 1)/\(items.count)"
+            let result = await importFile(item,
                                           courseId: courseId,
                                           parentTaskId: taskId,
                                           countLabel: label,
@@ -445,19 +453,19 @@ final class AppState: ObservableObject {
             if cancelled { break }
             if result == nil {
                 taskCenter.fail(id: taskId,
-                                detail: "\(completed)/\(urls.count)",
+                                detail: "\(completed)/\(items.count)",
                                 message: L10n.t("task.batchImport.partialFailure"))
                 return
             }
             completed += 1
             taskCenter.update(id: taskId,
-                              detail: "\(completed)/\(urls.count)",
-                              progress: Double(completed) / Double(max(urls.count, 1)))
+                              detail: "\(completed)/\(items.count)",
+                              progress: Double(completed) / Double(max(items.count, 1)))
         }
         if cancelled {
-            taskCenter.cancel(id: taskId, detail: "\(completed)/\(urls.count)")
+            taskCenter.cancel(id: taskId, detail: "\(completed)/\(items.count)")
         } else {
-            taskCenter.succeed(id: taskId, detail: "\(completed)/\(urls.count)")
+            taskCenter.succeed(id: taskId, detail: "\(completed)/\(items.count)")
         }
     }
 
@@ -496,6 +504,10 @@ final class AppState: ObservableObject {
                                                                 detail: L10n.t("task.status.cancelled"))
                                     })
         do {
+            if let path = session.audioPath {
+                taskCenter.update(id: taskId, detail: L10n.t("player.downloading"), progress: nil)
+                try await CloudFile.ensureDownloaded(URL(fileURLWithPath: path))
+            }
             _ = try await worker.retranscribeSession(session)
             NotificationCenter.default.post(name: .openLiveSession, object: session.id)
             while worker.isImporting {
@@ -649,6 +661,7 @@ extension Notification.Name {
     static let openLiveSession = Notification.Name("openLiveSession")
     static let toggleOverlay = Notification.Name("toggleOverlay")
     static let requestImportFile = Notification.Name("requestImportFile")
+    static let requestVoiceMemosImport = Notification.Name("requestVoiceMemosImport")
 }
 
 enum SttBackend: String, CaseIterable, Identifiable {

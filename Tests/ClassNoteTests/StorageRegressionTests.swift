@@ -54,6 +54,57 @@ final class StorageRegressionTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: orphanURL.path))
     }
 
+    // MARK: - An imported file is followed when it moves
+
+    private func importedSession(at url: URL) async throws -> Session {
+        try ClassNote.Database.shared.setup()
+        var session = Session.new(courseId: nil, title: "moved import", sourceKind: "file")
+        session.audioPath = url.path
+        session.audioBookmark = try url.bookmarkData()
+        try await SessionRepository.shared.insert(session)
+        let id = session.id
+        addTeardownBlock {
+            try? await SessionRepository.shared.delete(id: id, force: true)
+        }
+        return session
+    }
+
+    func testImportedAudioIsFoundAgainAfterItIsMoved() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("classnote-moved-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent("archive"),
+                                                withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let original = dir.appendingPathComponent("lecture.m4a")
+        try Data("audio".utf8).write(to: original)
+        let session = try await importedSession(at: original)
+
+        let moved = dir.appendingPathComponent("archive/renamed lecture.m4a")
+        try FileManager.default.moveItem(at: original, to: moved)
+        let relocated = await SessionRepository.shared.relocatingMovedAudio(session)
+
+        let canonical = { (path: String?) in path.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path } }
+        XCTAssertEqual(canonical(relocated.audioPath), canonical(moved.path))
+        let stored = try await SessionRepository.shared.get(id: session.id)
+        XCTAssertEqual(stored?.audioPath, relocated.audioPath)
+    }
+
+    func testImportedAudioMovedToTheTrashCountsAsGone() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("classnote-trashed-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent(".Trash"),
+                                                withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let original = dir.appendingPathComponent("lecture.m4a")
+        try Data("audio".utf8).write(to: original)
+        let session = try await importedSession(at: original)
+
+        try FileManager.default.moveItem(at: original, to: dir.appendingPathComponent(".Trash/lecture.m4a"))
+        let relocated = await SessionRepository.shared.relocatingMovedAudio(session)
+
+        XCTAssertEqual(relocated.audioPath, original.path)
+    }
+
     // MARK: - C7: Chinese is indexable at all
 
     func testChineseSegmentIsFoundByPartialQuery() async throws {
