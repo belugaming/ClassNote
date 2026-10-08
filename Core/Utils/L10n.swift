@@ -164,6 +164,7 @@ enum L10n {
         "common.ok": "OK",
         "common.error": "Error",
         "common.loading": "Loading…",
+        "llm.thinking": "Thinking…",
         "diagnostics.ok": "OK",
 
         // App
@@ -606,7 +607,7 @@ enum L10n {
         "settings.api.anthropic.effort.xhigh": "Extra high",
         "settings.api.anthropic.effort.max": "Max",
         "settings.api.anthropic.effort.none": "Don't send",
-        "settings.api.anthropic.effortHelp": "How much Claude thinks before it answers. Higher is slower and costs more. Medium is Opus 5.5's default and suits most notes; choose Don't send for an older model or a relay that rejects this setting.",
+        "settings.api.anthropic.effortHelp": "How much Claude thinks before it answers. Higher is slower and costs more. Medium is Opus 5.5's default and suits most notes; choose Don't send for an older model or a relay that rejects it (the thinking progress is then not shown either).",
 
         "main.deleteSession.confirm.title": "Delete this session?",
         "main.deleteSession.confirm.message": "“%@” and its transcript, notes and audio will be permanently removed.",
@@ -745,6 +746,7 @@ enum L10n {
         "common.ok": "好",
         "common.error": "出错了",
         "common.loading": "加载中…",
+        "llm.thinking": "思考中…",
         "diagnostics.ok": "正常",
 
         "app.name": "ClassNote",
@@ -1184,7 +1186,7 @@ enum L10n {
         "settings.api.anthropic.effort.xhigh": "很高",
         "settings.api.anthropic.effort.max": "最高",
         "settings.api.anthropic.effort.none": "不发送",
-        "settings.api.anthropic.effortHelp": "Claude 回答前思考的程度。越高越慢、费用越高。「中」是 Opus 5.5 的默认值，适合大多数笔记；旧模型或不支持此参数的中转请选「不发送」。",
+        "settings.api.anthropic.effortHelp": "Claude 回答前思考的程度。越高越慢、费用越高。「中」是 Opus 5.5 的默认值，适合大多数笔记；旧模型或不支持此参数的中转请选「不发送」（这时也不会显示思考过程）。",
 
         "main.deleteSession.confirm.title": "删除该会话？",
         "main.deleteSession.confirm.message": "“%@”及其逐字稿、笔记和录音将被永久删除。",

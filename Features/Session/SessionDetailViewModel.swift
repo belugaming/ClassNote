@@ -11,11 +11,15 @@ final class SessionDetailViewModel: ObservableObject {
     @Published var highlights: [Highlight] = []
     @Published var isGeneratingNotes: Bool = false
     @Published var streamingNoteMarkdown: String = ""
+    /// The model's reasoning summary while it works, for engines that stream
+    /// one (Claude), shown until the first words of the answer arrive.
+    @Published var streamingNoteThinking: String = ""
     @Published var isRetranslating: Bool = false
     @Published var isPlaying: Bool = false
     @Published var isAnsweringQuestion: Bool = false
     @Published var qaMessages: [QAMessage] = []
     @Published var streamingQAResponse: String = ""
+    @Published var streamingQAThinking: String = ""
     @Published var isGeneratingFlashcards: Bool = false
     @Published var streamingFlashcardsRaw: String = ""
     @Published var flashcards: [Flashcard] = []
@@ -28,6 +32,7 @@ final class SessionDetailViewModel: ObservableObject {
     @Published var selectedHighlightId: Int64?
     @Published var streamingHighlightId: Int64?
     @Published var streamingBuffer: String = ""
+    @Published var streamingHighlightThinking: String = ""
 
     /// Audio transport. `playheadMs` is written by the ticker, except while the
     /// user drags the scrubber.
@@ -188,10 +193,12 @@ final class SessionDetailViewModel: ObservableObject {
         isGeneratingNotes = true
         notesGenerationSessionId = target
         streamingNoteMarkdown = ""
+        streamingNoteThinking = ""
         defer {
             isGeneratingNotes = false
             notesGenerationSessionId = nil
             streamingNoteMarkdown = ""
+            streamingNoteThinking = ""
         }
         let config = AppState.shared.apiConfig
         let backend = AppState.shared.llmBackend
@@ -305,14 +312,22 @@ final class SessionDetailViewModel: ObservableObject {
                                 target: String,
                                 header: String) async throws -> String {
         var md = ""
-        for try await delta in llm.chat(messages: [
+        for try await event in llm.chatEvents(messages: [
             .init(role: .system, content: system),
             .init(role: .user, content: user)
         ], model: config.activeLLMModel, temperature: 0.3)
         {
-            md += delta
-            guard currentSessionId == target else { continue }
-            streamingNoteMarkdown = header.isEmpty ? md : header + "\n\n" + md
+            guard currentSessionId == target else {
+                if case .text(let delta) = event { md += delta }
+                continue
+            }
+            switch event {
+            case .text(let delta):
+                md += delta
+                streamingNoteMarkdown = header.isEmpty ? md : header + "\n\n" + md
+            case .thinking(let delta):
+                streamingNoteThinking += delta
+            }
         }
         return md
     }
@@ -322,9 +337,11 @@ final class SessionDetailViewModel: ObservableObject {
         let target = s.session.id
         isAnsweringQuestion = true
         streamingQAResponse = ""
+        streamingQAThinking = ""
         defer {
             isAnsweringQuestion = false
             streamingQAResponse = ""
+            streamingQAThinking = ""
             transcriptTruncatedNotice = ""
         }
         let config = AppState.shared.apiConfig
@@ -350,20 +367,30 @@ final class SessionDetailViewModel: ObservableObject {
         do {
             try await QAMessageRepository.shared.insert(userMessage)
             var answer = ""
+            // The system prompt and transcript repeat word for word on every
+            // question about this lecture; only the history after them moves.
             let messages = [
                 .init(role: .system, content: system),
-                .init(role: .user, content: "Lecture transcript:\n\(transcriptText)")
+                .init(role: .user, content: "Lecture transcript:\n\(transcriptText)", endsCachedPrefix: true)
             ] + recentHistory.map { message in
                 ChatMessage(role: message.role == .user ? .user : .assistant,
                             content: message.content)
             } + [
                 .init(role: .user, content: question)
             ]
-            for try await delta in llm.chat(messages: messages, model: config.activeLLMModel, temperature: 0.2)
+            for try await event in llm.chatEvents(messages: messages, model: config.activeLLMModel, temperature: 0.2)
             {
-                answer += delta
-                guard currentSessionId == target else { continue }
-                streamingQAResponse = answer
+                guard currentSessionId == target else {
+                    if case .text(let delta) = event { answer += delta }
+                    continue
+                }
+                switch event {
+                case .text(let delta):
+                    answer += delta
+                    streamingQAResponse = answer
+                case .thinking(let delta):
+                    streamingQAThinking += delta
+                }
             }
             let assistantMessage = QAMessage(id: UUID().uuidString,
                                              sessionId: target,
@@ -807,6 +834,7 @@ final class SessionDetailViewModel: ObservableObject {
         streamingTask?.cancel()
         let config = AppState.shared.apiConfig
         streamingBuffer = ""
+        streamingHighlightThinking = ""
         streamingHighlightId = highlightId
         let llm = EngineFactory.makeLLM(config: config, backend: AppState.shared.llmBackend)
         // Captured now: a session switch mid-stream would otherwise explain
@@ -824,9 +852,12 @@ final class SessionDetailViewModel: ObservableObject {
                     config: config,
                     llm: llm,
                     courseContext: coursePrompt)
-                for try await delta in stream {
+                for try await event in stream {
                     if Task.isCancelled { return }
-                    self.streamingBuffer += delta
+                    switch event {
+                    case .text(let delta): self.streamingBuffer += delta
+                    case .thinking(let delta): self.streamingHighlightThinking += delta
+                    }
                 }
                 if Task.isCancelled { return }
                 let final = self.streamingBuffer
@@ -840,14 +871,17 @@ final class SessionDetailViewModel: ObservableObject {
                     generatedAt: Int64(Date().timeIntervalSince1970 * 1000))
                 self.streamingHighlightId = nil
                 self.streamingBuffer = ""
+                self.streamingHighlightThinking = ""
                 await self.reloadHighlights()
             } catch is CancellationError {
                 self.streamingHighlightId = nil
                 self.streamingBuffer = ""
+                self.streamingHighlightThinking = ""
             } catch {
                 AppState.shared.setError("\(L10n.t("highlight.error.generateFailed")): \(error.localizedDescription)")
                 self.streamingHighlightId = nil
                 self.streamingBuffer = ""
+                self.streamingHighlightThinking = ""
             }
         }
         streamingTask = task

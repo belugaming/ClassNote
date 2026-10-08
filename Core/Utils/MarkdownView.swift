@@ -179,6 +179,43 @@ struct StreamingMarkdownPreview: View {
     }
 }
 
+/// The model's reasoning summary while it works, before the answer starts, so
+/// a long think does not look like a hang. Only the tail is shown: the
+/// summary runs long, and only where the model is now is worth reading.
+struct ThinkingPreview: View {
+    let text: String
+
+    private static let maxChars = 400
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text(L10n.t("llm.thinking")).font(.callout.weight(.medium))
+            }
+            .foregroundStyle(.secondary)
+            if !tail.isEmpty {
+                Text(MarkdownParser.streamingPreviewText(tail))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// The last `maxChars` characters, starting at a word boundary.
+    private var tail: String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > Self.maxChars else { return trimmed }
+        let cut = trimmed.suffix(Self.maxChars)
+        guard let boundary = cut.firstIndex(where: { $0 == " " || $0 == "\n" }) else {
+            return "…" + String(cut)
+        }
+        return "…" + String(cut[cut.index(after: boundary)...])
+    }
+}
+
 enum MarkdownBlock {
     case heading(level: Int, text: String)
     case paragraph(String)

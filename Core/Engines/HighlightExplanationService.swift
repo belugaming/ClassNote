@@ -12,7 +12,7 @@ actor HighlightExplanationService {
                   preset: PromptPreset,
                   config: ApiConfig,
                   llm: LLMProvider,
-                  courseContext: String = "") -> AsyncThrowingStream<String, Error> {
+                  courseContext: String = "") -> AsyncThrowingStream<ChatStreamEvent, Error> {
         let fullTranscript = Self.renderSegments(allSegments)
         let rangeSegments = allSegments.filter { seg in
             seg.startMs <= rangeEndMs && seg.endMs >= rangeStartMs
@@ -37,7 +37,7 @@ actor HighlightExplanationService {
             .init(role: .system, content: system),
             .init(role: .user, content: userContent),
         ]
-        return llm.chat(messages: messages, model: config.activeLLMModel, temperature: 0.3)
+        return llm.chatEvents(messages: messages, model: config.activeLLMModel, temperature: 0.3)
     }
 
     private static func renderSegments(_ segments: [Segment]) -> String {

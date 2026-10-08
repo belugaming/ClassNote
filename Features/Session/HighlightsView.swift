@@ -186,8 +186,12 @@ private struct HighlightDetail: View {
     private func explanation(_ h: Highlight) -> some View {
         if vm.streamingHighlightId == h.id {
             VStack(alignment: .leading, spacing: 8) {
-                ProgressView().controlSize(.small)
-                StreamingMarkdownPreview(markdown: vm.streamingBuffer).textSelection(.enabled)
+                if vm.streamingBuffer.isEmpty && !vm.streamingHighlightThinking.isEmpty {
+                    ThinkingPreview(text: vm.streamingHighlightThinking)
+                } else {
+                    ProgressView().controlSize(.small)
+                    StreamingMarkdownPreview(markdown: vm.streamingBuffer).textSelection(.enabled)
+                }
             }
         } else if let md = h.explanationMd, !md.isEmpty {
             VStack(alignment: .leading, spacing: 8) {

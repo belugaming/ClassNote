@@ -13,12 +13,18 @@ final class AnthropicLLM: LLMProvider, Sendable {
 
     /// `temperature` is not sent: current Claude models reject sampling
     /// parameters with a 400, and the callers' 0.2–0.3 is only a nudge.
-    /// Thinking is not configured either: on current models it is always on
-    /// (disabling it or giving it a token budget is a 400), and effort,
-    /// sent from the settings, is what decides how much of it there is.
     func chat(messages: [ChatMessage],
               model: String,
               temperature: Double) -> AsyncThrowingStream<String, Error> {
+        .relaying(chatEvents(messages: messages, model: model, temperature: temperature)) { event in
+            if case .text(let text) = event { return text }
+            return nil
+        }
+    }
+
+    func chatEvents(messages: [ChatMessage],
+                    model: String,
+                    temperature: Double) -> AsyncThrowingStream<ChatStreamEvent, Error> {
         AnthropicMessagesClient.stream(config: config, messages: messages, model: model)
     }
 
@@ -66,6 +72,13 @@ enum AnthropicMessagesClient {
 
     /// System messages become the top-level `system` field; the API takes only
     /// user and assistant turns, and rejects one with no text in it.
+    ///
+    /// With an effort set, thinking is asked for as `adaptive` with a
+    /// summarized display, so the wait before the first word can show what
+    /// the model is working on. Thinking itself cannot be turned off on
+    /// current models (disabling it or giving it a token budget is a 400);
+    /// effort is what decides how much of it there is. An empty effort sends
+    /// neither, for an older model or a relay that rejects them.
     static func requestBody(messages: [ChatMessage],
                             model: String,
                             effort: String,
@@ -78,12 +91,28 @@ enum AnthropicMessagesClient {
             "model": model,
             "max_tokens": maxTokens,
             "stream": true,
-            "messages": turns.map { ["role": $0.role.rawValue, "content": $0.content] },
+            "messages": turns.map(messageJSON),
         ]
         if !system.isEmpty { body["system"] = system }
-        if !effort.isEmpty { body["output_config"] = ["effort": effort] }
+        if !effort.isEmpty {
+            body["thinking"] = ["type": "adaptive", "display": "summarized"]
+            body["output_config"] = ["effort": effort]
+        }
         if serverFallback { body["fallbacks"] = "default" }
         return body
+    }
+
+    /// A turn that ends a repeated prefix carries a cache breakpoint: the next
+    /// request reads everything up to it from the prompt cache at a fraction
+    /// of the input price, instead of paying for the transcript again.
+    private static func messageJSON(_ message: ChatMessage) -> [String: Any] {
+        guard message.endsCachedPrefix else {
+            return ["role": message.role.rawValue, "content": message.content]
+        }
+        return ["role": message.role.rawValue,
+                "content": [["type": "text",
+                             "text": message.content,
+                             "cache_control": ["type": "ephemeral"]]]]
     }
 
     static func request(config: ApiConfig, messages: [ChatMessage], model: String) throws -> URLRequest {
@@ -116,7 +145,7 @@ enum AnthropicMessagesClient {
 
     static func stream(config: ApiConfig,
                        messages: [ChatMessage],
-                       model: String) -> AsyncThrowingStream<String, Error> {
+                       model: String) -> AsyncThrowingStream<ChatStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -133,11 +162,17 @@ enum AnthropicMessagesClient {
                     }
 
                     var parser = AnthropicStreamParser()
-                    for try await line in stream.lines {
-                        guard let event = parser.feed(line) else { continue }
-                        guard case .text(let text) = event else { break }
-                        continuation.yield(text)
+                    read: for try await line in stream.lines {
+                        switch parser.feed(line) {
+                        case .text(let text): continuation.yield(.text(text))
+                        case .thinking(let text): continuation.yield(.thinking(text))
+                        case .done: break read
+                        case nil: continue
+                        }
                     }
+                    // Shows whether the transcript prefix came from the cache.
+                    NSLog("[AnthropicLLM] %@ input tokens: %ld uncached, %ld cache read, %ld cache write",
+                          model, parser.inputTokens, parser.cacheReadTokens, parser.cacheWriteTokens)
                     try parser.finish()
                     continuation.finish()
                 } catch {
@@ -149,19 +184,24 @@ enum AnthropicMessagesClient {
     }
 }
 
-/// Reads the Messages API's SSE stream one line at a time. Only `text_delta`s
-/// reach the caller: thinking blocks are the model's reasoning and must not
-/// end up in the note, and the `fallback` marker a server-side fallback leaves
-/// is bookkeeping (the new model continues the same text).
+/// Reads the Messages API's SSE stream one line at a time. Text and thinking
+/// come out as separate events so the reasoning can be shown as progress
+/// without ending up in the note; the `fallback` marker a server-side
+/// fallback leaves is bookkeeping (the new model continues the same text).
 struct AnthropicStreamParser {
     enum Event: Equatable {
         case text(String)
+        case thinking(String)
         case done
     }
 
     private(set) var stopReason: String?
     private(set) var refusalCategory: String?
+    private(set) var inputTokens = 0
+    private(set) var cacheReadTokens = 0
+    private(set) var cacheWriteTokens = 0
     private var streamError: EngineError?
+    private var sawThinkingBlock = false
 
     mutating func feed(_ line: String) -> Event? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -173,12 +213,30 @@ struct AnthropicStreamParser {
         else { return nil }
 
         switch type {
+        case "message_start":
+            if let usage = (obj["message"] as? [String: Any])?["usage"] as? [String: Any] {
+                inputTokens = usage["input_tokens"] as? Int ?? 0
+                cacheReadTokens = usage["cache_read_input_tokens"] as? Int ?? 0
+                cacheWriteTokens = usage["cache_creation_input_tokens"] as? Int ?? 0
+            }
+            return nil
+        case "content_block_start":
+            // Adaptive thinking can come in several blocks; keep them apart.
+            guard (obj["content_block"] as? [String: Any])?["type"] as? String == "thinking" else { return nil }
+            defer { sawThinkingBlock = true }
+            return sawThinkingBlock ? .thinking("\n\n") : nil
         case "content_block_delta":
-            guard let delta = obj["delta"] as? [String: Any],
-                  delta["type"] as? String == "text_delta",
-                  let text = delta["text"] as? String, !text.isEmpty
-            else { return nil }
-            return .text(text)
+            guard let delta = obj["delta"] as? [String: Any] else { return nil }
+            switch delta["type"] as? String {
+            case "text_delta":
+                guard let text = delta["text"] as? String, !text.isEmpty else { return nil }
+                return .text(text)
+            case "thinking_delta":
+                guard let text = delta["thinking"] as? String, !text.isEmpty else { return nil }
+                return .thinking(text)
+            default:
+                return nil
+            }
         case "message_delta":
             if let delta = obj["delta"] as? [String: Any],
                let reason = delta["stop_reason"] as? String {

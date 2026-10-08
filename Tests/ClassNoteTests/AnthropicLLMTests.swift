@@ -39,9 +39,12 @@ final class AnthropicRequestTests: XCTestCase {
         XCTAssertEqual(body["stream"] as? Bool, true)
         XCTAssertNotNil(body["max_tokens"] as? Int)
         XCTAssertEqual((body["output_config"] as? [String: Any])?["effort"] as? String, "medium")
+        // Adaptive is the only thinking mode current models take; disabled or
+        // a token budget is a 400. Summarized, so progress can be shown.
+        let thinking = try XCTUnwrap(body["thinking"] as? [String: String])
+        XCTAssertEqual(thinking, ["type": "adaptive", "display": "summarized"])
         // Rejected by current models.
         XCTAssertNil(body["temperature"])
-        XCTAssertNil(body["thinking"])
 
         // The blank assistant turn is dropped: the API rejects empty text.
         let turns = try XCTUnwrap(body["messages"] as? [[String: String]])
@@ -56,6 +59,25 @@ final class AnthropicRequestTests: XCTestCase {
                                                           messages: [.init(role: .user, content: "hi")],
                                                           model: "claude-haiku-4-5")
         XCTAssertNil(try bodyJSON(request)["output_config"])
+        XCTAssertNil(try bodyJSON(request)["thinking"])
+    }
+
+    func testCachedPrefixCarriesACacheBreakpoint() throws {
+        let request = try AnthropicMessagesClient.request(config: .default, messages: [
+            .init(role: .system, content: "Answer about the lecture."),
+            .init(role: .user, content: "Lecture transcript: …", endsCachedPrefix: true),
+            .init(role: .user, content: "What was the main idea?"),
+        ], model: "claude-opus-5-5")
+        let turns = try XCTUnwrap(try bodyJSON(request)["messages"] as? [[String: Any]])
+        XCTAssertEqual(turns.count, 2)
+
+        let blocks = try XCTUnwrap(turns[0]["content"] as? [[String: Any]])
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks[0]["type"] as? String, "text")
+        XCTAssertEqual(blocks[0]["text"] as? String, "Lecture transcript: …")
+        XCTAssertEqual((blocks[0]["cache_control"] as? [String: String])?["type"], "ephemeral")
+        // The moving part after the breakpoint stays a plain string.
+        XCTAssertEqual(turns[1]["content"] as? String, "What was the main idea?")
     }
 
     func testServerFallbackOnlyOnAnthropicsOwnApiAndKnownModels() throws {
@@ -109,20 +131,27 @@ final class AnthropicStreamParserTests: XCTestCase {
         return (parser, events)
     }
 
-    func testOnlyTextDeltasReachTheCaller() throws {
+    func testTextAndThinkingComeOutSeparately() throws {
         let (parser, events) = feed([
             "event: message_start",
-            #"data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-5-5"}}"#,
+            #"data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-5-5","usage":{"input_tokens":40,"cache_read_input_tokens":9000,"cache_creation_input_tokens":0}}}"#,
             #"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
-            #"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"secret"}}"#,
+            #"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Reading the transcript"}}"#,
             #"data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"abc"}}"#,
+            #"data: {"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}"#,
+            #"data: {"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"Outlining"}}"#,
             #"data: {"type":"ping"}"#,
-            #"data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"# Notes"}}"#,
+            #"data: {"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}"#,
+            ##"data: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"# Notes"}}"##,
             #"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}"#,
             #"data: {"type":"message_stop"}"#,
         ])
-        XCTAssertEqual(events, [.text("# Notes"), .done])
+        XCTAssertEqual(events, [.thinking("Reading the transcript"), .thinking("\n\n"), .thinking("Outlining"),
+                                .text("# Notes"), .done])
         XCTAssertEqual(parser.stopReason, "end_turn")
+        XCTAssertEqual(parser.inputTokens, 40)
+        XCTAssertEqual(parser.cacheReadTokens, 9000)
+        XCTAssertEqual(parser.cacheWriteTokens, 0)
         XCTAssertNoThrow(try parser.finish())
     }
 
@@ -213,10 +242,16 @@ final class AnthropicHTTPIntegrationTests: XCTestCase {
                                     body: body)
         }
 
-        let out = try await AnthropicLLM(config: config).chatComplete(
-            messages: [.init(role: .system, content: "sys"), .init(role: .user, content: "hi")],
-            model: "claude-opus-5-5", temperature: 0.3)
+        let llm = AnthropicLLM(config: config)
+        let messages: [ChatMessage] = [.init(role: .system, content: "sys"), .init(role: .user, content: "hi")]
+        let out = try await llm.chatComplete(messages: messages, model: "claude-opus-5-5", temperature: 0.3)
         XCTAssertEqual(out, "Hello world")
+
+        var events: [ChatStreamEvent] = []
+        for try await event in llm.chatEvents(messages: messages, model: "claude-opus-5-5", temperature: 0.3) {
+            events.append(event)
+        }
+        XCTAssertEqual(events, [.thinking("hmm"), .text("Hello"), .text(" world")])
     }
 
     func testHTTPErrorSurfacesTheStatus() async throws {
@@ -233,5 +268,30 @@ final class AnthropicHTTPIntegrationTests: XCTestCase {
             XCTAssertEqual(status, 401)
             XCTAssertTrue(body.contains("invalid x-api-key"), body)
         }
+    }
+}
+
+final class ChatEventsDefaultTests: XCTestCase {
+    /// An engine with no reasoning to show gets `chatEvents` for free, as text.
+    private struct TextOnlyLLM: LLMProvider {
+        func chat(messages: [ChatMessage], model: String, temperature: Double) -> AsyncThrowingStream<String, Error> {
+            AsyncThrowingStream { continuation in
+                continuation.yield("a")
+                continuation.yield("b")
+                continuation.finish()
+            }
+        }
+
+        func chatComplete(messages: [ChatMessage], model: String, temperature: Double) async throws -> String {
+            "ab"
+        }
+    }
+
+    func testDefaultChatEventsCarriesTheTextOnly() async throws {
+        var events: [ChatStreamEvent] = []
+        for try await event in TextOnlyLLM().chatEvents(messages: [], model: "m", temperature: 0) {
+            events.append(event)
+        }
+        XCTAssertEqual(events, [.text("a"), .text("b")])
     }
 }

@@ -90,11 +90,17 @@ struct NotesView: View {
     private var content: some View {
         if vm.isShowingNoteStream {
             ScrollView {
-                StreamingMarkdownPreview(markdown: vm.streamingNoteMarkdown)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: Theme.readingWidth, alignment: .leading)
-                    .padding(24)
-                    .frame(maxWidth: .infinity)
+                Group {
+                    if vm.streamingNoteMarkdown.isEmpty && !vm.streamingNoteThinking.isEmpty {
+                        ThinkingPreview(text: vm.streamingNoteThinking)
+                    } else {
+                        StreamingMarkdownPreview(markdown: vm.streamingNoteMarkdown)
+                            .textSelection(.enabled)
+                    }
+                }
+                .frame(maxWidth: Theme.readingWidth, alignment: .leading)
+                .padding(24)
+                .frame(maxWidth: .infinity)
             }
         } else if let markdown = vm.note?.markdown, !markdown.isEmpty {
             ScrollView {
