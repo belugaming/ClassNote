@@ -293,6 +293,11 @@ struct EngineSettingsView: View {
             SettingsSection(title: L10n.t("settings.engines.llmSection"), footer: L10n.t("settings.engines.llmHelp")) {
                 EnginePicker(options: llmOptions, selection: $appState.llmBackend)
                 if appState.llmBackend == .localMLX { ModelsLink(ids: ["qwen3"]) }
+                if appState.llmBackend == .anthropic && appState.apiConfig.isAnthropicCredentialMissing {
+                    Label(L10n.t("settings.engines.anthropic.noKey"), systemImage: "key")
+                        .font(.caption)
+                        .foregroundStyle(Theme.warning)
+                }
             }
         }
         // Skip the write when the picker already matches what is stored: that
@@ -347,6 +352,8 @@ struct EngineSettingsView: View {
             EngineOption(value: .localMLX, title: "Qwen3 4B Instruct", detail: L10n.t("engine.llm.qwen3"), isLocal: true),
             EngineOption(value: .openAICompatible, title: L10n.t("engine.cloud.title"),
                          detail: L10n.t("engine.llm.cloud"), isLocal: false),
+            EngineOption(value: .anthropic, title: "Claude (Anthropic)",
+                         detail: L10n.t("engine.llm.anthropic"), isLocal: false),
         ]
     }
 }
@@ -504,6 +511,8 @@ struct ApiSettingsView: View {
     @EnvironmentObject var appState: AppState
     @State private var testStatus = ""
     @State private var testIsError = false
+    @State private var anthropicTestStatus = ""
+    @State private var anthropicTestIsError = false
     @State private var autosaveTask: Task<Void, Never>?
     @State private var localNetworkDenied = false
 
@@ -616,6 +625,54 @@ struct ApiSettingsView: View {
                 }
                 Spacer()
             }
+
+            SettingsSection(title: "Claude (Anthropic)", footer: L10n.t("settings.api.anthropic.footer")) {
+                LabeledRow(label: L10n.t("settings.api.baseUrl")) {
+                    TextField(ApiConfig.defaultAnthropicBaseUrl, text: binding(\.anthropicBaseUrl))
+                        .textFieldStyle(.roundedBorder)
+                }
+                LabeledRow(label: L10n.t("settings.api.key")) {
+                    SecureField("sk-ant-…", text: binding(\.anthropicApiKey))
+                        .textFieldStyle(.roundedBorder)
+                }
+                LabeledRow(label: L10n.t("settings.api.llm")) {
+                    TextField(ApiConfig.defaultAnthropicModel, text: binding(\.anthropicModel))
+                        .textFieldStyle(.roundedBorder)
+                }
+                LabeledRow(label: L10n.t("settings.api.anthropic.effort")) {
+                    Picker(L10n.t("settings.api.anthropic.effort"), selection: binding(\.anthropicEffort)) {
+                        ForEach(ApiConfig.anthropicEffortLevels, id: \.self) { level in
+                            Text(L10n.t("settings.api.anthropic.effort.\(level)")).tag(level)
+                        }
+                        Divider()
+                        Text(L10n.t("settings.api.anthropic.effort.none")).tag("")
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                    Text(L10n.t("settings.api.anthropic.effortHelp"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: 10) {
+                    Button {
+                        Task { await testAnthropicConnection() }
+                    } label: {
+                        Label(L10n.t("settings.api.test"), systemImage: "antenna.radiowaves.left.and.right")
+                    }
+                    .disabled(appState.apiConfig.anthropicBaseUrl.isEmpty
+                              || appState.apiConfig.isAnthropicCredentialMissing)
+                    if !anthropicTestStatus.isEmpty {
+                        Label(anthropicTestStatus,
+                              systemImage: anthropicTestIsError ? "xmark.circle.fill" : "checkmark.circle.fill")
+                            .foregroundStyle(anthropicTestIsError ? Theme.recording : Theme.success)
+                            .font(.callout)
+                            .lineLimit(2)
+                    }
+                    Spacer()
+                }
+            }
         }
         .onDisappear {
             autosaveTask?.cancel()
@@ -635,6 +692,7 @@ struct ApiSettingsView: View {
         update(&config)
         appState.apiConfig = config
         testStatus = ""
+        anthropicTestStatus = ""
         autosaveTask?.cancel()
         let state = appState
         autosaveTask = Task { [config] in
@@ -660,16 +718,31 @@ struct ApiSettingsView: View {
     private func testConnection() async {
         testStatus = L10n.t("settings.api.testing")
         testIsError = false
-        let client = OpenAICompatibleLLM(config: appState.apiConfig)
+        let (status, isError) = await Self.ping(OpenAICompatibleLLM(config: appState.apiConfig),
+                                                model: appState.apiConfig.llmModel)
+        testStatus = status
+        testIsError = isError
+    }
+
+    private func testAnthropicConnection() async {
+        anthropicTestStatus = L10n.t("settings.api.testing")
+        anthropicTestIsError = false
+        let (status, isError) = await Self.ping(AnthropicLLM(config: appState.apiConfig),
+                                                model: appState.apiConfig.anthropicModel)
+        anthropicTestStatus = status
+        anthropicTestIsError = isError
+    }
+
+    /// One tiny chat round-trip; returns the status line and whether it failed.
+    private static func ping(_ client: LLMProvider, model: String) async -> (String, Bool) {
         do {
             let out = try await client.chatComplete(messages: [
                 .init(role: .system, content: "Reply with exactly: OK"),
                 .init(role: .user, content: "ping"),
-            ], model: appState.apiConfig.llmModel, temperature: 0)
-            testStatus = "\(L10n.t("settings.api.testOk")) — \(out.prefix(40))"
+            ], model: model, temperature: 0)
+            return ("\(L10n.t("settings.api.testOk")) — \(out.prefix(40))", false)
         } catch {
-            testStatus = "\(L10n.t("settings.api.testFail")): \(error.localizedDescription)"
-            testIsError = true
+            return ("\(L10n.t("settings.api.testFail")): \(error.localizedDescription)", true)
         }
     }
 }

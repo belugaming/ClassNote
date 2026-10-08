@@ -152,12 +152,14 @@ final class LLMBackendTests: XCTestCase {
     func testRawValuesMatchTheStoredStrings() {
         XCTAssertEqual(LLMBackend(rawValue: "openai"), .openAICompatible)
         XCTAssertEqual(LLMBackend(rawValue: "mlx"), .localMLX)
+        XCTAssertEqual(LLMBackend(rawValue: "anthropic"), .anthropic)
         XCTAssertNil(LLMBackend(rawValue: "whatever"))
     }
 
     func testOnlyTheMLXBackendIsALocalSidecar() {
         XCTAssertTrue(LLMBackend.localMLX.isLocalSidecar)
         XCTAssertFalse(LLMBackend.openAICompatible.isLocalSidecar)
+        XCTAssertFalse(LLMBackend.anthropic.isLocalSidecar)
     }
 }
 

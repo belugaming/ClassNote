@@ -229,7 +229,7 @@ final class SessionDetailViewModel: ObservableObject {
                                    markdown: md,
                                    version: baseVersion + 1,
                                    generatedAt: Int64(Date().timeIntervalSince1970 * 1000),
-                                   model: config.llmModel)
+                                   model: config.activeLLMModel)
             try await NoteRepository.shared.upsert(noteEntity, template: template.id)
             try await SessionRepository.shared.setState(target, state: "summarized")
             guard currentSessionId == target else { return }   // persisted, just not on screen
@@ -308,7 +308,7 @@ final class SessionDetailViewModel: ObservableObject {
         for try await delta in llm.chat(messages: [
             .init(role: .system, content: system),
             .init(role: .user, content: user)
-        ], model: config.llmModel, temperature: 0.3)
+        ], model: config.activeLLMModel, temperature: 0.3)
         {
             md += delta
             guard currentSessionId == target else { continue }
@@ -359,7 +359,7 @@ final class SessionDetailViewModel: ObservableObject {
             } + [
                 .init(role: .user, content: question)
             ]
-            for try await delta in llm.chat(messages: messages, model: config.llmModel, temperature: 0.2)
+            for try await delta in llm.chat(messages: messages, model: config.activeLLMModel, temperature: 0.2)
             {
                 answer += delta
                 guard currentSessionId == target else { continue }
@@ -369,7 +369,7 @@ final class SessionDetailViewModel: ObservableObject {
                                              sessionId: target,
                                              role: .assistant,
                                              content: answer,
-                                             model: config.llmModel,
+                                             model: config.activeLLMModel,
                                              createdAt: Int64(Date().timeIntervalSince1970 * 1000))
             try await QAMessageRepository.shared.insert(assistantMessage)
             guard currentSessionId == target else { return }
@@ -430,7 +430,7 @@ final class SessionDetailViewModel: ObservableObject {
             for try await delta in llm.chat(messages: [
                 .init(role: .system, content: system),
                 .init(role: .user, content: budgetedTranscript(transcriptForLLM(s.segments)))
-            ], model: config.llmModel, temperature: 0.25)
+            ], model: config.activeLLMModel, temperature: 0.25)
             {
                 raw += delta
                 guard currentSessionId == target else { continue }
@@ -448,7 +448,7 @@ final class SessionDetailViewModel: ObservableObject {
                                         sessionId: target,
                                         front: front,
                                         back: back,
-                                        sourceModel: config.llmModel,
+                                        sourceModel: config.activeLLMModel,
                                         createdAt: createdAt,
                                         sortOrder: parsed.count))
             }
@@ -497,7 +497,7 @@ final class SessionDetailViewModel: ObservableObject {
             for try await delta in llm.chat(messages: [
                 .init(role: .system, content: system),
                 .init(role: .user, content: "Lecture transcript:\n\(transcript)")
-            ], model: config.llmModel, temperature: 0.25)
+            ], model: config.activeLLMModel, temperature: 0.25)
             {
                 markdown += delta
                 guard currentSessionId == target else { continue }
@@ -507,7 +507,7 @@ final class SessionDetailViewModel: ObservableObject {
                                          sessionId: target,
                                          toolId: tool.id,
                                          markdown: markdown,
-                                         model: config.llmModel,
+                                         model: config.activeLLMModel,
                                          generatedAt: Int64(Date().timeIntervalSince1970 * 1000))
             try await StudyToolResultRepository.shared.upsert(result)
             let fresh = try await StudyToolResultRepository.shared.all(sessionId: target)
@@ -835,7 +835,7 @@ final class SessionDetailViewModel: ObservableObject {
                     rangeStartMs: range.start,
                     rangeEndMs: range.end,
                     promptKey: preset.key,
-                    model: config.llmModel,
+                    model: config.activeLLMModel,
                     markdown: final,
                     generatedAt: Int64(Date().timeIntervalSince1970 * 1000))
                 self.streamingHighlightId = nil

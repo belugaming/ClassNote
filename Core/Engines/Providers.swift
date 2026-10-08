@@ -87,6 +87,8 @@ enum EngineError: Error, LocalizedError {
     case decodingError(String)
     case httpError(status: Int, body: String)
     case unsupported(String)
+    /// The model, or a safety classifier in front of it, declined the request.
+    case refused(category: String?)
 
     var errorDescription: String? {
         switch self {
@@ -95,6 +97,10 @@ enum EngineError: Error, LocalizedError {
         case .decodingError(let m): return Self.localized("engine.error.decodingError", m)
         case .httpError(let s, let b): return Self.localized("engine.error.httpError", "\(s)", String(b.prefix(200)))
         case .unsupported(let m): return Self.localized("engine.error.unsupported", m)
+        case .refused(let category):
+            let message = L10n.t("engine.error.refused")
+            guard let category, !category.isEmpty else { return message }
+            return "\(message) (\(category))"
         }
     }
 
@@ -170,6 +176,8 @@ struct EngineFactory {
         switch backend {
         case .openAICompatible:
             return OpenAICompatibleLLM(config: config)
+        case .anthropic:
+            return AnthropicLLM(config: config)
         case .localMLX:
             return LocalMLXLLM()
         }

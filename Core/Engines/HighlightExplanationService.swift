@@ -37,7 +37,7 @@ actor HighlightExplanationService {
             .init(role: .system, content: system),
             .init(role: .user, content: userContent),
         ]
-        return llm.chat(messages: messages, model: config.llmModel, temperature: 0.3)
+        return llm.chat(messages: messages, model: config.activeLLMModel, temperature: 0.3)
     }
 
     private static func renderSegments(_ segments: [Segment]) -> String {

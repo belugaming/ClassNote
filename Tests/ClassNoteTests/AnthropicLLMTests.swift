@@ -1,0 +1,237 @@
+import XCTest
+@testable import ClassNote
+
+final class AnthropicRequestTests: XCTestCase {
+    private func bodyJSON(_ request: URLRequest) throws -> [String: Any] {
+        let data = try XCTUnwrap(request.httpBody)
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    func testEndpointAcceptsSDKAndV1StyleBaseUrls() {
+        let expected = "https://api.anthropic.com/v1/messages"
+        XCTAssertEqual(AnthropicMessagesClient.endpoint(baseUrl: "https://api.anthropic.com")?.absoluteString, expected)
+        XCTAssertEqual(AnthropicMessagesClient.endpoint(baseUrl: "https://api.anthropic.com/")?.absoluteString, expected)
+        XCTAssertEqual(AnthropicMessagesClient.endpoint(baseUrl: "https://api.anthropic.com/v1")?.absoluteString, expected)
+        XCTAssertEqual(AnthropicMessagesClient.endpoint(baseUrl: " https://api.anthropic.com/v1/messages ")?.absoluteString,
+                       expected)
+        XCTAssertEqual(AnthropicMessagesClient.endpoint(baseUrl: "https://relay.example.test/claude")?.absoluteString,
+                       "https://relay.example.test/claude/v1/messages")
+    }
+
+    func testRequestMovesSystemToTopLevelAndSendsEffortNotTemperature() throws {
+        var config = ApiConfig.default
+        config.anthropicApiKey = "sk-ant-test"
+        let request = try AnthropicMessagesClient.request(config: config, messages: [
+            .init(role: .system, content: "Be brief."),
+            .init(role: .user, content: "Lecture transcript: …"),
+            .init(role: .assistant, content: "   "),
+            .init(role: .user, content: "What was the main idea?"),
+        ], model: "claude-opus-5-5")
+
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "sk-ant-test")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "anthropic-version"), "2023-06-01")
+        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+
+        let body = try bodyJSON(request)
+        XCTAssertEqual(body["model"] as? String, "claude-opus-5-5")
+        XCTAssertEqual(body["system"] as? String, "Be brief.")
+        XCTAssertEqual(body["stream"] as? Bool, true)
+        XCTAssertNotNil(body["max_tokens"] as? Int)
+        XCTAssertEqual((body["output_config"] as? [String: Any])?["effort"] as? String, "medium")
+        // Rejected by current models.
+        XCTAssertNil(body["temperature"])
+        XCTAssertNil(body["thinking"])
+
+        // The blank assistant turn is dropped: the API rejects empty text.
+        let turns = try XCTUnwrap(body["messages"] as? [[String: String]])
+        XCTAssertEqual(turns.map { $0["role"] }, ["user", "user"])
+        XCTAssertEqual(turns.last?["content"], "What was the main idea?")
+    }
+
+    func testEmptyEffortIsNotSent() throws {
+        var config = ApiConfig.default
+        config.anthropicEffort = ""
+        let request = try AnthropicMessagesClient.request(config: config,
+                                                          messages: [.init(role: .user, content: "hi")],
+                                                          model: "claude-haiku-4-5")
+        XCTAssertNil(try bodyJSON(request)["output_config"])
+    }
+
+    func testServerFallbackOnlyOnAnthropicsOwnApiAndKnownModels() throws {
+        XCTAssertTrue(AnthropicMessagesClient.usesServerFallback(baseUrl: "https://api.anthropic.com",
+                                                                 model: "claude-opus-5-5"))
+        XCTAssertFalse(AnthropicMessagesClient.usesServerFallback(baseUrl: "https://relay.example.test",
+                                                                  model: "claude-opus-5-5"))
+        XCTAssertFalse(AnthropicMessagesClient.usesServerFallback(baseUrl: "https://api.anthropic.com",
+                                                                  model: "claude-haiku-4-5"))
+
+        var config = ApiConfig.default
+        config.anthropicApiKey = "sk-ant-test"
+        let official = try AnthropicMessagesClient.request(config: config,
+                                                           messages: [.init(role: .user, content: "hi")],
+                                                           model: "claude-opus-5-5")
+        XCTAssertEqual(official.value(forHTTPHeaderField: "anthropic-beta"), AnthropicMessagesClient.fallbackBeta)
+        XCTAssertEqual(try bodyJSON(official)["fallbacks"] as? String, "default")
+
+        config.anthropicBaseUrl = "https://relay.example.test"
+        let relay = try AnthropicMessagesClient.request(config: config,
+                                                        messages: [.init(role: .user, content: "hi")],
+                                                        model: "claude-opus-5-5")
+        XCTAssertNil(relay.value(forHTTPHeaderField: "anthropic-beta"))
+        XCTAssertNil(try bodyJSON(relay)["fallbacks"])
+    }
+
+    func testCredentialIsOnlyRequiredOffTheLocalNetwork() {
+        var config = ApiConfig.default
+        XCTAssertTrue(config.isAnthropicCredentialMissing)
+        config.anthropicBaseUrl = "http://127.0.0.1:8082"
+        XCTAssertFalse(config.isAnthropicCredentialMissing)
+    }
+
+    func testActiveModelFollowsTheBackend() {
+        var config = ApiConfig.default
+        config.llmModel = "gpt-4o-mini"
+        config.anthropicModel = "claude-opus-5-5"
+        XCTAssertEqual(config.activeLLMModel, "gpt-4o-mini")
+        config.llmBackend = LLMBackend.anthropic.rawValue
+        XCTAssertEqual(config.activeLLMModel, "claude-opus-5-5")
+    }
+}
+
+final class AnthropicStreamParserTests: XCTestCase {
+    private func feed(_ lines: [String]) -> (AnthropicStreamParser, [AnthropicStreamParser.Event]) {
+        var parser = AnthropicStreamParser()
+        var events: [AnthropicStreamParser.Event] = []
+        for line in lines {
+            if let event = parser.feed(line) { events.append(event) }
+        }
+        return (parser, events)
+    }
+
+    func testOnlyTextDeltasReachTheCaller() throws {
+        let (parser, events) = feed([
+            "event: message_start",
+            #"data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-5-5"}}"#,
+            #"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            #"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"secret"}}"#,
+            #"data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"abc"}}"#,
+            #"data: {"type":"ping"}"#,
+            #"data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"# Notes"}}"#,
+            #"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}"#,
+            #"data: {"type":"message_stop"}"#,
+        ])
+        XCTAssertEqual(events, [.text("# Notes"), .done])
+        XCTAssertEqual(parser.stopReason, "end_turn")
+        XCTAssertNoThrow(try parser.finish())
+    }
+
+    func testRefusalThrowsWithItsCategory() {
+        let (parser, _) = feed([
+            #"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Partial"}}"#,
+            #"data: {"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal","category":"bio"}}}"#,
+            #"data: {"type":"message_stop"}"#,
+        ])
+        XCTAssertThrowsError(try parser.finish()) { error in
+            guard let engineError = error as? EngineError,
+                  case .refused(let category) = engineError else {
+                return XCTFail("Expected a refusal, got \(error)")
+            }
+            XCTAssertEqual(category, "bio")
+        }
+    }
+
+    func testErrorEventEndsTheStreamAndThrows() {
+        let (parser, events) = feed([
+            "event: error",
+            #"data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+        ])
+        XCTAssertEqual(events, [.done])
+        XCTAssertThrowsError(try parser.finish()) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Overloaded"), error.localizedDescription)
+        }
+    }
+}
+
+/// End to end against the local mock server from `OpenAIHTTPIntegrationTests`.
+final class AnthropicHTTPIntegrationTests: XCTestCase {
+    private var server: MockHTTPServer!
+    private var port: UInt16 = 0
+
+    override func setUp() async throws {
+        try await super.setUp()
+        server = MockHTTPServer()
+        port = try await server.start()
+    }
+
+    override func tearDown() async throws {
+        await server.stop()
+        try await super.tearDown()
+    }
+
+    private var config: ApiConfig {
+        var config = ApiConfig.default
+        config.anthropicBaseUrl = "http://127.0.0.1:\(port)"
+        config.anthropicApiKey = "sk-ant-test"
+        return config
+    }
+
+    func testChatStreamsTextFromTheMessagesEndpoint() async throws {
+        await server.setHandler { requestLine, _ in
+            guard requestLine.hasPrefix("POST /v1/messages ") else {
+                return MockHTTPResponse(status: 404, headers: [:], body: "")
+            }
+            let body = """
+            event: message_start
+            data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-5-5"}}
+
+            event: content_block_start
+            data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}
+
+            event: content_block_start
+            data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hello"}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" world"}}
+
+            event: message_delta
+            data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}
+
+            event: message_stop
+            data: {"type":"message_stop"}
+
+
+            """
+            return MockHTTPResponse(status: 200,
+                                    headers: ["Content-Type": "text/event-stream"],
+                                    body: body)
+        }
+
+        let out = try await AnthropicLLM(config: config).chatComplete(
+            messages: [.init(role: .system, content: "sys"), .init(role: .user, content: "hi")],
+            model: "claude-opus-5-5", temperature: 0.3)
+        XCTAssertEqual(out, "Hello world")
+    }
+
+    func testHTTPErrorSurfacesTheStatus() async throws {
+        await server.setHandler { _, _ in
+            MockHTTPResponse(status: 401,
+                             headers: ["Content-Type": "application/json"],
+                             body: #"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#)
+        }
+        do {
+            _ = try await AnthropicLLM(config: config).chatComplete(
+                messages: [.init(role: .user, content: "hi")], model: "claude-opus-5-5", temperature: 0)
+            XCTFail("Expected an error")
+        } catch EngineError.httpError(let status, let body) {
+            XCTAssertEqual(status, 401)
+            XCTAssertTrue(body.contains("invalid x-api-key"), body)
+        }
+    }
+}
