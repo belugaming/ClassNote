@@ -405,3 +405,40 @@ final class MarkdownStreamingSplitTests: XCTestCase {
         }
     }
 }
+
+final class MarkdownBlocksTests: XCTestCase {
+    func testParagraphsHeadingsAndTablesBecomeSeparateBlocks() {
+        let blocks = MarkdownBlocks.split("""
+            ## 压缩器
+
+            **正在讲**：动态范围。
+
+            | 参数 | 取值 |
+            |---|---|
+            | Ratio | 4:1 |
+            """)
+        XCTAssertEqual(blocks, ["## 压缩器", "**正在讲**：动态范围。", "| 参数 | 取值 |\n|---|---|\n| Ratio | 4:1 |"])
+    }
+
+    func testBlankLinesInsideAFenceOrAFormulaDoNotSplit() {
+        let code = "```python\nx = 1\n\ny = 2\n```"
+        let formula = "$$\nL = 20\\log_{10}(A)\n\n+ 1\n$$"
+        XCTAssertEqual(MarkdownBlocks.split("\(code)\n\nAfter."), [code, "After."])
+        XCTAssertEqual(MarkdownBlocks.split("Before.\n\n\(formula)\n\nAfter."), ["Before.", formula, "After."])
+    }
+
+    func testAListStaysWholeAcrossBlankLines() {
+        // MarkdownView numbers every ordered list from 1, so a loose list cut
+        // between its items would restart its numbering.
+        let ordered = "1. First\n\n2. Second\n\n   Still the second item.\n\n3. Third"
+        XCTAssertEqual(MarkdownBlocks.split("\(ordered)\n\nAfter the list."), [ordered, "After the list."])
+        let bullets = "- a\n\n- b\n  - nested"
+        XCTAssertEqual(MarkdownBlocks.split("Intro.\n\n\(bullets)"), ["Intro.", bullets])
+    }
+
+    func testNothingButWhitespaceIsDropped() {
+        XCTAssertEqual(MarkdownBlocks.split(""), [])
+        XCTAssertEqual(MarkdownBlocks.split("\n\n  \n"), [])
+        XCTAssertEqual(MarkdownBlocks.split("\n\nOnly.\n\n"), ["Only."])
+    }
+}
