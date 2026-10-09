@@ -5,9 +5,8 @@ import Foundation
 import Speech
 import CoreMedia
 
-/// SpeechAnalyzer/SpeechTranscriber path (macOS 26+). Faster and more
-/// accurate than SFSpeechRecognizer, fully on-device.
-@available(macOS 26.0, iOS 26.0, *)
+/// The SpeechAnalyzer/SpeechTranscriber path. Faster and more accurate than
+/// SFSpeechRecognizer, fully on-device.
 extension AppleSpeechSTT {
     static func transcribeModern(audio: AsyncStream<AudioChunk>,
                                  language: String?) -> AsyncThrowingStream<TranscriptEvent, Error> {

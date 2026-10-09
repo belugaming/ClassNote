@@ -78,7 +78,7 @@ struct ClassNoteApp: App {
             MainWindowView()
                 .environmentObject(appState)
                 .frame(minWidth: 960, minHeight: 600)
-                .background(translationBridgeView)
+                .background(AppleTranslationBridgeView())
                 .captureWindowActions()
                 .id(appState.languageRefreshToken)
         }
@@ -90,7 +90,7 @@ struct ClassNoteApp: App {
                 LiveSessionView(windowId: id)
                     .environmentObject(appState)
                     .frame(minWidth: 640, minHeight: 460)
-                    .background(translationBridgeView)
+                    .background(AppleTranslationBridgeView())
                     .captureWindowActions()
                     .id(appState.languageRefreshToken)
             }
@@ -127,15 +127,6 @@ struct ClassNoteApp: App {
                 .captureWindowActions()
         }
         .menuBarExtraStyle(.window)
-    }
-
-    @ViewBuilder
-    private var translationBridgeView: some View {
-        if #available(macOS 15.0, *) {
-            AppleTranslationBridgeView()
-        } else {
-            EmptyView()
-        }
     }
 }
 

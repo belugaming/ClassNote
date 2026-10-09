@@ -1,16 +1,14 @@
 import SwiftUI
 import Translation
 
-/// `TranslationSession` cannot be instantiated directly pre-macOS 26 — it's
-/// only obtainable through the SwiftUI `.translationTask` modifier. This
-/// bridge hosts that modifier on an invisible view kept alive for the app's
-/// lifetime, and hands the resulting session to whichever caller is waiting
-/// for the current source/target language pair.
+/// Hosts the SwiftUI `.translationTask` modifier on an invisible view kept
+/// alive for the app's lifetime, and hands the session it produces to
+/// whichever caller is waiting for the current source/target language pair.
 ///
-/// On macOS 26+ `TranslationSession(installedSource:target:)` exists and
-/// needs no view at all, so `AppleTranslationEngine` prefers that path and
-/// only falls back to this bridge on macOS 15-25.
-@available(macOS 15.0, iOS 18.0, *)
+/// A pair that is already installed needs no view:
+/// `AppleTranslationEngine` makes it a `TranslationSession(installedSource:
+/// target:)` directly. A pair still to be downloaded comes through here,
+/// because the modifier is what shows the system's download prompt.
 @MainActor
 final class AppleTranslationBridge: ObservableObject {
     static let shared = AppleTranslationBridge()
@@ -60,12 +58,10 @@ final class AppleTranslationBridge: ObservableObject {
 /// `async` calls, so the crossing is unavoidable. The box keeps it in one named
 /// place instead of at every call site; the session itself is used exactly
 /// where it was before the box existed — in the task that requested it.
-@available(macOS 15.0, iOS 18.0, *)
 struct TranslationSessionBox: @unchecked Sendable {
     let session: TranslationSession
 }
 
-@available(macOS 15.0, iOS 18.0, *)
 struct AppleTranslationBridgeView: View {
     @ObservedObject var bridge = AppleTranslationBridge.shared
 

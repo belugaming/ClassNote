@@ -1,7 +1,6 @@
 import Foundation
 
 enum PythonProvisionError: Error, LocalizedError {
-    case unsupportedArchitecture
     case downloadFailed(String)
     case checksumMismatch
     case extractFailed(String)
@@ -9,8 +8,6 @@ enum PythonProvisionError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .unsupportedArchitecture:
-            return L10n.t("localASR.python.intelUnsupported")
         case .downloadFailed(let msg):
             return "\(L10n.t("localASR.python.downloadFailed")): \(msg)"
         case .checksumMismatch:
@@ -71,13 +68,6 @@ struct PythonProvisioner: Sendable {
     /// Returns a usable interpreter path, downloading one if needed.
     func provision(onProgress: @escaping @Sendable (String, Double?) -> Void) async throws -> String {
         if isProvisioned { return interpreterURL.path }
-
-        #if arch(arm64)
-        #else
-        // MLX needs Apple Silicon anyway, so there is no useful x86_64 build to
-        // fall back to — say so plainly rather than downloading 24 MB first.
-        throw PythonProvisionError.unsupportedArchitecture
-        #endif
 
         let archive = try await download(onProgress: onProgress)
         defer { try? FileManager.default.removeItem(at: archive) }

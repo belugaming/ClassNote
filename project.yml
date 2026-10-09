@@ -1,8 +1,10 @@
 name: ClassNote
 options:
   bundleIdPrefix: com.beluga.classnote
+  # Apple Silicon Macs on macOS 26 or later: the local engines (MLX) need
+  # Apple Silicon, and every Apple Silicon Mac can run macOS 26.
   deploymentTarget:
-    macOS: "14.0"
+    macOS: "26.0"
   createIntermediateGroups: true
   generateEmptyDirectories: true
 
@@ -15,8 +17,11 @@ settings:
     SWIFT_STRICT_CONCURRENCY: complete
     SWIFT_TREAT_WARNINGS_AS_ERRORS: "NO"
     ENABLE_USER_SCRIPT_SANDBOXING: NO
-    MARKETING_VERSION: "0.16.8"
-    CURRENT_PROJECT_VERSION: "26"
+    MARKETING_VERSION: "0.16.9"
+    CURRENT_PROJECT_VERSION: "27"
+    # Apple Silicon only, in every configuration: a Release build would
+    # otherwise also carry an Intel slice nobody can use.
+    ARCHS: arm64
     DEAD_CODE_STRIPPING: YES
 
 packages:
@@ -61,7 +66,7 @@ targets:
           - en
           - zh-Hans
         CFBundleDevelopmentRegion: en
-        LSMinimumSystemVersion: "14.0"
+        LSMinimumSystemVersion: "26.0"
         NSHumanReadableCopyright: "© 2026 ClassNote"
         NSMicrophoneUsageDescription: "ClassNote 需要麦克风权限以录制现场课程音频"
         NSSpeechRecognitionUsageDescription: "ClassNote 需要语音识别权限以使用 macOS 系统自带的本地语音转写"

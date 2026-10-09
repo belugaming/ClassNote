@@ -40,14 +40,11 @@ jobs:
     name: Tests must pass before a release is cut
     uses: ./.github/workflows/ci.yml
 
-  # One DMG per architecture rather than a universal app: each download is
-  # half the size, and the Intel build says plainly that it cannot run the
-  # local MLX engines.
+  # Apple Silicon only: the app needs macOS 26 and the local engines need
+  # Apple Silicon, so an Intel build would be a download nobody can use well.
   #
-  # Apple silicon is built with Xcode 27 on macOS 27, so the app is linked
-  # against the macOS 27 SDK and gets that system's behavior rather than a
-  # compatibility mode. macOS 27 does not run on Intel Macs, so the Intel
-  # build stays on the toolchain of the last system they run.
+  # Built with Xcode 27 on macOS 27, so the app is linked against the macOS 27
+  # SDK and gets that system's behavior rather than a compatibility mode.
   build:
     name: Build DMG (${{ matrix.arch }})
     needs: [version, test]
@@ -58,9 +55,6 @@ jobs:
           - arch: arm64
             runner: xcode-27
             xcode: "27"
-          - arch: x86_64
-            runner: macos-15
-            xcode: "26.2"
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
@@ -95,8 +89,8 @@ jobs:
             -project ClassNote.xcodeproj \
             -scheme ClassNote
 
-      # The runner is Apple Silicon; x86_64 is cross-compiled. ARCHS pins the
-      # slice, since a Release build would otherwise make a universal binary.
+      # ARCHS pins the slice (project.yml does too), so the binary can never
+      # come out universal.
       - name: Build Release (${{ matrix.arch }})
         run: |
           xcodebuild -project ClassNote.xcodeproj \
@@ -149,7 +143,8 @@ jobs:
           name: ClassNote-dmg-${{ matrix.arch }}
           path: ${{ env.DMG_NAME }}
 
-  # Once, after both builds: two matrix jobs creating the same release race.
+  # Its own job, after the build, so a release is only created once there is
+  # a DMG to attach.
   release:
     name: Publish GitHub Release
     needs: build
