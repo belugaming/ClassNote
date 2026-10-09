@@ -1,0 +1,59 @@
+name: Release DMG probe (temporary)
+'on':
+  push:
+    branches:
+    - claude/sweet-dijkstra-lbh7a4
+jobs:
+  build:
+    name: Build DMG (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+        - arch: arm64
+          runner: xcode-27
+          xcode: '27'
+        - arch: x86_64
+          runner: macos-15
+          xcode: '26.2'
+    env:
+      VERSION: 0.16.7-probe
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Select Xcode ${{ matrix.xcode }}
+      run: "# The newest release of this Xcode, not a beta. A version-named path\n# can be a link to a beta (Xcode_27.2.app -> Xcode_27.2_beta.app),\n# so judge each by where it really points.\nXCODE=\"\
+        $(for app in /Applications/Xcode_${{ matrix.xcode }}*.app; do realpath \"$app\"; done \\\n  | grep -viE 'beta|release_candidate|_rc' | sort -uV | tail -1)\"\nif [ -z \"$XCODE\" ]; then\n  echo \"\
+        ::error::no release of Xcode ${{ matrix.xcode }} on this runner\"\n  ls -l /Applications | grep Xcode\n  exit 1\nfi\necho \"Using $XCODE\"\nsudo xcode-select -s \"$XCODE\"\nxcodebuild -version\n"
+    - name: Install XcodeGen
+      run: brew install xcodegen
+    - name: Generate Xcode project
+      run: xcodegen generate
+    - name: Resolve Swift package dependencies
+      run: "xcodebuild -resolvePackageDependencies \\\n  -project ClassNote.xcodeproj \\\n  -scheme ClassNote\n"
+    - name: Build Release (${{ matrix.arch }})
+      run: "xcodebuild -project ClassNote.xcodeproj \\\n           -scheme ClassNote \\\n           -configuration Release \\\n           -destination 'generic/platform=macOS' \\\n           -derivedDataPath\
+        \ build/DerivedData \\\n           -skipMacroValidation \\\n           ARCHS=${{ matrix.arch }} \\\n           ONLY_ACTIVE_ARCH=NO \\\n           build\n"
+    - name: Check the binary is ${{ matrix.arch }} only
+      run: "set -euo pipefail\nBINARY=\"build/DerivedData/Build/Products/Release/ClassNote.app/Contents/MacOS/ClassNote\"\nARCHS=\"$(lipo -archs \"$BINARY\")\"\necho \"ClassNote binary: $ARCHS\"\nif [[\
+        \ \"$ARCHS\" != \"${{ matrix.arch }}\" ]]; then\n  echo \"::error::expected only ${{ matrix.arch }}, got: $ARCHS\"\n  exit 1\nfi\n"
+    - name: 'Probe: SDK and LaTeX in the Release app'
+      run: 'set -euo pipefail
+
+        APP="build/DerivedData/Build/Products/Release/ClassNote.app"
+
+        otool -l "$APP/Contents/MacOS/ClassNote" | grep -A4 LC_BUILD_VERSION
+
+        ls "$APP/Contents/Resources" | grep SwiftMath
+
+        '
+    - name: Package DMG
+      run: "set -euo pipefail\nAPP_PATH=\"build/DerivedData/Build/Products/Release/ClassNote.app\"\nif [[ ! -d \"$APP_PATH\" ]]; then\n  echo \"\u2717 ClassNote.app not found at $APP_PATH\"\n  exit 1\n\
+        fi\n\nSTAGE_DIR=\"build/dmg-stage\"\nrm -rf \"$STAGE_DIR\"\nmkdir -p \"$STAGE_DIR\"\ncp -R \"$APP_PATH\" \"$STAGE_DIR/\"\nln -s /Applications \"$STAGE_DIR/Applications\"\n\nDMG_NAME=\"ClassNote-${VERSION}-${{\
+        \ matrix.arch }}.dmg\"\nhdiutil create -volname \"ClassNote\" \\\n                -srcfolder \"$STAGE_DIR\" \\\n                -ov -format UDZO \\\n                \"$DMG_NAME\"\n\necho \"DMG_NAME=$DMG_NAME\"\
+        \ >> \"$GITHUB_ENV\"\n"
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ClassNote-dmg-${{ matrix.arch }}
+        path: ${{ env.DMG_NAME }}
