@@ -74,6 +74,26 @@ jobs:
           echo "warnings: $(grep -cE '^/.*:[0-9]+:[0-9]+: warning:' build/xcodebuild-build.log || true)"
           exit $status
 
+      # MarkdownView builds its LaTeX support, and links SwiftMath, only when
+      # its `LaTeX` trait is on. Without it the app still builds and every
+      # formula shows up as raw `$$…$$` source, so check for both here.
+      - name: Check LaTeX rendering is compiled in
+        run: |
+          ls -d /Applications/Xcode*.app
+          echo "ENABLE_MATH_RENDERING mentions: $(grep -c 'ENABLE_MATH_RENDERING' build/xcodebuild-build.log || true)"
+          grep -o "in target '[A-Za-z]*' from project 'SwiftMath'" build/xcodebuild-build.log | sort -u || true
+          ls build/DerivedData/Build/Products/Debug/ClassNote.app/Contents/Resources
+          status=0
+          if ! grep -q 'ENABLE_MATH_RENDERING' build/xcodebuild-build.log; then
+            echo "::error::MarkdownView was built without ENABLE_MATH_RENDERING, so formulas would show as raw LaTeX"
+            status=1
+          fi
+          if ! ls build/DerivedData/Build/Products/Debug/ClassNote.app/Contents/Resources | grep -q SwiftMath; then
+            echo "::error::SwiftMath's resources are missing from ClassNote.app"
+            status=1
+          fi
+          exit $status
+
       - name: Run unit + integration tests
         run: |
           set +e
