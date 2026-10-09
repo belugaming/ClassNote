@@ -1,5 +1,5 @@
 import SwiftUI
-import MarkdownView
+import MarkdownRendering
 
 /// Every piece of Markdown the app shows (notes, Q&A, study tools, highlight
 /// explanations, live tutor cards), rendered by the MarkdownView package:
