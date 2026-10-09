@@ -38,9 +38,17 @@ jobs:
       - name: Select Xcode ${{ matrix.xcode }}
         run: |
           sw_vers
-          ls -d /Applications/Xcode*.app
-          # The newest release of this Xcode, not a beta.
-          XCODE="$(ls -d /Applications/Xcode_${{ matrix.xcode }}*.app | grep -iv beta | sort -V | tail -1)"
+          # The newest release of this Xcode, not a beta. A version-named path
+          # can be a link to a beta (Xcode_27.2.app -> Xcode_27.2_beta.app),
+          # so judge each by where it really points.
+          XCODE="$(for app in /Applications/Xcode_${{ matrix.xcode }}*.app; do realpath "$app"; done \
+            | grep -viE 'beta|release_candidate|_rc' | sort -uV | tail -1)"
+          if [ -z "$XCODE" ]; then
+            echo "::error::no release of Xcode ${{ matrix.xcode }} on this runner"
+            ls -l /Applications | grep Xcode
+            exit 1
+          fi
+          echo "Using $XCODE"
           sudo xcode-select -s "$XCODE"
           xcodebuild -version
 
