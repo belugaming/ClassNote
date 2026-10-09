@@ -66,31 +66,40 @@ extension AudioSourceKind {
     static var liveCases: [AudioSourceKind] { [.microphone, .system, .mixed] }
 }
 
+@MainActor
 enum DateLabels {
     /// "Today", "Yesterday", or the date, for grouping a session list.
     static func day(_ date: Date) -> String {
         let calendar = Calendar.current
         if calendar.isDateInToday(date) { return L10n.t("date.today") }
         if calendar.isDateInYesterday(date) { return L10n.t("date.yesterday") }
-        let f = DateFormatter()
-        f.locale = L10n.isChinese ? Locale(identifier: "zh_CN") : Locale(identifier: "en_US")
-        f.setLocalizedDateFormatFromTemplate(
-            calendar.isDate(date, equalTo: Date(), toGranularity: .year) ? "MMMMdEEEE" : "yMMMMd")
-        return f.string(from: date)
+        let template = calendar.isDate(date, equalTo: Date(), toGranularity: .year) ? "MMMMdEEEE" : "yMMMMd"
+        return formatter(template).string(from: date)
     }
 
     static func time(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.locale = L10n.isChinese ? Locale(identifier: "zh_CN") : Locale(identifier: "en_US")
-        f.setLocalizedDateFormatFromTemplate("jmm")
-        return f.string(from: date)
+        formatter("jmm").string(from: date)
     }
 
     static func dateTime(_ date: Date) -> String {
+        formatter("yMMMdjmm").string(from: date)
+    }
+
+    /// One formatter per template and language, made once. Building a
+    /// formatter from a template is slow, and the session list built one for
+    /// every row as it scrolled into view.
+    private static var formatters: [String: DateFormatter] = [:]
+
+    private static func formatter(_ template: String) -> DateFormatter {
+        let chinese = L10n.isChinese
+        let key = "\(chinese ? "zh" : "en")|\(template)"
+        if let cached = formatters[key] { return cached }
         let f = DateFormatter()
-        f.locale = L10n.isChinese ? Locale(identifier: "zh_CN") : Locale(identifier: "en_US")
-        f.setLocalizedDateFormatFromTemplate("yMMMdjmm")
-        return f.string(from: date)
+        f.locale = chinese ? Locale(identifier: "zh_CN") : Locale(identifier: "en_US")
+        f.timeZone = .autoupdatingCurrent
+        f.setLocalizedDateFormatFromTemplate(template)
+        formatters[key] = f
+        return f
     }
 }
 

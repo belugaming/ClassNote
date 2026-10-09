@@ -68,7 +68,7 @@ struct TranscriptView: View {
     }
 
     private func transcript(_ segments: [Segment]) -> some View {
-        let blocks = segments.sentenceBlocks
+        let blocks = vm.sentenceBlocks
         let highlightStarts = Set(vm.highlights.map(\.timestampMs))
         let playingId = vm.playingSegmentId
         let flashId = vm.flashSegmentId
@@ -191,10 +191,14 @@ struct SentenceBlockView: View, Equatable {
         }
         .padding(.vertical, 9)
         .padding(.horizontal, 10)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
-                .fill(background)
-        )
+        .background {
+            // Only the row under the playhead or the pointer has one; a clear
+            // shape behind every other row was still drawn and hit-tested.
+            if let background {
+                RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
+                    .fill(background)
+            }
+        }
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.2), value: isActive)
     }
@@ -203,10 +207,10 @@ struct SentenceBlockView: View, Equatable {
         block.lines.contains { $0.rowKey == playingId || $0.rowKey == flashId }
     }
 
-    private var background: Color {
+    private var background: Color? {
         if isActive { return Theme.accentSoft }
         if hovering { return Theme.rowHover }
-        return .clear
+        return nil
     }
 
     /// The sentence's lines as one paragraph. Each line is its own run, so a

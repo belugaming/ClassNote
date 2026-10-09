@@ -14,9 +14,10 @@ let package = Package(
         .library(name: "MarkdownRendering", targets: ["MarkdownRendering"]),
     ],
     dependencies: [
+        // A copy of MarkdownView 3.0.0 with its formula rendering patched;
+        // see Packages/MarkdownView/PATCHES.md.
         .package(
-            url: "https://github.com/LiYanan2004/MarkdownView",
-            from: "3.0.0",
+            path: "../MarkdownView",
             traits: ["LaTeX"]
         ),
     ],

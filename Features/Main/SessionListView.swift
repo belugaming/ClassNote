@@ -28,10 +28,11 @@ struct SessionListView: View {
                                title: L10n.t("list.empty.title"),
                                message: L10n.t("list.empty.message"))
             } else {
+                let byDay = sessionsByDay
                 List(selection: $selection) {
-                    ForEach(days, id: \.self) { day in
+                    ForEach(byDay.keys.sorted(by: >), id: \.self) { day in
                         Section(DateLabels.day(day)) {
-                            ForEach(sessionsByDay[day] ?? []) { session in
+                            ForEach(byDay[day] ?? []) { session in
                                 SessionRow(session: session,
                                            courseName: courseName(session),
                                            isRecording: session.id == recordingSessionId)
@@ -82,12 +83,10 @@ struct SessionListView: View {
         }
     }
 
+    /// Grouped once per redraw; read per section, it was grouped again for
+    /// every day in the list.
     private var sessionsByDay: [Date: [Session]] {
         Dictionary(grouping: sessions) { Calendar.current.startOfDay(for: $0.startedDate) }
-    }
-
-    private var days: [Date] {
-        sessionsByDay.keys.sorted(by: >)
     }
 
     private func courseName(_ session: Session) -> String? {

@@ -15,8 +15,8 @@ settings:
     SWIFT_STRICT_CONCURRENCY: complete
     SWIFT_TREAT_WARNINGS_AS_ERRORS: "NO"
     ENABLE_USER_SCRIPT_SANDBOXING: NO
-    MARKETING_VERSION: "0.16.7"
-    CURRENT_PROJECT_VERSION: "25"
+    MARKETING_VERSION: "0.16.8"
+    CURRENT_PROJECT_VERSION: "26"
     DEAD_CODE_STRIPPING: YES
 
 packages:
@@ -28,7 +28,9 @@ packages:
     from: 2.2.0
   # Renders every piece of Markdown in the app: CommonMark/GFM, LaTeX through
   # SwiftMath. See RichMarkdownView. MarkdownView comes in through this local
-  # package, which turns on its LaTeX trait; see its Package.swift.
+  # package, which turns on its LaTeX trait; see its Package.swift. The
+  # MarkdownView it uses is a copy in Packages/MarkdownView with formulas drawn
+  # from a cache; see PATCHES.md there.
   MarkdownRendering:
     path: Packages/MarkdownRendering
 
