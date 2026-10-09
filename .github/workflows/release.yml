@@ -43,23 +43,35 @@ jobs:
   # One DMG per architecture rather than a universal app: each download is
   # half the size, and the Intel build says plainly that it cannot run the
   # local MLX engines.
+  #
+  # Apple silicon is built with Xcode 27 on macOS 27, so the app is linked
+  # against the macOS 27 SDK and gets that system's behavior rather than a
+  # compatibility mode. macOS 27 does not run on Intel Macs, so the Intel
+  # build stays on the toolchain of the last system they run.
   build:
     name: Build DMG (${{ matrix.arch }})
     needs: [version, test]
-    runs-on: macos-15
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        arch: [arm64, x86_64]
+        include:
+          - arch: arm64
+            runner: xcode-27
+            xcode: "27"
+          - arch: x86_64
+            runner: macos-15
+            xcode: "26.2"
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Xcode
+      - name: Select Xcode ${{ matrix.xcode }}
         run: |
-          sudo xcode-select -s /Applications/Xcode_26.2.app 2>/dev/null \
-            || sudo xcode-select -s "$(ls -d /Applications/Xcode_2*.app | sort -V | tail -1)"
+          # The newest release of this Xcode, not a beta.
+          XCODE="$(ls -d /Applications/Xcode_${{ matrix.xcode }}*.app | grep -iv beta | sort -V | tail -1)"
+          sudo xcode-select -s "$XCODE"
           xcodebuild -version
 
       - name: Install XcodeGen
