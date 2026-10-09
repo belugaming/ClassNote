@@ -60,6 +60,7 @@ struct ClassNoteApp: App {
     init() {
         AppBootstrap.run()
         WindowRouter.shared.start()
+        ScrollFrameRate.shared.start()
         // The test bundle is hosted by this app, so a bootstrap here would race
         // every test: `loadConfig()` overwrites whatever config a test just set,
         // `refreshMicrophoneDevices()` writes back a preference, and
