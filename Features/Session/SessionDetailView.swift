@@ -138,7 +138,11 @@ struct SessionDetailView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(maxWidth: 520)
+            // At its own width. Stretched to fill the row, the segment widths
+            // were worked out again on each layout pass, and scrolling lays the
+            // page out over and over (rows load as they come into view), so the
+            // tabs stretched and sprang back for as long as the page moved.
+            .fixedSize()
         }
         .padding(.horizontal, 20)
         .padding(.top, 16)
