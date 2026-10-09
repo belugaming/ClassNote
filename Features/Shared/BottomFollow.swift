@@ -28,9 +28,7 @@ enum BottomFollow {
 }
 
 extension View {
-    /// Keeps `following` in step with the reader's scrolling. macOS 14 cannot
-    /// read where a scroll view is, so there it stays as it is and the view
-    /// follows the end as it always did.
+    /// Keeps `following` in step with the reader's scrolling.
     func tracksBottomFollow(_ following: Binding<Bool>) -> some View {
         modifier(BottomFollowTracker(following: following))
     }
@@ -40,16 +38,12 @@ private struct BottomFollowTracker: ViewModifier {
     @Binding var following: Bool
 
     func body(content: Content) -> some View {
-        if #available(macOS 15.0, *) {
-            content.onScrollGeometryChange(for: BottomFollow.Position.self) { geometry in
-                BottomFollow.Position(offset: geometry.contentOffset.y,
-                                      distanceToEnd: geometry.contentSize.height - geometry.visibleRect.maxY)
-            } action: { old, new in
-                let next = BottomFollow.following(following, from: old, to: new)
-                if next != following { following = next }
-            }
-        } else {
-            content
+        content.onScrollGeometryChange(for: BottomFollow.Position.self) { geometry in
+            BottomFollow.Position(offset: geometry.contentOffset.y,
+                                  distanceToEnd: geometry.contentSize.height - geometry.visibleRect.maxY)
+        } action: { old, new in
+            let next = BottomFollow.following(following, from: old, to: new)
+            if next != following { following = next }
         }
     }
 }

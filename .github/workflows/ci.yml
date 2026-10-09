@@ -21,12 +21,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: macOS 15, Xcode 26.2
-            slug: macos15
-            runner: macos-15
-            xcode: "26.2"
           # The OS most users are on: build with its SDK and run the tests on
           # it. GitHub names this image after its Xcode; it runs macOS 27.
+          # The app needs macOS 26 on Apple Silicon, so there is no older
+          # system or Intel Mac left to build for.
           - name: macOS 27, Xcode 27
             slug: macos27
             runner: xcode-27

@@ -30,11 +30,11 @@ macOS-native lecture recorder for US-bound study-abroad students. Records classr
 
 ## Requirements
 
-- macOS 14+ (Apple Silicon recommended)
-- Xcode 26+ / Swift 5.10+
+- An Apple Silicon Mac on macOS 26 or later
+- Xcode 27+ / Swift 5.10+
 - `xcodegen` (`brew install xcodegen`)
 - An OpenAI-compatible API endpoint (OpenAI official, DeepSeek, Groq, SiliconFlow, Ollama, LM Studio, etc.) — not needed if you use the local engines for transcription, translation and notes
-- For the local ASR engine: an Apple Silicon Mac. **No Python setup required** — the app uses a system `python3` if one is 3.11 or newer, and otherwise downloads a self-contained CPython (pinned and SHA-256 verified) into Application Support. macOS's built-in `/usr/bin/python3` is 3.9 and has no `sherpa-onnx` wheel, so it is skipped.
+- For the local ASR engine: **No Python setup required** — the app uses a system `python3` if one is 3.11 or newer, and otherwise downloads a self-contained CPython (pinned and SHA-256 verified) into Application Support. macOS's built-in `/usr/bin/python3` is 3.9 and has no `sherpa-onnx` wheel, so it is skipped.
 
   Install from **Settings → Engines**, which creates a venv under `~/Library/Application Support/ClassNote/pyenv/` and downloads the weights with progress. **Settings → Models** lists every model with its source, size on disk and a Delete button. The sidecars' direct dependencies are pinned to exact versions in `Scripts/requirements-local.txt`, so two machines installing a week apart get the same program:
 
@@ -77,7 +77,7 @@ python3 -m unittest discover -s Tests/PythonTests
 1. On `main`, set `MARKETING_VERSION` to the new version in `project.yml` and bump `CURRENT_PROJECT_VERSION`.
 2. Tag that commit and push the tag: `git tag v0.16.0 && git push origin v0.16.0`. The tag must match `MARKETING_VERSION`, or the release stops at its first step.
 
-The Release workflow runs the tests, then builds two DMGs and attaches them to a GitHub Release: `ClassNote-<version>-arm64.dmg` for Apple Silicon and `ClassNote-<version>-x86_64.dmg` for Intel Macs. The local engines need Apple Silicon; on Intel, use the cloud API or Apple's on-device speech. The app is not notarized, so the first launch has to be allowed in System Settings → Privacy & Security.
+The Release workflow runs the tests, then builds `ClassNote-<version>-arm64.dmg` and attaches it to a GitHub Release. There is no Intel build: the app needs Apple Silicon and macOS 26. The app is not notarized, so the first launch has to be allowed in System Settings → Privacy & Security.
 
 ## Configure
 
