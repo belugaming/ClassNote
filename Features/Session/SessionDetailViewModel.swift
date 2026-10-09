@@ -6,8 +6,15 @@ import AppKit
 @MainActor
 final class SessionDetailViewModel: ObservableObject {
     @Published var session: SessionWithSegments? {
-        didSet { updatePlayingSegment() }
+        didSet {
+            sentenceBlocks = session?.segments.sentenceBlocks ?? []
+            updatePlayingSegment()
+        }
     }
+    /// The transcript grouped into sentences, once per change to it rather
+    /// than on every redraw of the transcript (which follows every change to
+    /// this object, a streamed token included).
+    private(set) var sentenceBlocks: [SentenceBlock<Segment>] = []
     @Published var note: Note?
     @Published var noteVersions: [NoteVersion] = []
     @Published var highlights: [Highlight] = []
