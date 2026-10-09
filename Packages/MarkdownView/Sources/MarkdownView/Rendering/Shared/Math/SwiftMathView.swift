@@ -130,14 +130,4 @@ private struct FormulaLayout: Layout {
     }
 }
 
-fileprivate extension Image {
-    init(platformImage: MTImage) {
-        #if canImport(UIKit)
-        self.init(uiImage: platformImage)
-        #else
-        self.init(nsImage: platformImage)
-        #endif
-    }
-}
-
 #endif
