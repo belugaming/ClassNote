@@ -102,6 +102,9 @@ struct SentenceBlock<Line: Identifiable>: Identifiable {
     var id: Line.ID { lines[0].id }
 }
 
+/// So the rows' nonisolated `==` can read a block off a main-actor view.
+extension SentenceBlock: Sendable where Line: Sendable {}
+
 extension Array where Element == Segment {
     var sentenceBlocks: [SentenceBlock<Segment>] {
         SentenceGroups.group(self).map { SentenceBlock(lines: $0) }

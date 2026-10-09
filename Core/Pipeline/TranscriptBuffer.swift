@@ -94,7 +94,7 @@ final class TranscriptBuffer: ObservableObject {
 /// the only signal, so a line whose translation failed, came back empty, was
 /// covered by a later T3PO translation or was never sent (translation off)
 /// showed as translating forever.
-enum LiveTranslationState: Hashable {
+enum LiveTranslationState: Hashable, Sendable {
     /// Not sent: translation was off, or the line's sentence has not ended.
     case notSent
     case pending
@@ -105,7 +105,7 @@ enum LiveTranslationState: Hashable {
     case merged
 }
 
-struct LiveSegment: Identifiable, Hashable {
+struct LiveSegment: Identifiable, Hashable, Sendable {
     let id: Int64       // = rowId
     let rowId: Int64
     let startMs: Int64
