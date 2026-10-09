@@ -124,6 +124,40 @@ enum SessionExporter {
         }.joined(separator: "\n")
     }
 
+    /// The transcript as it reads on screen, for the clipboard: one paragraph
+    /// per sentence with its start time, and the sentence's translation under
+    /// it when translations are shown.
+    static func transcriptText(_ segments: [Segment], includeTranslation: Bool) -> String {
+        SentenceGroups.group(segments).compactMap { sentence -> String? in
+            guard let first = sentence.first, let last = sentence.last else { return nil }
+            let original = SentenceGroups.join(sentence.map(\.textOriginal))
+            let translation = last.textTranslated.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !original.isEmpty || !translation.isEmpty else { return nil }
+            var lines = ["[\(formatTimecode(first.startMs))] \(original)"]
+            if includeTranslation, !translation.isEmpty { lines.append(translation) }
+            return lines.joined(separator: "\n")
+        }
+        .joined(separator: "\n\n")
+    }
+
+    /// Every question and answer of a session, in order, as Markdown: each
+    /// question marked as one, its answer as written, a rule between pairs.
+    static func qaMarkdown(_ messages: [QAMessage]) -> String {
+        var parts: [String] = []
+        for message in messages {
+            let text = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            switch message.role {
+            case .user:
+                if !parts.isEmpty { parts.append("---") }
+                parts.append(String(format: L10n.t("qa.copy.question"), text))
+            case .assistant:
+                parts.append(text)
+            }
+        }
+        return parts.joined(separator: "\n\n")
+    }
+
     /// SRT subtitle format. Uses original on line 1 and translation (if any) on line 2.
     static func transcriptSRT(_ input: Input) -> String {
         var out = ""

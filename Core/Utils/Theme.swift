@@ -16,6 +16,9 @@ enum Theme {
     static let surfaceElevated = Color(nsColor: .textBackgroundColor)
     static let windowBackground = Color(nsColor: .windowBackgroundColor)
     static let hairline = Color.primary.opacity(0.09)
+    /// The system's line between rows, the same one `Divider` draws.
+    static let separator = Color(nsColor: .separatorColor)
+    static let quoteBar = Color.primary.opacity(0.2)
     static let chrome = Color.primary.opacity(0.05)
     static let rowHover = Color.primary.opacity(0.045)
 

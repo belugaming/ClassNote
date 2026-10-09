@@ -216,13 +216,11 @@ private struct LiveTutorCardView: View, Equatable {
             }
             .buttonStyle(.borderless)
         } else {
-            Button {
-                Clipboard.copy(card.question.map { "\($0)\n\n\(card.markdown)" } ?? card.markdown)
-            } label: {
-                Image(systemName: "doc.on.doc")
+            CopyButton(title: L10n.t("liveTutor.card.copy")) {
+                card.question.map { "\($0)\n\n\(card.markdown)" } ?? card.markdown
             }
+            .labelStyle(.iconOnly)
             .buttonStyle(.borderless)
-            .help(L10n.t("liveTutor.card.copy"))
             if canSave {
                 Button(action: onSave) {
                     Image(systemName: card.isSaved ? "star.fill" : "star")

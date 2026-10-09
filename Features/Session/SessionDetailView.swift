@@ -44,7 +44,7 @@ struct SessionDetailView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             if vm.hasAudio && !vm.isSessionRecording {
                 Divider()
-                PlayerBar(vm: vm)
+                PlayerBar(vm: vm, clock: vm.clock)
             }
         }
         .task(id: sessionId) {
@@ -287,11 +287,12 @@ struct SessionDetailView: View {
 /// Play/pause, scrubber and position, docked along the bottom.
 private struct PlayerBar: View {
     @ObservedObject var vm: SessionDetailViewModel
+    @ObservedObject var clock: PlaybackClock
 
     var body: some View {
         HStack(spacing: 12) {
             Button {
-                vm.scrub(to: max(0, vm.playheadMs - 10_000))
+                vm.scrub(to: max(0, clock.playheadMs - 10_000))
             } label: {
                 Image(systemName: "gobackward.10")
             }
@@ -317,18 +318,18 @@ private struct PlayerBar: View {
                          : vm.isPlaying ? "session.action.pause" : "session.action.play"))
 
             Button {
-                vm.scrub(to: min(vm.playbackDurationMs, vm.playheadMs + 10_000))
+                vm.scrub(to: min(vm.playbackDurationMs, clock.playheadMs + 10_000))
             } label: {
                 Image(systemName: "goforward.10")
             }
             .buttonStyle(.borderless)
             .help(L10n.t("player.forward10"))
 
-            Text(TimeLabel.string(ms: vm.playheadMs))
+            Text(TimeLabel.string(ms: clock.playheadMs))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 44, alignment: .trailing)
-            Slider(value: Binding(get: { Double(vm.playheadMs) },
+            Slider(value: Binding(get: { Double(clock.playheadMs) },
                                   set: { vm.playheadMs = Int64($0) }),
                    in: 0...max(1, Double(vm.playbackDurationMs))) { editing in
                 vm.isScrubbing = editing

@@ -51,11 +51,7 @@ struct NotesView: View {
             .help(L10n.t(vm.briefing.isEmpty ? "briefing.add" : "briefing.edit"))
             .disabled(vm.isShowingNoteStream)
             if let note = vm.note, !vm.isShowingNoteStream {
-                Button {
-                    Clipboard.copy(note.markdown)
-                } label: {
-                    Label(L10n.t("common.copy"), systemImage: "doc.on.doc")
-                }
+                CopyButton(title: L10n.t("notes.action.copy")) { note.markdown }
             }
             Toggle(isOn: $showingHistory) {
                 Label(L10n.t("notes.history.title"), systemImage: "clock.arrow.circlepath")

@@ -3,9 +3,10 @@ import MarkdownView
 
 /// Every piece of Markdown the app shows (notes, Q&A, study tools, highlight
 /// explanations, live tutor cards), rendered by the MarkdownView package:
-/// CommonMark + GFM through swift-markdown, nested lists, GitHub-style tables
-/// and quotes, syntax-highlighted code, and LaTeX through SwiftMath, where a
-/// `$` followed by a digit does not close a formula, so prices stay text.
+/// CommonMark + GFM through swift-markdown, nested lists, tables and quotes
+/// drawn in the app's own colors, syntax-highlighted code, and LaTeX through
+/// SwiftMath, where a `$` followed by a digit does not close a formula, so
+/// prices stay text.
 ///
 /// `streaming` is for text a model is still writing. It goes through the
 /// package's streaming reader, which parses incrementally off the main thread
@@ -21,8 +22,56 @@ struct RichMarkdownView: View {
             // refresh, the playhead); the document only when its text does.
             .equatable()
             .markdownMathRenderingEnabled()
-            .markdownTableStyle(.github)
-            .markdownBlockQuoteStyle(.github)
+            .markdownTableStyle(ClassNoteTableStyle())
+            .markdownBlockQuoteStyle(ClassNoteBlockQuoteStyle())
+            // The package sets quotes in a serif face, which in Chinese reads
+            // as a different document pasted in.
+            .font(NSFont.preferredFont(forTextStyle: .body), for: .blockQuote)
+    }
+}
+
+/// Tables in the colors of the text around them. The package's GitHub style
+/// paints GitHub's own near-black and white behind every row, which stands
+/// out against the app's grey surfaces; here the rows have no fill, so a table
+/// sits on whatever the text sits on (the window, a card), with a faint header
+/// and the system separator between rows.
+struct ClassNoteTableStyle: MarkdownTableStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        ClassNoteTable(configuration: configuration)
+    }
+}
+
+private struct ClassNoteTable: View {
+    let configuration: MarkdownTableStyleConfiguration
+
+    var body: some View {
+        Grid(horizontalSpacing: 0, verticalSpacing: 0) {
+            configuration.table.header
+                .markdownTableRowBackgroundStyle(Theme.chrome)
+            ForEach(Array(configuration.table.rows.enumerated()), id: \.offset) { _, row in
+                Divider()
+                row
+            }
+        }
+        .markdownTableCellPadding(.vertical, 6)
+        .markdownTableCellPadding(.horizontal, 12)
+        .overlay {
+            Rectangle().strokeBorder(Theme.separator)
+        }
+    }
+}
+
+/// A quote as a bar beside text in the body face, a step quieter than the
+/// text around it.
+struct ClassNoteBlockQuoteStyle: MarkdownBlockQuoteStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.content
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 14)
+            .overlay(alignment: .leading) {
+                Capsule().fill(Theme.quoteBar).frame(width: 3)
+            }
     }
 }
 
