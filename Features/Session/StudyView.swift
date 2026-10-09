@@ -68,6 +68,8 @@ struct QAPane: View {
     @ObservedObject var vm: SessionDetailViewModel
     @State private var question = ""
     @State private var confirmingClear = false
+    /// Off while the reader has scrolled up; see `BottomFollow`.
+    @State private var followsEnd = true
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -99,8 +101,15 @@ struct QAPane: View {
                         .frame(maxWidth: .infinity)
                     }
                 }
-                .onChange(of: vm.qaMessages.count) { _, _ in scrollToBottom(proxy, lastRowId: rows.last?.id) }
-                .onChange(of: vm.streamingQAResponse) { _, _ in scrollToBottom(proxy, lastRowId: rows.last?.id) }
+                .tracksBottomFollow($followsEnd)
+                .onChange(of: vm.qaMessages.count) { _, _ in
+                    guard followsEnd else { return }
+                    scrollToBottom(proxy, lastRowId: rows.last?.id)
+                }
+                .onChange(of: vm.streamingQAResponse) { _, _ in
+                    guard followsEnd else { return }
+                    scrollToBottom(proxy, lastRowId: rows.last?.id)
+                }
             }
             if !vm.transcriptTruncatedNotice.isEmpty && vm.isAnsweringQuestion {
                 LocalContextNotice(text: vm.transcriptTruncatedNotice).padding(.bottom, 4)
@@ -153,6 +162,8 @@ struct QAPane: View {
         let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty, !vm.isAnsweringQuestion else { return }
         question = ""
+        // A question just asked is followed wherever the reader was.
+        followsEnd = true
         Task { await vm.askQuestion(q) }
     }
 

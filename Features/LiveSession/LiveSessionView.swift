@@ -271,6 +271,8 @@ struct LiveTranscript: View {
     var fontSize: Double
     var displayMode: OverlayCaptionDisplayMode
     var engineStatus: String
+    /// Off while the reader has scrolled up; see `BottomFollow`.
+    @State private var followsEnd = true
 
     var body: some View {
         if buffer.segments.isEmpty && buffer.draftText.isEmpty {
@@ -295,7 +297,10 @@ struct LiveTranscript: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 18) {
                         ForEach(buffer.segments.sentenceBlocks) { block in
+                            // The draft changes with every word; the sentences
+                            // above it only when one of them does.
                             LiveSentenceView(block: block, fontSize: fontSize, displayMode: displayMode)
+                                .equatable()
                         }
                         if !buffer.draftText.isEmpty {
                             draft
@@ -307,13 +312,20 @@ struct LiveTranscript: View {
                     .padding(.vertical, 20)
                     .frame(maxWidth: .infinity)
                 }
+                .tracksBottomFollow($followsEnd)
                 .onChange(of: buffer.segments.count) { _, _ in
+                    guard followsEnd else { return }
                     withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
-                .onChange(of: buffer.draftText) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
-                .onChange(of: buffer.draftTranslated) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
+                .onChange(of: buffer.draftText) { _, _ in scrollToEnd(proxy) }
+                .onChange(of: buffer.draftTranslated) { _, _ in scrollToEnd(proxy) }
             }
         }
+    }
+
+    private func scrollToEnd(_ proxy: ScrollViewProxy) {
+        guard followsEnd else { return }
+        proxy.scrollTo("bottom", anchor: .bottom)
     }
 
     private var draft: some View {
@@ -334,10 +346,18 @@ struct LiveTranscript: View {
     }
 }
 
-private struct LiveSentenceView: View {
+/// Equatable on what it shows, so a new word in the draft below does not
+/// redraw every sentence on screen.
+private struct LiveSentenceView: View, Equatable {
     let block: SentenceBlock<LiveSegment>
     let fontSize: Double
     let displayMode: OverlayCaptionDisplayMode
+
+    nonisolated static func == (lhs: LiveSentenceView, rhs: LiveSentenceView) -> Bool {
+        lhs.block.lines == rhs.block.lines
+            && lhs.fontSize == rhs.fontSize
+            && lhs.displayMode == rhs.displayMode
+    }
 
     private var original: String { SentenceGroups.join(block.lines.map(\.original)) }
     private var translation: String { block.lines.last?.translated ?? "" }
