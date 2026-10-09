@@ -441,7 +441,7 @@ struct StudyToolsPane: View {
                 .padding(.vertical, 3)
                 .tag(tool.id)
             }
-            .listStyle(.sidebar)
+            .paneListStyle()
             .frame(width: 250)
             Divider()
             VStack(spacing: 0) {

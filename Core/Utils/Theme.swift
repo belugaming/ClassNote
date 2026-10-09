@@ -204,6 +204,12 @@ extension View {
         modifier(CardBackground(radius: radius, filled: filled))
     }
     func pill(_ color: Color) -> some View { modifier(PillStyle(color: color)) }
+
+    /// A list of choices inside a page (study tools, highlights, note
+    /// versions). The sidebar style brings the window sidebar's translucent
+    /// material with it, which inside a page shows the desktop through a hole
+    /// in the window; the inset style draws an opaque background.
+    func paneListStyle() -> some View { listStyle(.inset) }
 }
 
 /// A titled group on a settings-style page.

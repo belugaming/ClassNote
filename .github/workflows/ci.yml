@@ -79,10 +79,6 @@ jobs:
       # formula shows up as raw `$$…$$` source, so check for both here.
       - name: Check LaTeX rendering is compiled in
         run: |
-          ls -d /Applications/Xcode*.app
-          echo "ENABLE_MATH_RENDERING mentions: $(grep -c 'ENABLE_MATH_RENDERING' build/xcodebuild-build.log || true)"
-          grep -o "in target '[A-Za-z]*' from project 'SwiftMath'" build/xcodebuild-build.log | sort -u || true
-          ls build/DerivedData/Build/Products/Debug/ClassNote.app/Contents/Resources
           status=0
           if ! grep -q 'ENABLE_MATH_RENDERING' build/xcodebuild-build.log; then
             echo "::error::MarkdownView was built without ENABLE_MATH_RENDERING, so formulas would show as raw LaTeX"

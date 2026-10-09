@@ -185,6 +185,6 @@ struct NotesView: View {
             }
             .buttonStyle(.plain)
         }
-        .listStyle(.sidebar)
+        .paneListStyle()
     }
 }

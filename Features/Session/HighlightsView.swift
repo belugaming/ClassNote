@@ -24,7 +24,7 @@ struct HighlightsView: View {
                             }
                     }
                 }
-                .listStyle(.sidebar)
+                .paneListStyle()
                 .frame(width: 240)
                 Divider()
                 HighlightDetail(vm: vm)
