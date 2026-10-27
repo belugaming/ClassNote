@@ -42,6 +42,9 @@ struct MicrophoneInputDevice: Identifiable, Equatable, Hashable {
 }
 
 enum MicrophoneDeviceCatalog {
+    /// Asks coreaudiod, and waits for as long as it takes to answer: forever if
+    /// it is deadlocked. Keep it off the main thread; the app goes through
+    /// `AppState.refreshMicrophoneDevices()`.
     static func availableInputDevices() -> [MicrophoneInputDevice] {
         let devices = audioDevices().map {
             MicrophoneInputDevice(id: $0.uniqueID,

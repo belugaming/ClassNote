@@ -44,7 +44,14 @@ final class AppState: ObservableObject {
     /// Which engine writes notes, answers questions and explains highlights.
     @Published var llmBackend: LLMBackend = .openAICompatible
     @Published var interruptedSessions: [Session] = []
-    @Published var microphoneDevices: [MicrophoneInputDevice] = []
+    /// Starts as just "System default"; the real list loads in the background.
+    @Published var microphoneDevices: [MicrophoneInputDevice] = [.systemDefault]
+    /// True while a device query has gone unanswered far longer than a healthy
+    /// Core Audio ever takes, which means coreaudiod itself is stuck. Starting
+    /// a recording then would freeze the app, so it is refused with an
+    /// explanation instead. Cleared as soon as the query is answered.
+    @Published private(set) var isAudioServiceUnresponsive = false
+    private var microphoneQuery: Task<Void, Never>?
     @AppStorage("preferredMicrophoneDeviceID", store: AppEnvironment.defaults) var preferredMicrophoneDeviceID: String = MicrophoneInputDevice.systemDefaultID
     @Published private var importOrchestrators: [String: SessionOrchestrator] = [:]
     /// Task Center ids for the running imports/re-transcriptions, keyed the same
@@ -184,11 +191,53 @@ final class AppState: ObservableObject {
         }
     }
 
-    func refreshMicrophoneDevices() {
-        microphoneDevices = MicrophoneDeviceCatalog.availableInputDevices()
-        if selectedMicrophoneUniqueID != nil,
-           !microphoneDevices.contains(where: { $0.id == preferredMicrophoneDeviceID }) {
-            preferredMicrophoneDeviceID = MicrophoneInputDevice.systemDefaultID
+    /// Lists the microphones without blocking the main thread.
+    ///
+    /// The list comes from coreaudiod, and when that daemon deadlocks (a macOS
+    /// bug: seen on 27.2 when an audio device plug-in changed while a system
+    /// audio tap was running) the query never returns. Asked on the main
+    /// thread at launch, it left the app spinning before its window had drawn.
+    /// `stallAfter` and `query` are for tests.
+    func refreshMicrophoneDevices(
+        stallAfter: Duration = .seconds(5),
+        query: @escaping @Sendable () -> [MicrophoneInputDevice] = { MicrophoneDeviceCatalog.availableInputDevices() }
+    ) {
+        // One query at a time: a stuck one holds its thread until coreaudiod
+        // recovers, and Settings asks again every time it appears.
+        guard microphoneQuery == nil else { return }
+        microphoneQuery = Task {
+            let watchdog = Task {
+                try? await Task.sleep(for: stallAfter)
+                guard !Task.isCancelled else { return }
+                self.isAudioServiceUnresponsive = true
+                NSLog("[ClassNote] Core Audio has not answered a device query in %@; coreaudiod looks stuck",
+                      String(describing: stallAfter))
+            }
+            let devices = await Self.runOffMainThread(query)
+            watchdog.cancel()
+            let answeredLate = isAudioServiceUnresponsive
+            microphoneQuery = nil
+            isAudioServiceUnresponsive = false
+            microphoneDevices = devices
+            // A late answer comes from a daemon that was stuck or has just been
+            // restarted, and can be missing devices; it is not a reason to
+            // forget the user's microphone.
+            if !answeredLate, selectedMicrophoneUniqueID != nil,
+               !devices.contains(where: { $0.id == preferredMicrophoneDeviceID }) {
+                preferredMicrophoneDeviceID = MicrophoneInputDevice.systemDefaultID
+            }
+        }
+    }
+
+    /// On a GCD thread rather than the Swift concurrency pool: the call can
+    /// block for good, and GCD makes another thread when one is stuck.
+    private nonisolated static func runOffMainThread(
+        _ query: @escaping @Sendable () -> [MicrophoneInputDevice]
+    ) async -> [MicrophoneInputDevice] {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: query())
+            }
         }
     }
 
@@ -196,9 +245,12 @@ final class AppState: ObservableObject {
         preferredMicrophoneDeviceID == MicrophoneInputDevice.systemDefaultID ? nil : preferredMicrophoneDeviceID
     }
 
+    /// From the loaded list only. The menu bar reads this on every redraw, so
+    /// it must never ask Core Audio itself.
     var selectedMicrophoneName: String {
         microphoneDevices.first { $0.id == preferredMicrophoneDeviceID }?.name
-        ?? MicrophoneDeviceCatalog.name(for: selectedMicrophoneUniqueID)
+        ?? selectedMicrophoneUniqueID
+        ?? MicrophoneInputDevice.systemDefault.name
     }
 
     func refreshInterruptedSessions() async {
@@ -280,6 +332,10 @@ final class AppState: ObservableObject {
                          source: AudioSourceKind,
                          translationEnabled: Bool? = nil) async -> String? {
         guard !isStartingRecording, !isRecording else { return nil }
+        guard !isAudioServiceUnresponsive else {
+            setError(L10n.t("record.error.audioServiceUnresponsive"))
+            return nil
+        }
         isStartingRecording = true
         defer { isStartingRecording = false }
         do {
@@ -301,6 +357,10 @@ final class AppState: ObservableObject {
 
     func startEphemeralTranslation(source: AudioSourceKind = .microphone) {
         guard !isStartingRecording, !isRecording else { return }
+        guard !isAudioServiceUnresponsive else {
+            setError(L10n.t("record.error.audioServiceUnresponsive"))
+            return
+        }
         isStartingRecording = true
         Task { @MainActor in
             defer { self.isStartingRecording = false }
@@ -648,8 +708,11 @@ final class AppState: ObservableObject {
                             status: Database.shared.dbPool == nil ? .failed : .ok,
                             detail: Database.shared.dbPool == nil ? L10n.t("diagnostics.database.failed") : L10n.t("diagnostics.ok")))
         checks.append(.init(name: L10n.t("diagnostics.microphone"),
-                            status: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized ? .ok : .warning,
-                            detail: "\(L10n.t("diagnostics.microphone.detail")) \(selectedMicrophoneName)"))
+                            status: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+                                && !isAudioServiceUnresponsive ? .ok : .warning,
+                            detail: isAudioServiceUnresponsive
+                                ? L10n.t("record.error.audioServiceUnresponsive")
+                                : "\(L10n.t("diagnostics.microphone.detail")) \(selectedMicrophoneName)"))
         checks.append(.init(name: L10n.t("diagnostics.screen"),
                             status: CGPreflightScreenCaptureAccess() ? .ok : .warning,
                             detail: L10n.t("diagnostics.screen.detail")))

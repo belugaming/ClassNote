@@ -118,7 +118,10 @@ struct GeneralSettingsView: View {
                 Toggle(L10n.t("settings.engines.liveTranslationToggle"), isOn: $appState.translationEnabled)
             }
 
-            SettingsSection(title: L10n.t("settings.audio.input"), footer: L10n.t("settings.audio.inputNote")) {
+            SettingsSection(title: L10n.t("settings.audio.input"),
+                            footer: appState.isAudioServiceUnresponsive
+                                ? L10n.t("record.error.audioServiceUnresponsive")
+                                : L10n.t("settings.audio.inputNote")) {
                 HStack {
                     Picker(L10n.t("settings.audio.microphone"), selection: $appState.preferredMicrophoneDeviceID) {
                         ForEach(appState.microphoneDevices) { device in

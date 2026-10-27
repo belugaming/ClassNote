@@ -17,8 +17,8 @@ settings:
     SWIFT_STRICT_CONCURRENCY: complete
     SWIFT_TREAT_WARNINGS_AS_ERRORS: "NO"
     ENABLE_USER_SCRIPT_SANDBOXING: NO
-    MARKETING_VERSION: "0.16.9"
-    CURRENT_PROJECT_VERSION: "27"
+    MARKETING_VERSION: "0.16.10"
+    CURRENT_PROJECT_VERSION: "28"
     # Apple Silicon only, in every configuration: a Release build would
     # otherwise also carry an Intel slice nobody can use.
     ARCHS: arm64
