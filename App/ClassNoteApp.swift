@@ -154,10 +154,14 @@ private struct AppCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button(appState.isActivelyRecording ? L10n.t("record.stop") : L10n.t("record.start")) {
+            Button(appState.isStoppingRecording ? L10n.t("record.finishing")
+                   : appState.isActivelyRecording ? L10n.t("record.stop") : L10n.t("record.start")) {
                 RecordingLauncher.toggle(appState)
             }
             .keyboardShortcut("n", modifiers: .command)
+            // It read Start while the last recording was still being saved,
+            // yet could only join that stop.
+            .disabled(appState.isStoppingRecording)
             // Each raises a flag the main window reads when it appears, so the
             // request survives that window having to be opened first.
             Button(L10n.t("main.newCourse")) {
