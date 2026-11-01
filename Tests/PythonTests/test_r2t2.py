@@ -9,6 +9,7 @@ commit, the held-back token, the rolling window and the line events.
 
 Run: python3 -m unittest discover -s Tests/PythonTests
 """
+import json
 import os
 import re
 import sys
@@ -58,6 +59,43 @@ class ScriptedModel:
 
     def decode(self, ids):
         return "".join(ids)
+
+
+class WindowModel:
+    """Hears only the window it is given, which ScriptedModel does not: word i
+    ("w<i>", one token) is spoken at times[i] seconds, and a decode returns the
+    words after the last committed one that lie inside the stream's current
+    window, `max_new_tokens` at most. A word whose audio left the window before
+    it was committed is gone for good, as it is for the real model."""
+
+    def __init__(self, times):
+        self.times = list(times)
+        self.stream = None            # the R2T2Stream whose window this is
+        self.calls = []               # max_new_tokens of each decode
+
+    def generate(self, audio, context, language, prefix, max_new_tokens):
+        self.calls.append(max_new_tokens)
+        start = self.stream.window_start / SAMPLE_RATE
+        end = start + len(audio) / SAMPLE_RATE
+        said = prefix.split()
+        last = int(said[-1][1:]) if said else -1
+        heard = [f" w{i}" for i, t in enumerate(self.times) if i > last and start <= t < end]
+        return "".join(heard[:max_new_tokens])
+
+    def encode(self, text):
+        return tokens(text)
+
+    def decode(self, ids):
+        return "".join(ids)
+
+
+def speech(seconds, words_per_second, start=0.0):
+    """Word times for continuous speech."""
+    return [start + i / words_per_second for i in range(int(seconds * words_per_second))]
+
+
+def transcript(events):
+    return " ".join(e["text"] for e in events if e["type"] == "final").lower().split()
 
 
 def samples(seconds, level=0.1):
@@ -154,6 +192,130 @@ class StreamTests(unittest.TestCase):
     def test_a_decoder_loop_drops_the_prefix(self):
         self.assertTrue(r2t2_engine.is_hallucinating("ok. ok. ok. ok. ok. "))
         self.assertFalse(r2t2_engine.is_hallucinating("the cell membrane is permeable"))
+
+    def test_the_budget_follows_the_audio_a_step_takes_in(self):
+        # A 160 ms live step stays about as cheap as it always was; a 2 s
+        # step may write out everything a fast speaker (~5 tokens/s) said in
+        # it, plus the token it holds back.
+        for step_s, low, high in ((0.16, 2, 3), (2.0, 2 * 5 + 1, r2t2_engine.FLUSH_NEW_TOKENS)):
+            with self.subTest(step_s=step_s):
+                model = WindowModel(speech(12, 20.0))    # always more to say
+                stream = R2T2Stream(model=model, language="English",
+                                    step_samples=int(step_s * SAMPLE_RATE))
+                model.stream = stream
+                for _ in range(5):
+                    stream.accept(samples(step_s))
+                # The first step also takes in its look-ahead chunk.
+                for budget in model.calls[1:]:
+                    self.assertGreaterEqual(budget, low)
+                    self.assertLessEqual(budget, high)
+
+    def test_a_backlog_longer_than_the_window_is_decoded_not_trimmed(self):
+        # Twenty seconds at once: in one step, the trim would drop the first
+        # twelve before a word of them was decoded.
+        model = WindowModel(speech(20, 3.0))
+        stream = R2T2Stream(model=model, language="English")
+        model.stream = stream
+        pieces = stream.accept(samples(20.0)) + stream.flush()
+        said = " ".join(text for text, _ in pieces).split()
+        self.assertEqual(said, [f"w{i}" for i in range(60)])
+        self.assertEqual(len(model.calls), 11)    # ten 2 s steps and the flush
+
+
+class ContinuousSpeechTests(unittest.TestCase):
+    """A minute without a pause against a model that only hears its window.
+    A step has to commit at least what was said during it: a decoder that
+    falls behind never catches up without a pause, and the window trim then
+    drops audio it never reached (2 s steps used to lose two words in three)."""
+
+    def run_speech(self, transcriber, model, seconds, frame_ms):
+        model.stream = transcriber.stream
+        frame = np.full(frame_ms * SAMPLE_RATE // 1000, 3000, np.int16).tobytes()
+        events = []
+        for _ in range(seconds * 1000 // frame_ms):
+            events += transcriber.feed(frame)
+        return events + transcriber.finish()
+
+    def test_a_file_import_keeps_every_word(self):
+        for rate in (3.0, 5.0):
+            with self.subTest(words_per_second=rate):
+                engine = asr_server.R2T2Engine(chunk_ms=160)
+                engine.model = WindowModel(speech(60, rate))
+                t = engine.new_transcriber("en", file=True)
+                # 200 ms slices, as Session.transcribe_file reads them.
+                events = self.run_speech(t, engine.model, 60, 200)
+                self.assertEqual(transcript(events), [f"w{i}" for i in range(int(60 * rate))])
+
+    def test_the_1120_ms_setting_keeps_every_word(self):
+        for rate in (3.0, 5.0):
+            with self.subTest(words_per_second=rate):
+                model = WindowModel(speech(60, rate))
+                t = asr_server.R2T2Transcriber(model, "en", step_ms=1120)
+                events = self.run_speech(t, model, 60, 100)
+                self.assertEqual(transcript(events), [f"w{i}" for i in range(int(60 * rate))])
+
+
+class _Socket:
+    """What Session sends, as decoded JSON."""
+
+    def __init__(self):
+        self.sent = []
+        self.close_code = None
+
+    async def send(self, message):
+        self.sent.append(json.loads(message))
+
+
+class _WindowEngine:
+    def __init__(self, model, step_ms=160):
+        self.model = model
+        self.step_ms = step_ms
+
+    def new_transcriber(self, language, context="", file=False):
+        t = asr_server.R2T2Transcriber(self.model, language, context, step_ms=self.step_ms)
+        self.model.stream = t.stream
+        return t
+
+
+class BacklogTests(unittest.IsolatedAsyncioTestCase):
+    """Frames that queue up while a step runs, as on a Mac too slow for one
+    step per 160 ms. Here they are all queued before the worker first runs."""
+
+    async def run_session(self, model, frames):
+        ws = _Socket()
+        session = asr_server.Session(ws, _WindowEngine(model), "en")
+        await session.start()
+        for pcm in frames:
+            session.enqueue(pcm)
+        await session.finish()
+        await session.close()
+        return ws.sent
+
+    @staticmethod
+    def frames(seconds, voiced=True):
+        level = 3000 if voiced else 0
+        return [np.full(100 * SAMPLE_RATE // 1000, level, np.int16).tobytes()] * round(seconds * 10)
+
+    async def test_a_backlog_is_decoded_in_a_few_big_steps_before_eof(self):
+        # Ten seconds behind. One step per frame or two (fifty here), each
+        # re-encoding the window, is what kept a slow Mac behind until Stop
+        # gave up on the rest; one call decodes it in 2 s steps.
+        model = WindowModel(speech(10, 3.0))
+        sent = await self.run_session(model, self.frames(10))
+        self.assertEqual(transcript(sent), [f"w{i}" for i in range(30)])
+        self.assertLessEqual(len(model.calls), 6)     # five 2 s steps and the flush
+        self.assertEqual(sent[-1], {"type": "eof"})
+
+    async def test_a_pause_inside_a_backlog_still_closes_its_line(self):
+        # Voice is followed frame by frame even when the audio is decoded in
+        # one go, so the pause flushes the first line where it happened.
+        model = WindowModel(speech(2, 3.0) + speech(1.2, 3.0, start=3.2))
+        frames = self.frames(2) + self.frames(1.2, voiced=False) + self.frames(1.2)
+        sent = await self.run_session(model, frames)
+        finals = [e for e in sent if e["type"] == "final"]
+        self.assertEqual([f["text"] for f in finals], ["W0 w1 w2 w3 w4 w5", "W6 w7 w8"])
+        self.assertTrue(finals[0]["sentenceEnd"])
+        self.assertLess(finals[0]["endMs"], 3200)
 
 
 class HelperTests(unittest.TestCase):

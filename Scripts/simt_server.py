@@ -427,20 +427,64 @@ class MLXSimulModel:
         return self.tokenizer.decode(out)
 
 
+def source_cached() -> bool:
+    """Whether the whole bf16 checkpoint is in the hub cache: its weight index
+    and every shard the index lists. config.json alone says nothing -- it is
+    the first file an interrupted download leaves behind."""
+    from huggingface_hub import try_to_load_from_cache
+
+    def cached(name):
+        path = try_to_load_from_cache(SOURCE_REPO, name, revision=SOURCE_REVISION)
+        return path if isinstance(path, str) else None
+
+    index = cached("model.safetensors.index.json")
+    if index is None:
+        return False
+    try:
+        with open(index, encoding="utf-8") as f:
+            shards = set(json.load(f)["weight_map"].values())
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return all(cached(name) for name in shards)
+
+
+def source_cached_bytes() -> int:
+    """What a previous, interrupted download already put in the hub cache,
+    unfinished files included: the rest is all that still has to fit."""
+    from huggingface_hub import constants
+
+    blobs = os.path.join(constants.HF_HUB_CACHE,
+                         "models--" + SOURCE_REPO.replace("/", "--"), "blobs")
+    try:
+        return sum(entry.stat().st_size for entry in os.scandir(blobs) if entry.is_file())
+    except OSError:
+        return 0
+
+
 def convert_model(model_dir: str, stage) -> str:
     """The quantized model directory, building it on first use."""
     if os.path.exists(os.path.join(model_dir, "config.json")):
         return model_dir
-    from huggingface_hub import snapshot_download, try_to_load_from_cache
+    from huggingface_hub import snapshot_download
 
     parent = os.path.dirname(os.path.abspath(model_dir))
     os.makedirs(parent, exist_ok=True)
-    cached_before = isinstance(try_to_load_from_cache(SOURCE_REPO, "config.json",
-                                                      revision=SOURCE_REVISION), str)
-    free = shutil.disk_usage(parent).free
-    if not cached_before and free < REQUIRED_FREE_BYTES:
-        raise RuntimeError(f"disk: {free // 1024 ** 3} GB free, "
-                           f"{REQUIRED_FREE_BYTES // 1024 ** 3} GB needed")
+    # Present while the bf16 source in the hub cache is ours to delete once
+    # the conversion is done. Written before the download, so a run that was
+    # interrupted mid-download still cleans up after the one that finishes; a
+    # complete checkpoint that was already there (someone's own copy) is left
+    # alone.
+    marker = model_dir + ".source-ours"
+    if not os.path.exists(marker) and not source_cached():
+        with open(marker, "w", encoding="utf-8"):
+            pass
+    ours = os.path.exists(marker)
+    if ours:
+        need = max(0, REQUIRED_FREE_BYTES - source_cached_bytes())
+        free = shutil.disk_usage(parent).free
+        if free < need:
+            raise RuntimeError(f"disk: {free // 1024 ** 3} GB free, "
+                               f"{-(-need // 1024 ** 3)} GB needed")
 
     stage("download")
     kwargs = {"allow_patterns": SOURCE_ALLOW_PATTERNS}
@@ -458,12 +502,14 @@ def convert_model(model_dir: str, stage) -> str:
     convert(source, mlx_path=scratch, quantize=True, q_bits=Q_BITS, q_group_size=Q_GROUP_SIZE)
     os.replace(scratch, model_dir)
 
-    if not cached_before:
+    if ours:
         # The bf16 original is ~28 GB and only served as input to the
         # conversion. Remove the whole repo from the hub cache.
         repo_dir = os.path.dirname(os.path.dirname(source))
         if os.path.basename(repo_dir).startswith("models--"):
             shutil.rmtree(repo_dir, ignore_errors=True)
+        with contextlib.suppress(OSError):
+            os.remove(marker)
     return model_dir
 
 

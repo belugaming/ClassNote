@@ -787,6 +787,15 @@ class Transcriber:
             return 0
         return self.stream_ms - self.first_token_ms
 
+    def feed_frames(self, frames: list[bytes]) -> list[dict]:
+        """Frames that queued up while the last one decoded. nemotron's cost
+        follows the audio however it is split, so each is fed on its own,
+        exactly as live: a pause inside the backlog still closes its line."""
+        events: list[dict] = []
+        for pcm in frames:
+            events += self.feed(pcm)
+        return events
+
     def feed(self, pcm: bytes) -> list[dict]:
         """Consume one PCM frame; returns the events it produced."""
         if len(pcm) % 2:
@@ -1073,7 +1082,20 @@ class R2T2Transcriber:
     def set_context(self, context: str):
         self.stream.context = context or ""
 
-    def feed(self, pcm: bytes) -> list[dict]:
+    def feed_frames(self, frames: list[bytes]) -> list[dict]:
+        """Frames that queued up while the last step ran. Voice and pauses are
+        followed frame by frame, as live, but the audio is decoded once, after
+        the last frame: every step re-encodes the whole window, so one step per
+        frame could take longer than the frame itself on a slower Mac, and the
+        backlog only grew."""
+        events: list[dict] = []
+        for i, pcm in enumerate(frames):
+            events += self.feed(pcm, decode=i == len(frames) - 1)
+        return events
+
+    def feed(self, pcm: bytes, decode: bool = True) -> list[dict]:
+        """One frame. With `decode` False its audio waits for the next step,
+        unless a pause flushes it first."""
         if len(pcm) % 2:
             pcm = pcm[:-1]
         if not pcm:
@@ -1085,7 +1107,11 @@ class R2T2Transcriber:
                 self.voice_onset_ms = before
             self.last_voiced_ms = self.stream_ms
             self.dirty = True
-        events = self._take(self.stream.accept(pcm_to_float(pcm)))
+        if decode:
+            events = self._take(self.stream.accept(pcm_to_float(pcm)))
+        else:
+            self.stream.add(pcm_to_float(pcm))
+            events = []
         events += self._cut()
         if self.dirty and self._in_pause():
             # R2T2 holds its last token back until more audio arrives, and in
@@ -1291,20 +1317,31 @@ class Session:
 
     async def _process_loop(self):
         while True:
-            pcm = await self._inbox.get()
-            self._queued_bytes = max(0, self._queued_bytes - len(pcm))
+            frames = [await self._inbox.get()]
+            # Everything that queued up while the last batch decoded goes in
+            # one call, so R2T2 follows a slow step with one bigger step
+            # instead of a step per frame; at Stop the backlog it never
+            # caught up with used to be cut off.
+            while not self._inbox.empty():
+                frames.append(self._inbox.get_nowait())
+            self._queued_bytes = max(0, self._queued_bytes - sum(len(f) for f in frames))
             try:
-                await self.feed(pcm)
+                await self.feed(frames)
             except Exception:
                 log(f"[process] {traceback.format_exc()}")
+            finally:
+                for _ in frames:
+                    self._inbox.task_done()
 
     async def drain_inbox(self):
-        while not self._inbox.empty():
-            await asyncio.sleep(0.02)
+        """Returns once every frame queued so far is decoded and its events
+        sent, including the batch the worker has already taken off the queue:
+        an empty queue alone left that last batch racing finish()."""
+        await self._inbox.join()
 
-    async def feed(self, pcm: bytes):
+    async def feed(self, frames: list[bytes]):
         transcriber = self._get_transcriber()
-        events = await self._run(transcriber.feed, pcm)
+        events = await self._run(transcriber.feed_frames, frames)
         await self._emit_all(events)
 
         lag_ms = self._queued_bytes // BYTES_PER_MS
