@@ -2,11 +2,18 @@ import AVFoundation
 import Foundation
 
 struct RecoveryCoordinator {
-    static func scanInterruptedSessions() async -> [Session] {
+    /// `isInUse` says which rows this process is writing right now: the live
+    /// recording and any re-transcription look exactly like what a crash
+    /// leaves behind (still `recording`, no end time). Marking the live one
+    /// listed it for recovery and lifted the repository's delete guard while
+    /// its .m4a was being written. Asked after the read, so a recording that
+    /// started during it is seen.
+    @MainActor
+    static func scanInterruptedSessions(isInUse: (Session) -> Bool) async -> [Session] {
         do {
             let candidates = try await SessionRepository.shared.interruptedCandidates()
             var recoverable: [Session] = []
-            for var session in candidates {
+            for var session in candidates where !isInUse(session) {
                 // Sessions whose recording is missing used to be skipped here,
                 // which left them with ended_at NULL forever: rescanned at every
                 // launch, never shown, never closed. They are listed too, and
