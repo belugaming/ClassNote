@@ -6,9 +6,17 @@ interleaved-history protocol, the READ/WRITE bookkeeping and the request loop.
 
 Run: python3 -m unittest discover -s Tests/PythonTests
 """
+import json
 import os
+import shutil
 import sys
+import tempfile
+import types
 import unittest
+import unittest.mock as mock
+
+import huggingface_hub
+from huggingface_hub import constants as hub_constants
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Scripts"))
 
@@ -173,6 +181,120 @@ class ServerTests(unittest.TestCase):
         server = simt_server.Server(ScriptedModel([]))
         self.assertIn("error", server.handle({"id": 1, "op": "start", "session": "a",
                                               "direction": "xx"}))
+
+
+class _Interrupted(Exception):
+    """The network going away, or the app quitting, mid-download."""
+
+
+class ConvertModelTests(unittest.TestCase):
+    """convert_model's bookkeeping around the ~28 GB bf16 download, on a fake
+    hub cache: the download and the conversion are stubbed, the cache lookups
+    are huggingface_hub's own."""
+
+    SHARDS = ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors")
+
+    def setUp(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        self.cache = os.path.join(root, "hub")
+        self.repo_dir = os.path.join(self.cache, "models--" + simt_server.SOURCE_REPO.replace("/", "--"))
+        self.snapshot = os.path.join(self.repo_dir, "snapshots", simt_server.SOURCE_REVISION)
+        self.model_dir = os.path.join(root, "models", "Confucius4-T3PO-4bit")
+        self.marker = self.model_dir + ".source-ours"
+        self.free = 10 ** 12
+        self.interrupt = False
+        self.downloads = 0
+        mlx_lm = types.ModuleType("mlx_lm")
+        mlx_lm.convert = self.convert
+        for patcher in (mock.patch.object(hub_constants, "HF_HUB_CACHE", self.cache),
+                        mock.patch.object(huggingface_hub, "snapshot_download", self.download),
+                        mock.patch.dict(sys.modules, {"mlx_lm": mlx_lm}),
+                        mock.patch.object(simt_server.shutil, "disk_usage",
+                                          lambda path: types.SimpleNamespace(free=self.free)),
+                        mock.patch.object(simt_server, "REQUIRED_FREE_BYTES", 1000)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def put(self, name, size=100):
+        """A finished file, laid out as huggingface_hub does: the bytes in
+        blobs/, the snapshot entry a link to them."""
+        blobs = os.path.join(self.repo_dir, "blobs")
+        os.makedirs(blobs, exist_ok=True)
+        os.makedirs(self.snapshot, exist_ok=True)
+        blob = os.path.join(blobs, name + ".blob")
+        if name.endswith(".index.json"):
+            data = json.dumps({"weight_map": {f"w{i}": s for i, s in enumerate(self.SHARDS)}}).encode()
+        else:
+            data = bytes(size)
+        with open(blob, "wb") as f:
+            f.write(data)
+        os.symlink(blob, os.path.join(self.snapshot, name))
+
+    def download(self, repo, revision=None, allow_patterns=None):
+        self.downloads += 1
+        if self.interrupt:
+            # config.json lands in the first seconds; the weights take hours.
+            self.put("config.json")
+            self.put("model.safetensors.index.json")
+            self.put(self.SHARDS[0])
+            with open(os.path.join(self.repo_dir, "blobs", "next.incomplete"), "wb") as f:
+                f.write(bytes(50))
+            raise _Interrupted()
+        for name in ("config.json", "model.safetensors.index.json") + self.SHARDS:
+            if not os.path.exists(os.path.join(self.snapshot, name)):
+                self.put(name)
+        return self.snapshot
+
+    def convert(self, source, mlx_path, **kwargs):
+        os.makedirs(mlx_path)
+        with open(os.path.join(mlx_path, "config.json"), "w") as f:
+            f.write("{}")
+
+    def run_convert(self):
+        return simt_server.convert_model(self.model_dir, lambda key: None)
+
+    def test_an_interrupted_first_download_is_still_deleted_after_conversion(self):
+        self.interrupt = True
+        with self.assertRaises(_Interrupted):
+            self.run_convert()
+        self.assertTrue(os.path.exists(self.marker))
+        self.interrupt = False
+        self.assertEqual(self.run_convert(), self.model_dir)
+        self.assertTrue(os.path.exists(os.path.join(self.model_dir, "config.json")))
+        self.assertFalse(os.path.exists(self.repo_dir))
+        self.assertFalse(os.path.exists(self.marker))
+
+    def test_a_complete_checkpoint_that_was_already_there_is_kept(self):
+        for name in ("config.json", "model.safetensors.index.json") + self.SHARDS:
+            self.put(name)
+        self.free = 0                       # nothing left to download
+        self.run_convert()
+        self.assertTrue(os.path.exists(os.path.join(self.model_dir, "config.json")))
+        self.assertTrue(os.path.isdir(self.snapshot))
+        self.assertFalse(os.path.exists(self.marker))
+
+    def test_the_disk_check_counts_only_what_is_left_to_download(self):
+        self.interrupt = True
+        with self.assertRaises(_Interrupted):
+            self.run_convert()
+        self.interrupt = False
+        blobs = os.path.join(self.repo_dir, "blobs")
+        already = sum(os.path.getsize(os.path.join(blobs, name)) for name in os.listdir(blobs))
+        self.assertGreater(already, 300)    # three files and a partial one
+        self.free = 1000 - already - 1
+        with self.assertRaises(RuntimeError):
+            self.run_convert()
+        self.assertEqual(self.downloads, 1)
+        self.free = 1000 - already
+        self.run_convert()
+        self.assertFalse(os.path.exists(self.repo_dir))
+
+    def test_a_first_download_needs_the_whole_margin(self):
+        self.free = 999
+        with self.assertRaises(RuntimeError):
+            self.run_convert()
+        self.assertEqual(self.downloads, 0)
 
 
 if __name__ == "__main__":

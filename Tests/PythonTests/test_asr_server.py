@@ -787,6 +787,37 @@ class FileImportTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.session._inbox.empty())
 
 
+class _TimedRecognizer(_FakeRecognizer):
+    """Reports a token only once the audio fed so far reaches its onset, as a
+    streaming recogniser does."""
+
+    def get_result_all(self, stream):
+        heard = stream.samples / SAMPLE_RATE
+        toks = [(t, ts) for t, ts in self.tokens if ts < heard]
+        return _Result([t for t, _ in toks], [ts for _, ts in toks])
+
+
+class LiveBacklogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_nemotron_still_takes_a_backlog_frame_by_frame(self):
+        # The session hands over everything queued in one call, which R2T2
+        # needs; nemotron still feeds those frames one at a time, so the pause
+        # in the middle of this backlog closes the first line as it would live.
+        rec = _TimedRecognizer()
+        rec.tokens = [(" hello", 0.1), (" world", 0.3), (" next", 2.6), (" words", 2.8)]
+        loud = np.full(100 * 16, 8000, dtype="<i2").tobytes()
+        quiet = bytes(100 * BYTES_PER_MS)
+        ws = _FakeWS()
+        session = asr_server.Session(ws, _FakeEngine(rec), "en")
+        await session.start()
+        for pcm in [loud] * 5 + [quiet] * 15 + [loud] * 10:
+            session.enqueue(pcm)
+        await session.finish()
+        await session.close()
+        self.assertEqual([e["text"] for e in ws.sent if e["type"] == "final"],
+                         ["Hello world", "Next words"])
+        self.assertEqual(ws.sent[-1], {"type": "eof"})
+
+
 class ConnectionDispatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_second_file_job_is_refused_and_the_first_is_cancelled(self):
         # The read loop keeps running while a file job does, which is what makes
