@@ -173,9 +173,14 @@ enum LocalModelCatalog {
         if model.role == .recognition || model.role == .punctuation || model.role == .runtime {
             AppState.shared.isLocalEngineReady = false
         }
-        for url in model.locations where FileManager.default.fileExists(atPath: url.path) {
-            try FileManager.default.removeItem(at: url)
-        }
+        // Off the main actor: removing a multi-GB model folder takes seconds,
+        // and on the main thread the whole app froze for them.
+        let locations = model.locations
+        try await Task.detached(priority: .userInitiated) {
+            for url in locations where FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+        }.value
     }
 
     @MainActor

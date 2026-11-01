@@ -553,6 +553,7 @@ enum L10n {
         // MARK: Engines wave -- local sidecar errors, the notes/QA backend and
         // the engine error strings that used to be hard-coded English.
         "localASR.stage.llm": "Loading the local language model…",
+        "localLLM.exited": "The local language model quit unexpectedly. Try again.",
         "localASR.busy": "The local engine is in use by a recording. Stop the recording before changing engine settings.",
         "localASR.error.file.missing": "The audio file could not be found.",
         "localASR.error.file.unreadable": "The audio file could not be read. It may be damaged or in an unsupported format.",
@@ -1241,6 +1242,7 @@ enum L10n {
 
         // MARK: Engines wave -- 本地引擎错误、笔记/问答后端，以及原本写死英文的引擎错误。
         "localASR.stage.llm": "加载本地大模型…",
+        "localLLM.exited": "本地大模型意外退出了，请重试。",
         "localASR.busy": "本地引擎正在被录音使用。请先停止录音，再修改引擎设置。",
         "localASR.error.file.missing": "找不到音频文件。",
         "localASR.error.file.unreadable": "无法读取音频文件，可能已损坏或格式不受支持。",

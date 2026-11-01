@@ -20,42 +20,50 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
     private let maxChunkSec: Double = 12.0
     private let rmsThreshold: Double = 0.01
     private let minEmitChars: Int = 3
+    /// Waits before each retry of an upload that failed for a reason that may
+    /// pass. Injectable so tests need not sit through the real ones.
+    private let retryDelays: [TimeInterval]
 
-    init(config: ApiConfig) {
+    /// Three retries, a few seconds in all: enough to ride out a Wi-Fi
+    /// handoff or a brief 503 without holding a chunk for long.
+    static let defaultRetryDelays: [TimeInterval] = [1, 2, 4]
+
+    init(config: ApiConfig, retryDelays: [TimeInterval] = OpenAICompatibleSTT.defaultRetryDelays) {
         self.config = config
+        self.retryDelays = retryDelays
+    }
+
+    /// Audio committed for upload, on the bus's own clock.
+    private struct CommittedAudio: Sendable {
+        let pcm: Data
+        let startMs: Int64
+        let endMs: Int64
     }
 
     func transcribe(audio: AsyncStream<AudioChunk>,
                     language: String?) -> AsyncThrowingStream<TranscriptEvent, Error> {
         AsyncThrowingStream { continuation in
-            let task = Task {
+            // Intake and upload run apart. The bus's stream keeps only ~40 s
+            // and drops the oldest audio past that, so reading it only between
+            // uploads lost audio whenever one was slow or being retried.
+            // Committed audio waits here, in order, until its upload succeeds.
+            let (committed, commit) = AsyncStream<CommittedAudio>.makeStream()
+
+            let uploader = Task {
                 do {
-                    var buffer = Data()
-                    var bufferStartMs: Int64 = 0
-                    var bufferEndMs: Int64 = 0
-                    var voicedBytes = 0
-                    var silentTrailBytes = 0
                     var promptCarry: String = ""
-                    let bytesPerSec = targetSampleRate * 2
-                    let maxBytes = Int(self.maxChunkSec * Double(bytesPerSec))
-                    let minVoicedBytes = Int(self.minVoicedSec * Double(bytesPerSec))
-                    let silenceHoldBytes = Int(self.silenceHoldSec * Double(bytesPerSec))
-
-                    func flush() async throws {
-                        guard !buffer.isEmpty else { return }
-                        let wav = WavEncoder.encode(pcm16: buffer, sampleRate: self.targetSampleRate, channels: 1)
-                        let startMs = bufferStartMs
-                        let endMs = bufferEndMs
-                        buffer.removeAll(keepingCapacity: true)
-                        voicedBytes = 0
-                        silentTrailBytes = 0
-
+                    for await chunk in committed {
+                        let startMs = chunk.startMs
+                        let endMs = chunk.endMs
                         let segments = try await Self.postTranscriptionVerbose(
-                            wav: wav,
+                            wav: WavEncoder.encode(pcm16: chunk.pcm, sampleRate: self.targetSampleRate, channels: 1),
                             config: self.config,
                             language: language,
-                            prompt: promptCarry.isEmpty ? nil : promptCarry
-                        )
+                            prompt: promptCarry.isEmpty ? nil : promptCarry,
+                            // A reply without timings (plain `json`) becomes one
+                            // line spanning the chunk, not a zero-length one.
+                            fallbackDurationSec: Double(endMs - startMs) / 1000,
+                            retryDelays: self.retryDelays)
 
                         // Emit each Whisper segment as its own event so the UI
                         // gets sentence-level granularity without us guessing
@@ -89,47 +97,72 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
                             }
                         }
                     }
-
-                    for await chunk in audio {
-                        let chunkBytes = chunk.pcmData.count
-                        let rms = VADGate.rms(pcm16: chunk.pcmData)
-                        let isVoiced = rms >= self.rmsThreshold
-
-                        if buffer.isEmpty {
-                            bufferStartMs = chunk.timestamp
-                            silentTrailBytes = 0
-                        }
-                        buffer.append(chunk.pcmData)
-                        let chunkDurMs = Int64(Double(chunkBytes) / Double(bytesPerSec) * 1000)
-                        bufferEndMs = chunk.timestamp + chunkDurMs
-
-                        if isVoiced {
-                            voicedBytes += chunkBytes
-                            silentTrailBytes = 0
-                        } else {
-                            silentTrailBytes += chunkBytes
-                        }
-
-                        // Commit conditions (priority order):
-                        // 1. Hard cap: max chunk duration reached.
-                        // 2. Natural: enough voice collected AND we've hit trailing silence.
-                        if buffer.count >= maxBytes {
-                            try await flush()
-                        } else if voicedBytes >= minVoicedBytes && silentTrailBytes >= silenceHoldBytes {
-                            try await flush()
-                        }
-                    }
-
-                    // End of stream: flush whatever is pending.
-                    if !buffer.isEmpty && voicedBytes > bytesPerSec / 2 {
-                        try await flush()
-                    }
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
                 }
             }
-            continuation.onTermination = { _ in task.cancel() }
+
+            let reader = Task {
+                var buffer = Data()
+                var bufferStartMs: Int64 = 0
+                var bufferEndMs: Int64 = 0
+                var voicedBytes = 0
+                var silentTrailBytes = 0
+                let bytesPerSec = targetSampleRate * 2
+                let maxBytes = Int(self.maxChunkSec * Double(bytesPerSec))
+                let minVoicedBytes = Int(self.minVoicedSec * Double(bytesPerSec))
+                let silenceHoldBytes = Int(self.silenceHoldSec * Double(bytesPerSec))
+
+                func flush() {
+                    guard !buffer.isEmpty else { return }
+                    commit.yield(CommittedAudio(pcm: buffer, startMs: bufferStartMs, endMs: bufferEndMs))
+                    buffer = Data()
+                    voicedBytes = 0
+                    silentTrailBytes = 0
+                }
+
+                for await chunk in audio {
+                    let chunkBytes = chunk.pcmData.count
+                    let rms = VADGate.rms(pcm16: chunk.pcmData)
+                    let isVoiced = rms >= self.rmsThreshold
+
+                    if buffer.isEmpty {
+                        bufferStartMs = chunk.timestamp
+                        silentTrailBytes = 0
+                    }
+                    buffer.append(chunk.pcmData)
+                    let chunkDurMs = Int64(Double(chunkBytes) / Double(bytesPerSec) * 1000)
+                    bufferEndMs = chunk.timestamp + chunkDurMs
+
+                    if isVoiced {
+                        voicedBytes += chunkBytes
+                        silentTrailBytes = 0
+                    } else {
+                        silentTrailBytes += chunkBytes
+                    }
+
+                    // Commit conditions (priority order):
+                    // 1. Hard cap: max chunk duration reached.
+                    // 2. Natural: enough voice collected AND we've hit trailing silence.
+                    if buffer.count >= maxBytes {
+                        flush()
+                    } else if voicedBytes >= minVoicedBytes && silentTrailBytes >= silenceHoldBytes {
+                        flush()
+                    }
+                }
+
+                // End of stream: flush whatever is pending.
+                if !buffer.isEmpty && voicedBytes > bytesPerSec / 2 {
+                    flush()
+                }
+                commit.finish()
+            }
+
+            continuation.onTermination = { _ in
+                reader.cancel()
+                uploader.cancel()
+            }
         }
     }
 
@@ -188,7 +221,8 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
                             config: config,
                             language: language,
                             prompt: promptCarry.isEmpty ? nil : promptCarry,
-                            fallbackDurationSec: Double(end - offset) / Double(bytesPerSecond))
+                            fallbackDurationSec: Double(end - offset) / Double(bytesPerSecond),
+                            retryDelays: retryDelays)
                         for seg in segments {
                             let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
                             guard Self.shouldEmit(text, minChars: minEmitChars) else { continue }
@@ -253,9 +287,28 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
     ///   only for the synthetic segment the fallbacks below produce: a provider
     ///   that ignores `verbose_json` gives no timings at all, and reporting
     ///   0...0 collapses every imported segment onto its slice boundary.
+    /// - Parameter retryDelays: waits before each retry of an upload that
+    ///   failed for a reason that may pass; empty means no retries.
     static func postTranscriptionVerbose(wav: Data, config: ApiConfig, language: String?, prompt: String? = nil,
-                                         fallbackDurationSec: Double = 0) async throws -> [VerboseSegment] {
-        let (resp, data) = try await postMultipart(wav: wav, config: config, language: language, verbose: true, prompt: prompt)
+                                         fallbackDurationSec: Double = 0,
+                                         retryDelays: [TimeInterval] = []) async throws -> [VerboseSegment] {
+        let verbose = acceptsVerboseJSON(config)
+        var (resp, data) = try await postMultipartRetrying(wav: wav, config: config, language: language,
+                                                           verbose: verbose, prompt: prompt,
+                                                           retryDelays: retryDelays)
+        // gpt-4o-transcribe and its mini take only `json` and `text`, and
+        // answer `verbose_json` with a 400 that names the field. Ask again
+        // without it, and leave it out for this model from now on; the plain
+        // reply comes back as one segment spanning the audio.
+        if verbose, [400, 422].contains(resp.statusCode),
+           OpenAIRejectedParameters.blames(data, "response_format")
+            || OpenAIRejectedParameters.blames(data, "verbose_json") {
+            OpenAIRejectedParameters.shared.insert("response_format", baseUrl: config.baseUrl,
+                                                   model: config.sttModel)
+            (resp, data) = try await postMultipartRetrying(wav: wav, config: config, language: language,
+                                                           verbose: false, prompt: prompt,
+                                                           retryDelays: retryDelays)
+        }
         if !(200..<300).contains(resp.statusCode) {
             throw EngineError.httpError(status: resp.statusCode,
                                         body: String(data: data, encoding: .utf8) ?? "")
@@ -279,6 +332,70 @@ final class OpenAICompatibleSTT: STTProvider, Sendable {
         let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if raw.isEmpty { return [] }
         return [VerboseSegment(id: 0, start: 0, end: fallbackDurationSec, text: raw)]
+    }
+
+    /// Whether to ask for `verbose_json`. The gpt-4o transcribe models are
+    /// known not to take it, which saves their first request a 400; any
+    /// other model that refuses it is learned from that 400.
+    static func acceptsVerboseJSON(_ config: ApiConfig) -> Bool {
+        let id = config.sttModel.split(separator: "/").last.map { $0.lowercased() } ?? ""
+        if id.hasPrefix("gpt-4o-transcribe") || id.hasPrefix("gpt-4o-mini-transcribe") { return false }
+        return !OpenAIRejectedParameters.shared.contains("response_format", baseUrl: config.baseUrl,
+                                                         model: config.sttModel)
+    }
+
+    /// One upload, retried after a short wait when it failed for a reason that
+    /// may pass. Anything else (a bad key, a wrong model, a missing endpoint)
+    /// comes back at once, as does the last failure once the retries run out.
+    static func postMultipartRetrying(wav: Data, config: ApiConfig, language: String?, verbose: Bool,
+                                      prompt: String?,
+                                      retryDelays: [TimeInterval]) async throws -> (HTTPURLResponse, Data) {
+        var attempt = 0
+        while true {
+            let wait: TimeInterval
+            do {
+                let (resp, data) = try await postMultipart(wav: wav, config: config, language: language,
+                                                           verbose: verbose, prompt: prompt)
+                guard attempt < retryDelays.count, isTransient(status: resp.statusCode) else {
+                    return (resp, data)
+                }
+                wait = retryAfter(resp) ?? retryDelays[attempt]
+                NSLog("[OpenAICompatibleSTT] HTTP \(resp.statusCode), retrying in \(wait)s")
+            } catch let error as URLError where attempt < retryDelays.count && isTransient(error) {
+                wait = retryDelays[attempt]
+                NSLog("[OpenAICompatibleSTT] \(error.code.rawValue), retrying in \(wait)s")
+            }
+            attempt += 1
+            try await Task.sleep(nanoseconds: UInt64(max(0, wait) * 1_000_000_000))
+        }
+    }
+
+    /// Rate limiting and server-side trouble. 501 and 505 are answers about
+    /// the request, not the moment, and do not change on a retry.
+    static func isTransient(status: Int) -> Bool {
+        if status == 408 || status == 429 { return true }
+        return (500...599).contains(status) && status != 501 && status != 505
+    }
+
+    /// A timeout or a network that went away, as on a Wi-Fi handoff between
+    /// lecture halls. Not cancellation, and not a malformed URL.
+    static func isTransient(_ error: URLError) -> Bool {
+        switch error.code {
+        case .timedOut, .networkConnectionLost, .notConnectedToInternet,
+             .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// The server's own `Retry-After`, in its seconds form, capped so one
+    /// answer cannot hold a chunk for minutes.
+    static func retryAfter(_ response: HTTPURLResponse) -> TimeInterval? {
+        guard let raw = response.value(forHTTPHeaderField: "Retry-After"),
+              let seconds = TimeInterval(raw.trimmingCharacters(in: .whitespaces)),
+              seconds >= 0 else { return nil }
+        return min(seconds, 30)
     }
 
     static func postMultipart(wav: Data, config: ApiConfig, language: String?, verbose: Bool, prompt: String? = nil) async throws -> (HTTPURLResponse, Data) {
