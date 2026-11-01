@@ -7,7 +7,14 @@ final class SessionOrchestrator: ObservableObject {
     @Published private(set) var currentSessionId: String? = nil
     @Published private(set) var currentSession: Session? = nil
     @Published private(set) var statusText: String = "Idle"
+    /// Where the recording is, on the bus clock: what the live timer shows and
+    /// what a bookmark is stamped with (`AppState.markHighlight` reads it). See
+    /// `startTicker`.
     @Published private(set) var currentTimestampMs: Int64 = 0
+    /// Why the microphone is not being heard right now, or nil. Shown in the
+    /// live status line: capture keeps running, so the timer alone would look
+    /// healthy.
+    @Published private(set) var captureWarning: String?
     @Published private(set) var isImporting: Bool = false
     @Published private(set) var importCompleted: Int = 0
     @Published private(set) var importTotal: Int = 0
@@ -62,10 +69,6 @@ final class SessionOrchestrator: ObservableObject {
     /// `waitForImportToFinish` throw `EngineError`, which AppState reports as a
     /// failure rather than a cancellation.
     private var importWasCancelled = false
-    /// Added to every engine timestamp. The sidecar's start/end times are
-    /// connection-relative and restart at 0 after a reconnect, so each attempt
-    /// is rebased onto the session's own clock.
-    private var engineTimeOffsetMs: Int64 = 0
     /// Resolved once per session, not per sentence: the glossary rides on every
     /// live translation request.
     private var courseContext: CourseContext = .empty
@@ -76,11 +79,21 @@ final class SessionOrchestrator: ObservableObject {
     /// to drive cancellation, reconnect and drain behaviour in a test without a
     /// real sidecar or a network.
     var sttProviderOverride: STTProvider?
+    /// The same for the translator of live recordings and imports.
+    var translatorOverride: TranslationProvider?
+    /// Replaces the capture devices with a manager the test feeds, for the
+    /// live pipeline's reconnect, clock and translation paths.
+    var captureOverride: AudioSourceManager?
 
     private func makeSTTProvider(config: ApiConfig, backend: SttBackend) -> STTProvider {
         if let sttProviderOverride { return sttProviderOverride }
         return EngineFactory.makeSTT(config: config, backend: backend,
                                      hint: courseContext.recognitionHint)
+    }
+
+    private func makeTranslator(config: ApiConfig) -> TranslationProvider {
+        if let translatorOverride { return translatorOverride }
+        return EngineFactory.makeTranslator(config: config, backend: AppState.shared.translationBackend)
     }
 
     /// Starts a new session, opens audio capture, begins STT/translation pipeline.
@@ -103,7 +116,6 @@ final class SessionOrchestrator: ObservableObject {
         self.statusText = "Starting capture…"
         self.transcript.reset()
         self.resetSentenceState()
-        self.engineTimeOffsetMs = 0
         self.currentTimestampMs = 0
         self.ephemeralRowId = 0
         self.didReportSegmentInsertFailure = false
@@ -114,7 +126,7 @@ final class SessionOrchestrator: ObservableObject {
         }
 
         let outputURL = AppBootstrap.recordingURL(sessionId: sess.id)
-        let manager = AudioSourceManager(microphoneDeviceID: AppState.shared.selectedMicrophoneUniqueID)
+        let manager = makeCaptureManager()
         self.audioManager = manager
 
         if src == .file {
@@ -170,13 +182,12 @@ final class SessionOrchestrator: ObservableObject {
         self.statusText = "Live translation only"
         self.transcript.reset()
         self.resetSentenceState()
-        self.engineTimeOffsetMs = 0
         self.currentTimestampMs = 0
         self.ephemeralRowId = 0
         self.didReportSegmentInsertFailure = false
         self.courseContext = .empty
 
-        let manager = AudioSourceManager(microphoneDeviceID: AppState.shared.selectedMicrophoneUniqueID)
+        let manager = makeCaptureManager()
         self.audioManager = manager
 
         do {
@@ -194,6 +205,38 @@ final class SessionOrchestrator: ObservableObject {
         tutor.begin(sessionId: nil, courseContext: courseContext)
 
         return "ephemeral-translation"
+    }
+
+    private func makeCaptureManager() -> AudioSourceManager {
+        captureWarning = nil
+        let manager = captureOverride
+            ?? AudioSourceManager(microphoneDeviceID: AppState.shared.selectedMicrophoneUniqueID)
+        // Named now: once the device is gone, the list may no longer have it.
+        let micName = AppState.shared.selectedMicrophoneName
+        manager.onMicrophoneEvent = { [weak self] event in
+            self?.handleMicrophoneEvent(event, microphoneName: micName)
+        }
+        return manager
+    }
+
+    private func handleMicrophoneEvent(_ event: MicrophoneCapture.Event, microphoneName: String) {
+        switch event {
+        case .fellBackToDefault:
+            AppState.shared.setError(String(format: L10n.t("live.mic.fellBack"), microphoneName))
+        case .silent(let restartError):
+            let warning = L10n.t("live.mic.silent")
+            captureWarning = warning
+            statusText = warning
+            if let restartError {
+                AppState.shared.setError(String(format: L10n.t("live.mic.restartFailed"), restartError))
+            } else {
+                AppState.shared.setError(String(format: L10n.t("live.mic.silent.alert"),
+                                                Int(MicrophoneWatchdog.stallAfter)))
+            }
+        case .recovered:
+            captureWarning = nil
+            statusText = isEphemeralTranslation ? "Live translation only" : "Recording"
+        }
     }
 
     // MARK: - File transcription
@@ -262,7 +305,6 @@ final class SessionOrchestrator: ObservableObject {
         self.statusText = "Importing \(sourceLabel)"
         self.transcript.reset()
         self.resetSentenceState()
-        self.engineTimeOffsetMs = 0
         self.currentTimestampMs = 0
         self.ephemeralRowId = 0
         self.isImporting = true
@@ -274,7 +316,7 @@ final class SessionOrchestrator: ObservableObject {
 
         let startedAt = self.currentSession?.startedAt ?? Int64(Date().timeIntervalSince1970 * 1000)
         let stt = makeSTTProvider(config: config, backend: AppState.shared.sttBackend)
-        let translator = EngineFactory.makeTranslator(config: config, backend: AppState.shared.translationBackend)
+        let translator = makeTranslator(config: config)
         // A re-transcription does not own this row's terminal state: its
         // segments are only committed by `replaceAll` at the very end, so
         // failing or cancelling leaves the old transcript — and the notes and
@@ -332,12 +374,12 @@ final class SessionOrchestrator: ObservableObject {
                                                     continuesNext: event.continuesSentence)
                         self.currentTimestampMs = event.endMs
                         lastEndMs = max(lastEndMs, event.endMs)
-                        if !replaceExisting, AppState.shared.translationEnabled {
-                            self.enqueueForTranslation(rowId: rowId,
-                                                       text: polishedText,
-                                                       continuesSentence: event.continuesSentence,
-                                                       translator: translator,
-                                                       config: config)
+                        if !replaceExisting {
+                            self.takeLineForTranslation(rowId: rowId,
+                                                        text: polishedText,
+                                                        continuesSentence: event.continuesSentence,
+                                                        translator: translator,
+                                                        config: config)
                         }
                     }
                 }
@@ -464,13 +506,19 @@ final class SessionOrchestrator: ObservableObject {
         running?.cancel()
         await drain(running, timeout: min(drainTimeout, .seconds(2)))
 
-        let finalMs = currentTimestampMs
         // Read before stopping: `stop()` is also the second, defensive stop at
         // the head of the next start, where there is no manager left to ask.
-        let audioPath = audioManager?.state.audioFileURL?.path
+        let manager = audioManager
+        let audioPath = manager?.state.audioFileURL?.path
 
-        await audioManager?.stop()
+        await manager?.stop()
         audioManager = nil
+        // The recording's own length, tail flush included. Wall time would also
+        // count every stretch the bus skipped, and the stored duration would
+        // run past the end of the file.
+        let finalMs = manager?.recordedMs ?? currentTimestampMs
+        currentTimestampMs = finalMs
+        captureWarning = nil
 
         // The final segment is inserted under `currentSessionId`, so it must
         // still be set while these drain.
@@ -478,10 +526,12 @@ final class SessionOrchestrator: ObservableObject {
         sttTask = nil
         await drain(stt, timeout: drainTimeout)
         // Whatever the engine flushed last may have been a line cut mid
-        // sentence; nothing will come to finish it now.
-        if let translator = liveTranslator, let config = liveConfig {
+        // sentence; nothing will come to finish it now. Not with translation
+        // off: then it was queued before the toggle and is not wanted.
+        if AppState.shared.translationEnabled, let translator = liveTranslator, let config = liveConfig {
             flushPendingSentence(translator: translator, config: config)
         }
+        pendingSentence.removeAll()
         liveTranslator = nil
         liveConfig = nil
         await finishSimultaneous(timeout: drainTimeout)
@@ -572,15 +622,19 @@ final class SessionOrchestrator: ObservableObject {
 
     // MARK: - Pipeline
 
+    /// The live timer, and the time a bookmark gets, follow the bus clock: how
+    /// much audio the recording holds. Wall time ran on through every stretch
+    /// the bus skips (system audio delivers nothing while the lecture video is
+    /// paused), so each later bookmark landed that much past its moment in the
+    /// recording. The timer now pauses with the recording, and reads the same
+    /// as the transcript times beside it.
     private func startTicker() {
-        tickerTask = Task { [weak self] in
+        tickerTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 200_000_000)
-                await MainActor.run {
-                    if let start = self?.audioManager?.state.startedAt {
-                        self?.currentTimestampMs = Int64(Date().timeIntervalSince(start) * 1000)
-                    }
-                }
+                guard let self else { return }
+                guard let recorded = self.audioManager?.recordedMs else { continue }
+                if self.currentTimestampMs != recorded { self.currentTimestampMs = recorded }
             }
         }
     }
@@ -589,18 +643,25 @@ final class SessionOrchestrator: ObservableObject {
     /// this the pipeline simply ended and the rest of the class had no
     /// subtitles, while capture kept running.
     private func startPipeline(config: ApiConfig, persistSegments: Bool) {
-        guard audioManager != nil else { return }
+        guard let manager = audioManager else { return }
         let backend = AppState.shared.sttBackend
+        // Subscribed now rather than once the task runs, so no audio the bus
+        // emits in between goes untranscribed.
+        let firstSubscription = manager.makeChunkSubscription()
 
         sttTask = Task { @MainActor [weak self] in
-            var attempt = 0
+            var policy = STTReconnectPolicy()
+            var subscription = firstSubscription
             while !Task.isCancelled {
                 guard let self = self, let manager = self.audioManager else { return }
+                let started = ContinuousClock.now
+                var heardEngine = false
                 do {
-                    try await self.runSTTStream(manager: manager,
+                    try await self.runSTTStream(subscription: subscription,
                                                 config: config,
                                                 persistSegments: persistSegments,
-                                                backend: backend)
+                                                backend: backend,
+                                                heardEngine: &heardEngine)
                     // Clean end of stream: capture stopped, stop() is draining us.
                     return
                 } catch {
@@ -608,24 +669,26 @@ final class SessionOrchestrator: ObservableObject {
                     // here means the engine really failed — unless stop() got in
                     // between.
                     guard !Task.isCancelled else { return }
-                    attempt += 1
-                    NSLog("[ClassNote] STT stream failed (attempt \(attempt)): \(error)")
-                    guard attempt <= 5 else {
+                    let decision = policy.attemptFailed(heardEngine: heardEngine,
+                                                        ranFor: ContinuousClock.now - started)
+                    NSLog("[ClassNote] STT stream failed (\(policy.consecutiveFailures) in a row): \(error)")
+                    guard case .retry(let delay, let replaceSidecar) = decision else {
                         self.statusText = L10n.t("live.engineGaveUp")
                         AppState.shared.setError(error.localizedDescription)
                         return
                     }
                     self.statusText = L10n.t("live.engineReconnecting")
-                    // The engine clock restarts at 0 on a new connection. A
-                    // sentence left open stays pending: its rest arrives on
-                    // the new connection.
-                    self.engineTimeOffsetMs = self.currentTimestampMs
-                    if backend.isLocalSidecar, attempt >= 2 {
+                    // Subscribed before the wait and the sidecar restart, so what
+                    // is said meanwhile is buffered for the next attempt instead
+                    // of never being transcribed. A sentence left open stays
+                    // pending: its rest arrives on the new connection.
+                    subscription = manager.makeChunkSubscription()
+                    if backend.isLocalSidecar, replaceSidecar {
                         // Twice in a row means the process is wedged, not the
                         // socket: replace it before the next attempt.
                         _ = await LocalASRWarmPool.shared.retire(force: true)
                     }
-                    try? await Task.sleep(for: .seconds(min(1 << (attempt - 1), 8)))
+                    try? await Task.sleep(for: delay)
                 }
             }
         }
@@ -633,13 +696,13 @@ final class SessionOrchestrator: ObservableObject {
 
     /// One attempt at consuming the engine's event stream. Throws on engine
     /// failure so `startPipeline` can decide whether to reconnect.
-    private func runSTTStream(manager: AudioSourceManager,
+    private func runSTTStream(subscription: ChunkSubscription,
                               config: ApiConfig,
                               persistSegments: Bool,
-                              backend: SttBackend) async throws {
+                              backend: SttBackend,
+                              heardEngine: inout Bool) async throws {
         let stt = makeSTTProvider(config: config, backend: backend)
-        let translator = EngineFactory.makeTranslator(config: config,
-                                                      backend: AppState.shared.translationBackend)
+        let translator = makeTranslator(config: config)
         liveTranslator = translator
         liveConfig = config
         persistTranslations = persistSegments
@@ -647,13 +710,16 @@ final class SessionOrchestrator: ObservableObject {
         // silence-aware sentence buffering. A naive VAD pre-filter would prevent
         // it from seeing the trailing silence that signals "end of sentence".
         // A fresh subscriber per attempt: the previous one died with its engine.
-        let stream = manager.makeChunkStream()
-        let offsetMs = engineTimeOffsetMs
-        let ttStream = stt.transcribe(audio: stream,
+        let ttStream = stt.transcribe(audio: subscription.stream,
                                       language: config.sourceLanguage.isEmpty ? nil : config.sourceLanguage)
+        // An engine that stamps its events from the chunks it is fed is on the
+        // session clock already; adding an offset doubled every time after a
+        // reconnect. The others count from the first sample of this connection.
+        let rebase = !(stt is ChunkTimestampedSTT)
 
         for try await rawEvent in ttStream {
-            let event = rawEvent.shifted(by: offsetMs)
+            heardEngine = true
+            let event = rebase ? rawEvent.shifted(by: subscription.origin.startMs ?? 0) : rawEvent
             // The engine produced something, so any local-engine setup
             // progress is done and its status line can go away.
             if !AppState.shared.localEngineStatus.isEmpty {
@@ -724,13 +790,11 @@ final class SessionOrchestrator: ObservableObject {
                                    original: polishedText,
                                    continuesNext: event.continuesSentence)
             tutor.transcriptDidAdvance()
-            if AppState.shared.translationEnabled {
-                self.enqueueForTranslation(rowId: rowId,
-                                           text: polishedText,
-                                           continuesSentence: event.continuesSentence,
-                                           translator: translator,
-                                           config: config)
-            }
+            self.takeLineForTranslation(rowId: rowId,
+                                        text: polishedText,
+                                        continuesSentence: event.continuesSentence,
+                                        translator: translator,
+                                        config: config)
         }
     }
 
@@ -794,6 +858,23 @@ final class SessionOrchestrator: ObservableObject {
             try? await SegmentRepository.shared.markMerged(ids: leading)
         }
         translateTasks[last] = task
+    }
+
+    /// Every committed line comes through here. With translation off it is not
+    /// translated, and neither is a half-sentence queued before the toggle:
+    /// kept, it was glued onto whatever sentence ended after translation came
+    /// back on, minutes later.
+    private func takeLineForTranslation(rowId: Int64,
+                                        text: String,
+                                        continuesSentence: Bool,
+                                        translator: TranslationProvider,
+                                        config: ApiConfig) {
+        guard AppState.shared.translationEnabled else {
+            pendingSentence.removeAll()
+            return
+        }
+        enqueueForTranslation(rowId: rowId, text: text, continuesSentence: continuesSentence,
+                              translator: translator, config: config)
     }
 
     /// Takes one committed line. A line cut mid-sentence waits for the rest;
@@ -1160,10 +1241,47 @@ final class SessionOrchestrator: ObservableObject {
     }
 }
 
+/// An engine whose event times are already on the session's clock, because
+/// it stamps them from the `AudioChunk.timestamp`s it is fed. The local
+/// sidecars (`stream_ms`) and Apple Speech (the analyzer's own timeline) count
+/// from the first sample of their connection instead, and are rebased onto
+/// where that connection's chunk stream started.
+protocol ChunkTimestampedSTT {}
+
+extension OpenAICompatibleSTT: ChunkTimestampedSTT {}
+
+/// When the live engine fails: how long to wait, whether to replace a local
+/// sidecar, and when to give up. The limits count failures in a row: an
+/// attempt that produced an event, or ran for a while, was a working
+/// connection, so the next failure starts over. Counted per session before,
+/// six transient failures spread over a two-hour lecture ended live
+/// transcription for good.
+struct STTReconnectPolicy {
+    static let maxConsecutiveFailures = 5
+    /// Long enough that a connection which fails this late was not wedged,
+    /// even if the room was silent and it never emitted anything.
+    static let healthyRun: Duration = .seconds(30)
+
+    enum Decision: Equatable {
+        case retry(after: Duration, replaceSidecar: Bool)
+        case giveUp
+    }
+
+    private(set) var consecutiveFailures = 0
+
+    mutating func attemptFailed(heardEngine: Bool, ranFor: Duration) -> Decision {
+        if heardEngine || ranFor >= Self.healthyRun { consecutiveFailures = 0 }
+        consecutiveFailures += 1
+        guard consecutiveFailures <= Self.maxConsecutiveFailures else { return .giveUp }
+        return .retry(after: .seconds(min(1 << (consecutiveFailures - 1), 8)),
+                      replaceSidecar: consecutiveFailures >= 2)
+    }
+}
+
 extension TranscriptEvent {
     /// Rebases an engine event onto the session's clock. Sidecar timestamps are
-    /// connection-relative (`stream_ms` restarts at 0), so after a reconnect
-    /// every start/end has to be shifted by however far the session already ran.
+    /// connection-relative (`stream_ms` restarts at 0), so each connection's
+    /// start/end times are shifted by where on the bus clock it started.
     func shifted(by offsetMs: Int64) -> TranscriptEvent {
         guard offsetMs != 0 else { return self }
         return TranscriptEvent(startMs: startMs + offsetMs,
