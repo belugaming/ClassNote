@@ -7,6 +7,14 @@ enum LibraryFilter: Hashable {
     case all
     case unfiled
     case course(String)
+
+    /// `.all` in place of a course that no longer exists. Left on a course
+    /// another Mac deleted, the list looked empty and a recording or import
+    /// into it failed on the missing course.
+    func existing(in courses: [Course]) -> LibraryFilter {
+        if case .course(let id) = self, !courses.contains(where: { $0.id == id }) { return .all }
+        return self
+    }
 }
 
 struct MainWindowView: View {
@@ -78,8 +86,9 @@ struct MainWindowView: View {
             if newValue != nil { showingSearchResults = false }
         }
         .toolbar { toolbar }
+        // No recovery scan here: bootstrap runs it once at launch. Run on every
+        // appearance, it caught the lecture being recorded right then.
         .task { await vm.refresh() }
-        .task { await appState.refreshInterruptedSessions() }
         .onAppear {
             if !hasCompletedFirstLaunchTutorial { showingFirstLaunchGuide = true }
         }
@@ -95,8 +104,16 @@ struct MainWindowView: View {
         .onReceive(appState.taskCenter.$items
             .map { items in items.filter { $0.status == .running }.count }
             .removeDuplicates()) { _ in Task { await vm.refresh() } }
-        .onReceive(NotificationCenter.default.publisher(for: .requestImportFile)) { _ in
+        // `initial` answers a request raised while this window was closed.
+        .onChange(of: appState.presentFileImporter, initial: true) { _, requested in
+            guard requested else { return }
+            appState.presentFileImporter = false
             importingInto = ImportRequest(courseId: currentCourseId)
+        }
+        .onChange(of: appState.presentVoiceMemosImport, initial: true) { _, requested in
+            guard requested else { return }
+            appState.presentVoiceMemosImport = false
+            importingVoiceMemosInto = ImportRequest(courseId: currentCourseId)
         }
         .onReceive(NotificationCenter.default.publisher(for: .librarySyncDidChange)) { _ in
             Task {
@@ -105,10 +122,10 @@ struct MainWindowView: View {
                 if let sid = selectedSessionId, !vm.sessions.contains(where: { $0.id == sid }) {
                     selectedSessionId = nil
                 }
+                if let current = filter, current.existing(in: vm.courses) != current {
+                    filter = .all
+                }
             }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .requestVoiceMemosImport)) { _ in
-            importingVoiceMemosInto = ImportRequest(courseId: currentCourseId)
         }
         .sheet(isPresented: Binding(get: { importingVoiceMemosInto != nil },
                                     set: { if !$0 { importingVoiceMemosInto = nil } })) {

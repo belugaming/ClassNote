@@ -58,6 +58,10 @@ struct ClassNoteApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     init() {
+        // Writing to a pipe whose reader has died (a crashed sidecar's stdin)
+        // raises SIGPIPE, which kills the whole app; ignored, the write fails
+        // with EPIPE and the caller handles it.
+        signal(SIGPIPE, SIG_IGN)
         AppBootstrap.run()
         WindowRouter.shared.start()
         ScrollFrameRate.shared.start()
@@ -80,6 +84,7 @@ struct ClassNoteApp: App {
                 .frame(minWidth: 960, minHeight: 600)
                 .background(AppleTranslationBridgeView())
                 .captureWindowActions()
+                .reportsMainWindow()
                 .id(appState.languageRefreshToken)
         }
         .defaultSize(width: 1280, height: 800)
@@ -153,17 +158,22 @@ private struct AppCommands: Commands {
                 RecordingLauncher.toggle(appState)
             }
             .keyboardShortcut("n", modifiers: .command)
-            Button(L10n.t("main.newCourse")) { appState.presentNewCourseSheet = true }
-                .keyboardShortcut("n", modifiers: [.command, .shift])
+            // Each raises a flag the main window reads when it appears, so the
+            // request survives that window having to be opened first.
+            Button(L10n.t("main.newCourse")) {
+                appState.presentNewCourseSheet = true
+                WindowRouter.shared.openMain()
+            }
+            .keyboardShortcut("n", modifiers: [.command, .shift])
             Divider()
             Button(L10n.t("toolbar.import")) {
+                appState.presentFileImporter = true
                 WindowRouter.shared.openMain()
-                NotificationCenter.default.post(name: .requestImportFile, object: nil)
             }
             .keyboardShortcut("i", modifiers: .command)
             Button(L10n.t("voiceMemos.menu")) {
+                appState.presentVoiceMemosImport = true
                 WindowRouter.shared.openMain()
-                NotificationCenter.default.post(name: .requestVoiceMemosImport, object: nil)
             }
         }
         CommandMenu(L10n.t("menu.recording")) {
