@@ -1,5 +1,15 @@
 import Foundation
 
+/// What the warm pool needs from a running sidecar: `LocalASRProcessManager`
+/// in the app, a stub in tests, so the pool's bookkeeping can be checked
+/// without launching Python.
+protocol WarmASRSidecar: Actor {
+    var isRunning: Bool { get }
+    func shutdown() async
+}
+
+extension LocalASRProcessManager: WarmASRSidecar {}
+
 /// Keeps one local ASR sidecar alive across recordings.
 ///
 /// Model loading costs a few seconds (plus a ~650 MB first-run download), and
@@ -34,13 +44,33 @@ actor LocalASRWarmPool {
     /// goes away as soon as the last connection closes instead of being killed
     /// out from under a recording.
     private var retireWhenIdle = false
-    private var manager: LocalASRProcessManager?
+    private var manager: (any WarmASRSidecar)?
     private var socketURL: URL?
-    /// The in-flight warm-up, so concurrent callers await one start instead of
-    /// racing to spawn duplicate processes.
-    private var warmTask: Task<URL, Error>?
 
-    private init() {}
+    /// The in-flight warm-up, so concurrent callers await one start instead of
+    /// racing to spawn duplicate processes. It carries its own key because
+    /// `key` is only set once a warm-up finishes, and its own token so a
+    /// superseded one can tell it no longer owns the pool's state.
+    private struct Warming {
+        let key: Key
+        let task: Task<URL, Error>
+        let token: UUID
+    }
+    private var warming: Warming?
+
+    typealias Launcher = @Sendable (Key, (@Sendable (String) -> Void)?) async throws
+        -> (any WarmASRSidecar, URL)
+    private let launch: Launcher
+
+    init(launch: @escaping Launcher = LocalASRWarmPool.launchProcess) {
+        self.launch = launch
+    }
+
+    private static let launchProcess: Launcher = { key, onProgress in
+        let manager = LocalASRProcessManager(engine: key.engine)
+        let url = try await manager.start(language: key.language, onProgress: onProgress)
+        return (manager, url)
+    }
 
     /// Returns a ws URL for a ready sidecar, starting or reusing one as needed.
     func url(engine: LocalASREngineKind,
@@ -49,48 +79,65 @@ actor LocalASRWarmPool {
         let wanted = Key(engine: engine, language: Self.normalize(language),
                          latency: LocalEngineLatency.current)
 
-        if let key, key != wanted {
-            // Different language or engine: the loaded models cannot serve it.
-            // Refuse rather than kill — a file import asking for another
-            // configuration must not SIGKILL the sidecar a live recording is
-            // streaming through.
-            guard activeConnections == 0 else {
-                throw LocalASRProcessError.busyWithDifferentConfiguration
+        // Checked again after every suspension: another caller may have
+        // retired the sidecar or started a different one meanwhile.
+        while true {
+            // A warm-up in flight counts as loaded: joining it without looking
+            // at its key handed a recording whatever engine Settings happened
+            // to be downloading.
+            if let current = key ?? warming?.key, current != wanted {
+                // Different language or engine: the loaded models cannot serve
+                // it. Refuse rather than kill — a file import asking for
+                // another configuration must not SIGKILL the sidecar a live
+                // recording is streaming through.
+                guard activeConnections == 0 else {
+                    throw LocalASRProcessError.busyWithDifferentConfiguration
+                }
+                await retire(force: true)
+                continue
             }
-            await retire(force: true)
+            if let warming {
+                return try await warming.task.value
+            }
+            guard let manager else { break }
+            if let socketURL, await manager.isRunning {
+                if manager === self.manager { return socketURL }
+                continue
+            }
+            // The configuration still matches but the process is gone (it
+            // crashed, was killed, or died while the Mac slept). Drop the stale
+            // manager so a fresh sidecar is started instead of handing out a
+            // URL that nothing is listening on.
+            if manager === self.manager { await retire(force: true) }
         }
 
-        if let socketURL, let manager, await manager.isRunning {
-            return socketURL
-        }
-        if let warmTask {
-            return try await warmTask.value
-        }
-        // The configuration still matches but the process is gone (it crashed,
-        // was killed, or died while the Mac slept). Drop the stale manager so a
-        // fresh sidecar is started instead of handing out a URL that nothing is
-        // listening on.
-        if manager != nil {
-            await retire(force: true)
-        }
-
-        let task = Task<URL, Error> { [wanted] in
-            let manager = LocalASRProcessManager(engine: wanted.engine)
-            let url = try await manager.start(language: wanted.language,
-                                             onProgress: onProgress)
+        let token = UUID()
+        let task = Task<URL, Error> { [wanted, launch] in
+            let (sidecar, url) = try await launch(wanted, onProgress)
+            // Retired while it loaded (a settings change, or a recording that
+            // wants another engine). Adopting it anyway overwrote whichever
+            // sidecar replaced it, which then ran unowned until quit.
+            guard self.warming?.token == token else {
+                await sidecar.shutdown()
+                throw CancellationError()
+            }
             // No `await`: `Task` inherits this actor's isolation, so `adopt`
             // is a synchronous call on the same actor.
-            self.adopt(key: wanted, manager: manager, url: url)
+            self.adopt(key: wanted, manager: sidecar, url: url)
             return url
         }
-        warmTask = task
+        warming = Warming(key: wanted, task: task, token: token)
         do {
             let url = try await task.value
-            warmTask = nil
+            if warming?.token == token { warming = nil }
             return url
         } catch {
-            warmTask = nil
-            await retire()
+            // A superseded warm-up leaves the state alone: it belongs to the
+            // one that replaced it.
+            if warming?.token == token {
+                warming = nil
+                await retire()
+            }
             throw error
         }
     }
@@ -130,8 +177,8 @@ actor LocalASRWarmPool {
         retireWhenIdle = false
         idleTimer?.cancel()
         idleTimer = nil
-        warmTask?.cancel()
-        warmTask = nil
+        warming?.task.cancel()
+        warming = nil
         if let manager {
             await manager.shutdown()
         }
@@ -141,7 +188,7 @@ actor LocalASRWarmPool {
         return true
     }
 
-    private func adopt(key: Key, manager: LocalASRProcessManager, url: URL) {
+    private func adopt(key: Key, manager: any WarmASRSidecar, url: URL) {
         self.key = key
         self.manager = manager
         self.socketURL = url

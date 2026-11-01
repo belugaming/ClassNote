@@ -65,61 +65,64 @@ struct LocalASREnvironment: Sendable {
         return FileManager.default.fileExists(atPath: installMarkerURL.path)
     }
 
+    /// The install every caller shares. Every local sidecar and Settings can
+    /// start one, and two at once on a fresh Mac deleted `python-runtime`
+    /// under each other or ran `venv --clear` and pip over the same venv, and
+    /// a half-written venv could still get its marker.
+    private static let installFlight = SingleFlight<InstallProgress>()
+
+    /// Installs the venv, or joins the install already running. A caller that
+    /// stops listening (a cancelled warm-up) does not stop the install: the
+    /// next caller joins it instead of starting a second one over it.
     func install(engine: LocalASREngineKind = .funasr) -> AsyncThrowingStream<InstallProgress, Error> {
         AsyncThrowingStream { continuation in
-            Task {
-                do {
-                    // Prefer whatever the machine already has; only download a
-                    // runtime when there is nothing usable. Telling the user to
-                    // go install Python themselves is not an option for a
-                    // distributed build.
-                    let systemPython: String
-                    if let found = Self.findSystemPython() {
-                        systemPython = found
-                    } else {
-                        systemPython = try await PythonProvisioner.shared.provision { stage, fraction in
-                            continuation.yield(InstallProgress(stage: stage, fraction: fraction))
-                        }
-                    }
-                    let venvExists = FileManager.default.fileExists(atPath: venvURL.path)
-                    if Self.needsRebuild(pythonBinPath: pythonBinURL.path, venvExists: venvExists) {
-                        if venvExists {
-                            continuation.yield(InstallProgress(stage: L10n.t("localASR.creatingVenv"),
-                                                              fraction: nil))
-                            try FileManager.default.removeItem(at: venvURL)
-                        }
-                        try createVenv(systemPython, continuation)
-                    }
-                    continuation.yield(InstallProgress(stage: L10n.t("localASR.installDeps"),
-                                                      fraction: nil))
-                    let reqPath = Bundle.main.path(forResource: "requirements-local", ofType: "txt")
-                    guard let reqPath else {
-                        throw LocalASREnvironmentError.pipInstallFailed("缺少 requirements 文件")
-                    }
-                    // sherpa-onnx and mlx-lm together pull a few hundred MB and
-                    // can run for minutes. Stream pip's progress out so the UI
-                    // can show which package is downloading instead of freezing.
-                    // --no-input so a prompt (a keyring unlock, an index
-                    // credential) can never park the install forever behind a
-                    // question nobody can see.
-                    try Self.run(pythonBinURL.path,
-                                 ["-m", "pip", "install", "--no-input",
-                                  "--disable-pip-version-check",
-                                  "--progress-bar", "off", "-r", reqPath]) { line in
-                        guard let package = Self.installingPackageName(from: line) else { return }
-                        continuation.yield(InstallProgress(
-                            stage: "\(L10n.t("localASR.installDeps")) \(package)", fraction: nil))
-                    }
-                    FileManager.default.createFile(atPath: installMarkerURL.path,
-                                                   contents: nil)
-                    continuation.yield(InstallProgress(stage: L10n.t("localASR.installDone"),
-                                                      fraction: 1.0))
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
+            Self.installFlight.join(continuation) { report in
+                try await performInstall(report)
             }
         }
+    }
+
+    private func performInstall(_ report: @escaping @Sendable (InstallProgress) -> Void) async throws {
+        // Prefer whatever the machine already has; only download a
+        // runtime when there is nothing usable. Telling the user to
+        // go install Python themselves is not an option for a
+        // distributed build.
+        let systemPython: String
+        if let found = Self.findSystemPython() {
+            systemPython = found
+        } else {
+            systemPython = try await PythonProvisioner.shared.provision { stage, fraction in
+                report(InstallProgress(stage: stage, fraction: fraction))
+            }
+        }
+        let venvExists = FileManager.default.fileExists(atPath: venvURL.path)
+        if Self.needsRebuild(pythonBinPath: pythonBinURL.path, venvExists: venvExists) {
+            if venvExists {
+                report(InstallProgress(stage: L10n.t("localASR.creatingVenv"), fraction: nil))
+                try FileManager.default.removeItem(at: venvURL)
+            }
+            try createVenv(systemPython, report)
+        }
+        report(InstallProgress(stage: L10n.t("localASR.installDeps"), fraction: nil))
+        let reqPath = Bundle.main.path(forResource: "requirements-local", ofType: "txt")
+        guard let reqPath else {
+            throw LocalASREnvironmentError.pipInstallFailed("缺少 requirements 文件")
+        }
+        // sherpa-onnx and mlx-lm together pull a few hundred MB and
+        // can run for minutes. Stream pip's progress out so the UI
+        // can show which package is downloading instead of freezing.
+        // --no-input so a prompt (a keyring unlock, an index
+        // credential) can never park the install forever behind a
+        // question nobody can see.
+        try Self.run(pythonBinURL.path,
+                     ["-m", "pip", "install", "--no-input",
+                      "--disable-pip-version-check",
+                      "--progress-bar", "off", "-r", reqPath]) { line in
+            guard let package = Self.installingPackageName(from: line) else { return }
+            report(InstallProgress(stage: "\(L10n.t("localASR.installDeps")) \(package)", fraction: nil))
+        }
+        FileManager.default.createFile(atPath: installMarkerURL.path, contents: nil)
+        report(InstallProgress(stage: L10n.t("localASR.installDone"), fraction: 1.0))
     }
 
     /// Whether the venv has to be thrown away and rebuilt rather than reused.
@@ -140,8 +143,8 @@ struct LocalASREnvironment: Sendable {
     }
 
     private func createVenv(_ systemPython: String,
-                            _ continuation: AsyncThrowingStream<InstallProgress, Error>.Continuation) throws {
-        continuation.yield(InstallProgress(stage: L10n.t("localASR.creatingVenv"), fraction: nil))
+                            _ report: @Sendable (InstallProgress) -> Void) throws {
+        report(InstallProgress(stage: L10n.t("localASR.creatingVenv"), fraction: nil))
         try FileManager.default.createDirectory(at: venvURL, withIntermediateDirectories: true)
         // --clear empties an existing environment first, so a directory that a
         // failed removal left half there still converges.
@@ -299,6 +302,79 @@ struct LocalASREnvironment: Sendable {
             return name.isEmpty ? nil : name
         }
         return nil
+    }
+}
+
+/// Runs at most one piece of work at a time and lets every caller watch it.
+///
+/// Each caller gets its own stream. Progress goes to all of them, a caller
+/// that joins late gets the latest step at once rather than a blank status,
+/// and one that stops listening only stops its own updates: the work keeps
+/// going for whoever joins next.
+final class SingleFlight<Progress: Sendable>: @unchecked Sendable {
+    typealias Watcher = AsyncThrowingStream<Progress, Error>.Continuation
+    typealias Work = @Sendable (_ report: @escaping @Sendable (Progress) -> Void) async throws -> Void
+
+    private let lock = NSLock()
+    private var watchers: [Int: Watcher] = [:]
+    private var nextId = 0
+    private var running = false
+    private var latest: Progress?
+
+    /// Adds `watcher`, starting `work` unless a run is already going; a run
+    /// already going is joined and `work` is dropped.
+    func join(_ watcher: Watcher, work: @escaping Work) {
+        lock.lock()
+        let id = nextId
+        nextId += 1
+        watchers[id] = watcher
+        let start = !running
+        running = true
+        // Yielding under the lock keeps the replay ordered against a step
+        // broadcast at the same moment. `yield` never calls back into us.
+        if !start, let latest { watcher.yield(latest) }
+        lock.unlock()
+
+        watcher.onTermination = { [weak self] _ in self?.leave(id) }
+        guard start else { return }
+        Task {
+            do {
+                try await work { self.broadcast($0) }
+                self.end(nil)
+            } catch {
+                self.end(error)
+            }
+        }
+    }
+
+    private func broadcast(_ progress: Progress) {
+        lock.lock()
+        defer { lock.unlock() }
+        latest = progress
+        for watcher in watchers.values { watcher.yield(progress) }
+    }
+
+    private func leave(_ id: Int) {
+        lock.lock()
+        watchers[id] = nil
+        lock.unlock()
+    }
+
+    /// Outside the lock: `finish` runs `onTermination`, which takes it.
+    private func end(_ error: Error?) {
+        lock.lock()
+        let done = watchers
+        watchers.removeAll()
+        running = false
+        latest = nil
+        lock.unlock()
+        for watcher in done.values {
+            if let error {
+                watcher.finish(throwing: error)
+            } else {
+                watcher.finish()
+            }
+        }
     }
 }
 

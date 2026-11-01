@@ -83,11 +83,13 @@ actor SimulTranslatorProcess {
     }
 
     func ensureStarted(onProgress: (@Sendable (String) -> Void)? = nil) async throws {
-        if isRunning { return }
+        // A start in flight comes first: `process` is set before READY, so
+        // `isRunning` is already true while the model loads.
         if let starting {
             try await starting.value
             return
         }
+        if isRunning { return }
         let task = Task { try await self.launch(onProgress: onProgress) }
         starting = task
         defer { starting = nil }
@@ -121,7 +123,11 @@ actor SimulTranslatorProcess {
         let activity = SidecarHandshake.ActivityClock()
         stderr.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
+            guard !data.isEmpty else {
+                // EOF: the handler would otherwise fire nonstop until shutdown.
+                handle.readabilityHandler = nil
+                return
+            }
             activity.touch()
             guard let text = String(data: data, encoding: .utf8) else { return }
             NSLog("[simt_server stderr] \(text)")

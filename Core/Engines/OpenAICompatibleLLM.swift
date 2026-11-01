@@ -50,27 +50,8 @@ enum OpenAIChatClient {
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
 
-                    let payload: [String: Any] = [
-                        "model": model,
-                        "messages": messages.mergingConsecutiveRoles.map {
-                            ["role": $0.role.rawValue, "content": $0.content]
-                        },
-                        "temperature": temperature,
-                        "stream": true
-                    ]
-                    req.httpBody = try JSONSerialization.data(withJSONObject: payload)
-
-                    let (stream, resp) = try await URLSession.shared.bytes(for: req)
-                    guard let http = resp as? HTTPURLResponse else {
-                        throw EngineError.networkError("Non-HTTP response")
-                    }
-                    if !(200..<300).contains(http.statusCode) {
-                        // Drain for error body
-                        var data = Data()
-                        for try await b in stream { data.append(b) }
-                        throw EngineError.httpError(status: http.statusCode,
-                                                    body: String(data: data, encoding: .utf8) ?? "")
-                    }
+                    let stream = try await open(req, config: config, messages: messages,
+                                                model: model, temperature: temperature)
 
                     var filter = ThinkTagFilter()
                     for try await line in stream.lines {
@@ -82,8 +63,13 @@ enum OpenAIChatClient {
                         if payloadStr == "[DONE]" { break }
 
                         guard let data = payloadStr.data(using: .utf8),
-                              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                              let choices = obj["choices"] as? [[String: Any]],
+                              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                        else { continue }
+                        // A failure after the 200 has gone out arrives as a
+                        // frame. Ending normally there saved a truncated note
+                        // as if it were complete.
+                        if let failure = streamFailure(in: obj) { throw failure }
+                        guard let choices = obj["choices"] as? [[String: Any]],
                               let first = choices.first,
                               let delta = first["delta"] as? [String: Any]
                         else { continue }
@@ -106,6 +92,124 @@ enum OpenAIChatClient {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// Sends the request and returns the event stream once it is a 2xx.
+    ///
+    /// Reasoning models (the o-series, gpt-5) take only the default
+    /// temperature and answer any other with a 400 that names it. Those known
+    /// to are sent none; any other that refuses it gets one retry without it,
+    /// and none from then on.
+    private static func open(_ request: URLRequest,
+                             config: ApiConfig,
+                             messages: [ChatMessage],
+                             model: String,
+                             temperature: Double) async throws -> URLSession.AsyncBytes {
+        var request = request
+        var sendsTemperature = !isReasoningModel(model)
+            && !OpenAIRejectedParameters.shared.contains("temperature", baseUrl: config.baseUrl, model: model)
+        while true {
+            var payload: [String: Any] = [
+                "model": model,
+                "messages": messages.mergingConsecutiveRoles.map {
+                    ["role": $0.role.rawValue, "content": $0.content]
+                },
+                "stream": true
+            ]
+            if sendsTemperature { payload["temperature"] = temperature }
+            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+            let (stream, resp) = try await URLSession.shared.bytes(for: request)
+            guard let http = resp as? HTTPURLResponse else {
+                throw EngineError.networkError("Non-HTTP response")
+            }
+            if (200..<300).contains(http.statusCode) { return stream }
+            // Drain for error body
+            var data = Data()
+            for try await b in stream { data.append(b) }
+            if sendsTemperature, [400, 422].contains(http.statusCode),
+               OpenAIRejectedParameters.blames(data, "temperature") {
+                OpenAIRejectedParameters.shared.insert("temperature", baseUrl: config.baseUrl, model: model)
+                sendsTemperature = false
+                continue
+            }
+            throw EngineError.httpError(status: http.statusCode,
+                                        body: String(data: data, encoding: .utf8) ?? "")
+        }
+    }
+
+    /// OpenAI's reasoning models, which reject a non-default temperature.
+    /// `gpt-5-chat` is the non-reasoning variant and takes one. Provider
+    /// prefixes (`openai/o3` on OpenRouter) are ignored.
+    static func isReasoningModel(_ model: String) -> Bool {
+        let id = model.split(separator: "/").last.map { $0.lowercased() } ?? ""
+        if id.hasPrefix("gpt-5") { return !id.contains("chat") }
+        guard id.count >= 2, id.first == "o" else { return false }
+        return id.dropFirst().first?.isNumber == true
+    }
+
+    /// The error an SSE frame reports, if it reports one.
+    ///
+    /// OpenRouter sends `{"error":{…},"choices":[{…,"finish_reason":"error"}]}`
+    /// when the upstream provider fails mid-answer; vLLM sends a bare
+    /// `{"error":{…}}`.
+    static func streamFailure(in frame: [String: Any]) -> EngineError? {
+        let choices = frame["choices"] as? [[String: Any]] ?? []
+        let finishedOnError = choices.contains { $0["finish_reason"] as? String == "error" }
+        var detail: String?
+        let error: Any = frame["error"] ?? NSNull()
+        switch error {
+        case let object as [String: Any]:
+            let message = object["message"] as? String ?? ""
+            let kind = (object["code"] as? String)
+                ?? (object["code"] as? Int).map(String.init)
+                ?? (object["type"] as? String)
+            switch (kind, message.isEmpty) {
+            case (let kind?, false): detail = "\(kind): \(message)"
+            case (let kind?, true): detail = kind
+            case (nil, false): detail = message
+            case (nil, true): detail = "error"
+            }
+        case let message as String where !message.isEmpty:
+            detail = message
+        default:
+            break
+        }
+        guard detail != nil || finishedOnError else { return nil }
+        return .networkError(detail ?? "finish_reason: error")
+    }
+}
+
+/// Request parameters a provider has refused for a model, remembered for the
+/// rest of the run so later requests leave them out instead of failing first.
+/// Keyed by base URL and model, since one model id can mean different things
+/// on two providers.
+final class OpenAIRejectedParameters: @unchecked Sendable {
+    static let shared = OpenAIRejectedParameters()
+
+    private let lock = NSLock()
+    private var rejected: Set<String> = []
+
+    func contains(_ parameter: String, baseUrl: String, model: String) -> Bool {
+        let key = Self.key(parameter, baseUrl, model)
+        return lock.withLock { rejected.contains(key) }
+    }
+
+    func insert(_ parameter: String, baseUrl: String, model: String) {
+        let key = Self.key(parameter, baseUrl, model)
+        _ = lock.withLock { rejected.insert(key) }
+    }
+
+    private static func key(_ parameter: String, _ baseUrl: String, _ model: String) -> String {
+        "\(parameter)\u{1F}\(baseUrl)\u{1F}\(model)"
+    }
+
+    /// Whether an error body blames `parameter`. OpenAI names it in
+    /// `error.param`; other servers only in the message, so the whole body is
+    /// searched.
+    static func blames(_ body: Data, _ parameter: String) -> Bool {
+        guard let text = String(data: body, encoding: .utf8) else { return false }
+        return text.range(of: parameter, options: .caseInsensitive) != nil
     }
 }
 
