@@ -84,11 +84,24 @@ struct TranslationGlossary: Sendable, Equatable {
 
     var isEmpty: Bool { raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
+    /// Characters of glossary sent with every line of a live translation.
+    static let promptLimit = 1200
+
     /// Block for a chat model's system prompt. Capped: it rides on every line.
     var promptBlock: String {
-        guard !isEmpty else { return "" }
-        return "Use these fixed renderings for course terms (term = translation), one per line:\n"
-            + String(raw.prefix(1200))
+        let kept = Self.wholeLines(of: raw, upTo: Self.promptLimit)
+        guard !kept.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
+        return "Use these fixed renderings for course terms (term = translation), one per line:\n" + kept
+    }
+
+    /// Cut at a line end: the model is told to use each rendering verbatim, so a
+    /// line cut short ("eigenvector = 特征向") would be used as it stands.
+    static func wholeLines(of text: String, upTo limit: Int) -> String {
+        guard text.count > limit else { return text }
+        let cut = text.index(text.startIndex, offsetBy: limit)
+        if text[cut].isNewline { return String(text[..<cut]) }
+        guard let lineEnd = text[..<cut].lastIndex(where: \.isNewline) else { return "" }
+        return String(text[..<lineEnd])
     }
 
     /// (term, rendering) pairs. Accepts "=", "：", ":" and "->" as separators,

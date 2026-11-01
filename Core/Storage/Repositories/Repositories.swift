@@ -779,6 +779,8 @@ actor ApiConfigRepository {
     static let shared = ApiConfigRepository()
 
     func load() async throws -> ApiConfig {
+        // Runs at every launch: clears any key an earlier build put in the backup.
+        ApiConfigBackupStore.scrubKeys()
         let (cfg, isConfigured) = try await Database.shared.dbPool.read { db -> (ApiConfig, Bool) in
             let cfg = try ApiConfig.fetchOne(db, key: 1) ?? .default
             let configuredAt = try Int64.fetchOne(
@@ -793,9 +795,9 @@ actor ApiConfigRepository {
         guard !isConfigured, let backup = ApiConfigBackupStore.read() else { return cfg }
         var restored = backup
         restored.id = 1
-        if restored.apiKey.isEmpty {
-            restored.apiKey = cfg.apiKey
-        }
+        // The backup has no keys; whatever the row has is kept.
+        restored.apiKey = cfg.apiKey
+        restored.anthropicApiKey = cfg.anthropicApiKey
         try await save(restored)
         return restored
     }

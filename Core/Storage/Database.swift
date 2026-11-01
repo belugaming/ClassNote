@@ -410,6 +410,23 @@ final class Database: @unchecked Sendable {
             }
         }
 
+        migrator.registerMigration("v18_deletion_after_last_change") { db in
+            // A deletion is stamped after the change it removes, as an edit is.
+            // A lecture pulled from a Mac whose clock runs ahead carries that
+            // Mac's future modified_at; deleted here with this clock's time it
+            // read as edited after the deletion, and came straight back.
+            let now = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)"
+            for table in ["session", "course"] {
+                try db.execute(sql: """
+                    DROP TRIGGER IF EXISTS sync_\(table)_ad;
+                    CREATE TRIGGER sync_\(table)_ad AFTER DELETE ON \(table) BEGIN
+                        INSERT OR REPLACE INTO sync_tombstone(kind, id, deleted_at)
+                        VALUES ('\(table)', old.id, MAX(\(now), old.modified_at + 1));
+                    END;
+                    """)
+            }
+        }
+
         return migrator
     }
 }
