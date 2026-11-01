@@ -53,11 +53,34 @@ enum RecordingLauncher {
     /// Starts a recording with the remembered choices, into `courseId`, or
     /// stops the one running.
     static func toggle(_ appState: AppState, courseId: String? = nil) {
+        // Stopped but still saving its last sentences ("Finishing…"): ⌘N
+        // already reads Start, and stopping again would only join the stop.
+        if appState.isStoppingRecording {
+            startWhenStopped(appState, courseId: courseId)
+            return
+        }
         if appState.isRecording {
             appState.stopRecording()
             return
         }
         start(appState, courseId: courseId)
+    }
+
+    private static var queuedStart: Task<Void, Never>?
+
+    /// Starts once the recording being finished is saved; a recording cannot
+    /// start while the engines are still draining the last one. Pressed again
+    /// meanwhile, it is still one start.
+    private static func startWhenStopped(_ appState: AppState, courseId: String?) {
+        WindowRouter.shared.openLive(windowId: AppState.liveWindowId)
+        guard queuedStart == nil else { return }
+        queuedStart = Task { @MainActor in
+            while appState.isStoppingRecording || appState.isRecording {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            queuedStart = nil
+            start(appState, courseId: courseId)
+        }
     }
 
     /// Starts one, and does nothing if one is already running: a "new

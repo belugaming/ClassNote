@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import AVFoundation
 import UniformTypeIdentifiers
 import AppKit
@@ -18,27 +19,36 @@ final class SessionDetailViewModel: ObservableObject {
     @Published var note: Note?
     @Published var noteVersions: [NoteVersion] = []
     @Published var highlights: [Highlight] = []
-    @Published var isGeneratingNotes: Bool = false
-    @Published var streamingNoteMarkdown: String = ""
-    /// The model's reasoning summary while it works, for engines that stream
-    /// one (Claude), shown until the first words of the answer arrive.
-    @Published var streamingNoteThinking: String = ""
-    @Published var isRetranslating: Bool = false
     @Published var isPlaying: Bool = false {
         didSet { updatePlayingSegment() }
     }
-    @Published var isAnsweringQuestion: Bool = false
     @Published var qaMessages: [QAMessage] = []
-    @Published var streamingQAResponse: String = ""
-    @Published var streamingQAThinking: String = ""
-    @Published var isGeneratingFlashcards: Bool = false
-    @Published var streamingFlashcardsRaw: String = ""
     @Published var flashcards: [Flashcard] = []
     @Published var studyToolResults: [StudyToolResult] = []
     @Published var selectedStudyToolId: String? = StudyTools.all.first?.id
-    @Published var isGeneratingStudyTool: Bool = false
-    @Published var streamingStudyToolId: String?
-    @Published var streamingStudyToolMarkdown: String = ""
+
+    /// The long jobs of the session on screen, which may have been started by
+    /// an earlier view model of it; see `SessionJobState`.
+    private var jobs: SessionJobState?
+    private var jobsObservation: AnyCancellable?
+
+    var isGeneratingNotes: Bool { jobs?.isGeneratingNotes ?? false }
+    var streamingNoteMarkdown: String { jobs?.streamingNoteMarkdown ?? "" }
+    /// The model's reasoning summary while it works, for engines that stream
+    /// one (Claude), shown until the first words of the answer arrive.
+    var streamingNoteThinking: String { jobs?.streamingNoteThinking ?? "" }
+    var isRetranslating: Bool { jobs?.isRetranslating ?? false }
+    var retranslateProgress: (done: Int, total: Int)? { jobs?.retranslateProgress }
+    var isAnsweringQuestion: Bool { jobs?.isAnsweringQuestion ?? false }
+    var streamingQAResponse: String { jobs?.streamingQAResponse ?? "" }
+    var streamingQAThinking: String { jobs?.streamingQAThinking ?? "" }
+    var isGeneratingFlashcards: Bool { jobs?.isGeneratingFlashcards ?? false }
+    var streamingFlashcardsRaw: String { jobs?.streamingFlashcardsRaw ?? "" }
+    var isGeneratingStudyTool: Bool { jobs?.isGeneratingStudyTool ?? false }
+    var streamingStudyToolId: String? { jobs?.streamingStudyToolId }
+    var streamingStudyToolMarkdown: String { jobs?.streamingStudyToolMarkdown ?? "" }
+    /// Set while a local-model generation runs on a shortened transcript.
+    var transcriptTruncatedNotice: String { jobs?.transcriptTruncatedNotice ?? "" }
 
     @Published var selectedHighlightId: Int64?
     @Published var streamingHighlightId: Int64?
@@ -69,15 +79,11 @@ final class SessionDetailViewModel: ObservableObject {
     @Published var pendingScrollSegmentId: Int64?
     @Published var flashSegmentId: Int64?
 
-    @Published var retranslateProgress: (done: Int, total: Int)?
     @Published private(set) var retryingSegmentIds: Set<Int64> = []
+    /// An export is copying the recording, which may first have to come down
+    /// from iCloud.
+    @Published private(set) var isExporting = false
 
-    /// Which session the in-flight note generation belongs to. The view model
-    /// outlives a session switch, so the stream must not be painted into
-    /// whatever session the user moved on to.
-    @Published private(set) var notesGenerationSessionId: String?
-    /// Set while a local-model generation runs on a shortened transcript.
-    @Published private(set) var transcriptTruncatedNotice: String = ""
     @Published private(set) var course: Course?
 
     /// Characters per local-model pass. A 4B MLX model has a few thousand
@@ -90,8 +96,16 @@ final class SessionDetailViewModel: ObservableObject {
     private var courseContext: CourseContext = .empty
     private var player: AVAudioPlayer?
     private var playbackTicker: Task<Void, Never>?
+    /// What was asked of the player while the recording downloads from iCloud.
+    private var pendingPlayback: PendingPlayback?
     private let explanationService = HighlightExplanationService()
     private var streamingTask: Task<Void, Never>?
+
+    /// Replaces the engine built from settings. Tests only.
+    var llmOverride: LLMProvider?
+    /// Stands in for iCloud Drive, so a test can play a recording that is
+    /// only in the cloud. Tests only.
+    var cloudFiles = CloudFileAccess()
 
     var selectedHighlight: Highlight? {
         guard let id = selectedHighlightId else { return nil }
@@ -128,10 +142,9 @@ final class SessionDetailViewModel: ObservableObject {
 
     var isSessionRecording: Bool { session?.session.state == "recording" }
 
-    /// True only while the stream on screen belongs to the session on screen.
-    var isShowingNoteStream: Bool {
-        isGeneratingNotes && notesGenerationSessionId == currentSessionId
-    }
+    /// A note is being written for the session on screen. The job state is
+    /// per session, so it is never another session's stream.
+    var isShowingNoteStream: Bool { isGeneratingNotes }
 
     var failedTranslationCount: Int {
         (session?.segments ?? []).filter { !$0.translationState.isSettled && !$0.textOriginal.isEmpty }.count
@@ -154,6 +167,9 @@ final class SessionDetailViewModel: ObservableObject {
         // it under the new transcript.
         if currentSessionId != sessionId { stopPlayback() }
         currentSessionId = sessionId
+        // Before the first await, so a job still running from an earlier view
+        // of this session shows at once and cannot be started twice.
+        watchJobs(of: sessionId)
         do {
             guard let stored = try await SessionRepository.shared.get(id: sessionId) else { return }
             let s = await SessionRepository.shared.relocatingMovedAudio(stored)
@@ -185,6 +201,21 @@ final class SessionDetailViewModel: ObservableObject {
         } catch {
             NSLog("SessionDetail load error: \(error)")
         }
+    }
+
+    /// Shows the jobs of `sessionId`, whichever view model started them.
+    private func watchJobs(of sessionId: String) {
+        guard jobs?.sessionId != sessionId else { return }
+        let state = SessionJobs.shared.state(for: sessionId)
+        objectWillChange.send()
+        jobs = state
+        jobsObservation = state.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+    }
+
+    private func makeLLM(config: ApiConfig, backend: LLMBackend) -> LLMProvider {
+        llmOverride ?? EngineFactory.makeLLM(config: config, backend: backend)
     }
 
     // MARK: - Class background
@@ -241,7 +272,7 @@ final class SessionDetailViewModel: ObservableObject {
         }
         let config = AppState.shared.apiConfig
         let backend = AppState.shared.llmBackend
-        let llm = EngineFactory.makeLLM(config: config, backend: backend)
+        let llm = makeLLM(config: config, backend: backend)
         var transcript = StudyTools.transcriptForLLM(s.segments)
         if backend == .localMLX {
             transcript = TranscriptChunker.truncate(text: transcript, maxChars: Self.localPromptChars).text
@@ -273,7 +304,6 @@ final class SessionDetailViewModel: ObservableObject {
             try await NoteRepository.shared.delete(sessionId: sid)
             note = nil
             noteVersions = []
-            streamingNoteMarkdown = ""
         } catch {
             AppState.shared.setError("Delete note failed: \(error.localizedDescription)")
         }
@@ -281,29 +311,32 @@ final class SessionDetailViewModel: ObservableObject {
 
     func generateNotes(template: NoteTemplate = NoteTemplates.find("study")) async {
         guard let s = session, !s.segments.isEmpty else { return }
+        let target = s.session.id
+        // One at a time per session, whichever view model asks: two runs would
+        // both write version N+1.
+        let job = SessionJobs.shared.state(for: target)
+        guard !job.isGeneratingNotes else { return }
         // Everything the write needs is captured before the first await. The
         // published note and version list belong to whatever session the view
         // is showing when the stream ends, which may no longer be this one —
         // reading them afterwards is what moved a note between sessions.
-        let target = s.session.id
         let currentNote: Note? = note?.sessionId == target ? note : nil
         let existingNoteId = currentNote?.id
         let baseVersion: Int64 = noteVersions.filter { $0.sessionId == target }.map(\.version).max()
             ?? currentNote?.version
             ?? 0
-        isGeneratingNotes = true
-        notesGenerationSessionId = target
-        streamingNoteMarkdown = ""
-        streamingNoteThinking = ""
+        job.isGeneratingNotes = true
+        job.streamingNoteMarkdown = ""
+        job.streamingNoteThinking = ""
         defer {
-            isGeneratingNotes = false
-            notesGenerationSessionId = nil
-            streamingNoteMarkdown = ""
-            streamingNoteThinking = ""
+            job.isGeneratingNotes = false
+            job.streamingNoteMarkdown = ""
+            job.streamingNoteThinking = ""
+            SessionJobs.shared.jobDidFinish(sessionId: target, by: self)
         }
         let config = AppState.shared.apiConfig
         let backend = AppState.shared.llmBackend
-        let llm = EngineFactory.makeLLM(config: config, backend: backend)
+        let llm = makeLLM(config: config, backend: backend)
         let instructions = """
         You are an academic note-taking assistant for a Chinese student studying in the US.
         \(template.systemPrompt)
@@ -325,7 +358,7 @@ final class SessionDetailViewModel: ObservableObject {
                                                     transcript: transcriptText,
                                                     llm: llm,
                                                     config: config,
-                                                    target: target)
+                                                    job: job)
             } else {
                 md = try await streamNotePass(
                     messages: LecturePrompt.messages(courseContext: courseContext.promptBlock,
@@ -333,8 +366,13 @@ final class SessionDetailViewModel: ObservableObject {
                                                      instructions: instructions),
                     llm: llm,
                     config: config,
-                    target: target,
+                    job: job,
                     header: "")
+            }
+            // Saved, an empty reply would become the current note.
+            guard !md.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                AppState.shared.setError(L10n.t("notes.error.empty"))
+                return
             }
             let noteEntity = Note(id: existingNoteId ?? UUID().uuidString,
                                    sessionId: target,
@@ -365,7 +403,7 @@ final class SessionDetailViewModel: ObservableObject {
                                       transcript: String,
                                       llm: LLMProvider,
                                       config: ApiConfig,
-                                      target: String) async throws -> String {
+                                      job: SessionJobState) async throws -> String {
         let chunks = TranscriptChunker.split(text: transcript, maxChars: Self.localChunkChars)
         guard chunks.count > 1 else {
             return try await streamNotePass(messages: [
@@ -374,7 +412,7 @@ final class SessionDetailViewModel: ObservableObject {
                                             ],
                                             llm: llm,
                                             config: config,
-                                            target: target,
+                                            job: job,
                                             header: "")
         }
         var partials: [String] = []
@@ -388,7 +426,7 @@ final class SessionDetailViewModel: ObservableObject {
                 ],
                 llm: llm,
                 config: config,
-                target: target,
+                job: job,
                 header: header)
             partials.append(part)
         }
@@ -409,31 +447,26 @@ final class SessionDetailViewModel: ObservableObject {
                                         ],
                                         llm: llm,
                                         config: config,
-                                        target: target,
+                                        job: job,
                                         header: L10n.t("notes.local.merging"))
     }
 
-    /// One streaming pass, mirrored into `streamingNoteMarkdown` under `header`
-    /// so a multi-pass local run still looks alive. Publishes only while the
-    /// session it belongs to is the one on screen.
+    /// One streaming pass, mirrored into the session's `streamingNoteMarkdown`
+    /// under `header` so a multi-pass local run still looks alive.
     private func streamNotePass(messages: [ChatMessage],
                                 llm: LLMProvider,
                                 config: ApiConfig,
-                                target: String,
+                                job: SessionJobState,
                                 header: String) async throws -> String {
         var md = ""
         for try await event in llm.chatEvents(messages: messages, model: config.activeLLMModel, temperature: 0.3)
         {
-            guard currentSessionId == target else {
-                if case .text(let delta) = event { md += delta }
-                continue
-            }
             switch event {
             case .text(let delta):
                 md += delta
-                streamingNoteMarkdown = header.isEmpty ? md : header + "\n\n" + md
+                job.streamingNoteMarkdown = header.isEmpty ? md : header + "\n\n" + md
             case .thinking(let delta):
-                streamingNoteThinking += delta
+                job.streamingNoteThinking += delta
             }
         }
         return md
@@ -442,18 +475,21 @@ final class SessionDetailViewModel: ObservableObject {
     func askQuestion(_ question: String) async {
         guard let s = session, !s.segments.isEmpty else { return }
         let target = s.session.id
-        isAnsweringQuestion = true
-        streamingQAResponse = ""
-        streamingQAThinking = ""
+        let job = SessionJobs.shared.state(for: target)
+        guard !job.isAnsweringQuestion else { return }
+        job.isAnsweringQuestion = true
+        job.streamingQAResponse = ""
+        job.streamingQAThinking = ""
         defer {
-            isAnsweringQuestion = false
-            streamingQAResponse = ""
-            streamingQAThinking = ""
-            transcriptTruncatedNotice = ""
+            job.isAnsweringQuestion = false
+            job.streamingQAResponse = ""
+            job.streamingQAThinking = ""
+            job.transcriptTruncatedNotice = ""
+            SessionJobs.shared.jobDidFinish(sessionId: target, by: self)
         }
         let config = AppState.shared.apiConfig
-        let llm = EngineFactory.makeLLM(config: config, backend: AppState.shared.llmBackend)
-        let transcriptText = budgetedTranscript(StudyTools.transcriptForLLM(s.segments))
+        let llm = makeLLM(config: config, backend: AppState.shared.llmBackend)
+        let transcriptText = budgetedTranscript(StudyTools.transcriptForLLM(s.segments), job: job)
         let createdAt = Int64(Date().timeIntervalSince1970 * 1000)
         let userMessage = QAMessage(id: UUID().uuidString,
                                     sessionId: target,
@@ -481,16 +517,12 @@ final class SessionDetailViewModel: ObservableObject {
                                                   followUp: history + [.init(role: .user, content: question)])
             for try await event in llm.chatEvents(messages: messages, model: config.activeLLMModel, temperature: 0.2)
             {
-                guard currentSessionId == target else {
-                    if case .text(let delta) = event { answer += delta }
-                    continue
-                }
                 switch event {
                 case .text(let delta):
                     answer += delta
-                    streamingQAResponse = answer
+                    job.streamingQAResponse = answer
                 case .thinking(let delta):
-                    streamingQAThinking += delta
+                    job.streamingQAThinking += delta
                 }
             }
             let assistantMessage = QAMessage(id: UUID().uuidString,
@@ -527,7 +559,6 @@ final class SessionDetailViewModel: ObservableObject {
         do {
             try await QAMessageRepository.shared.deleteAll(sessionId: sid)
             qaMessages = []
-            streamingQAResponse = ""
         } catch {
             AppState.shared.setError("Clear QA history failed: \(error.localizedDescription)")
         }
@@ -536,46 +567,43 @@ final class SessionDetailViewModel: ObservableObject {
     func generateFlashcards() async {
         guard let s = session, !s.segments.isEmpty else { return }
         let target = s.session.id
-        isGeneratingFlashcards = true
-        streamingFlashcardsRaw = ""
+        let job = SessionJobs.shared.state(for: target)
+        guard !job.isGeneratingFlashcards else { return }
+        job.isGeneratingFlashcards = true
+        job.streamingFlashcardsRaw = ""
         defer {
-            isGeneratingFlashcards = false
-            streamingFlashcardsRaw = ""
-            transcriptTruncatedNotice = ""
+            job.isGeneratingFlashcards = false
+            job.streamingFlashcardsRaw = ""
+            job.transcriptTruncatedNotice = ""
+            SessionJobs.shared.jobDidFinish(sessionId: target, by: self)
         }
         let config = AppState.shared.apiConfig
-        let llm = EngineFactory.makeLLM(config: config, backend: AppState.shared.llmBackend)
+        let llm = makeLLM(config: config, backend: AppState.shared.llmBackend)
         let instructions = """
         Generate 8-12 high-value review flashcards from this lecture.
         Return one card per line exactly as: front || back
         Front should be a question or term. Back should be concise Chinese with key English terms preserved.
         """
         let messages = LecturePrompt.messages(courseContext: courseContext.promptBlock,
-                                              transcript: budgetedTranscript(StudyTools.transcriptForLLM(s.segments)),
+                                              transcript: budgetedTranscript(StudyTools.transcriptForLLM(s.segments),
+                                                                             job: job),
                                               instructions: instructions)
         do {
             var raw = ""
             for try await delta in llm.chat(messages: messages, model: config.activeLLMModel, temperature: 0.25)
             {
                 raw += delta
-                guard currentSessionId == target else { continue }
-                streamingFlashcardsRaw = raw
+                job.streamingFlashcardsRaw = raw
             }
-            var parsed: [Flashcard] = []
-            let createdAt = Int64(Date().timeIntervalSince1970 * 1000)
-            for line in raw.split(separator: "\n") {
-                let parts = String(line).components(separatedBy: "||")
-                guard parts.count >= 2 else { continue }
-                let front = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
-                let back = parts.dropFirst().joined(separator: "||").trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !front.isEmpty, !back.isEmpty else { continue }
-                parsed.append(Flashcard(id: nil,
-                                        sessionId: target,
-                                        front: front,
-                                        back: back,
-                                        sourceModel: config.activeLLMModel,
-                                        createdAt: createdAt,
-                                        sortOrder: parsed.count))
+            let parsed = Self.parseFlashcards(raw,
+                                              sessionId: target,
+                                              model: config.activeLLMModel,
+                                              createdAt: Int64(Date().timeIntervalSince1970 * 1000))
+            // A reply in another shape (a table, Q:/A: pairs) or none at all
+            // would otherwise replace the deck with nothing.
+            guard !parsed.isEmpty else {
+                AppState.shared.setError(L10n.t("flashcards.error.noCards"))
+                return
             }
             try await FlashcardRepository.shared.replace(sessionId: target, cards: parsed)
             let fresh = try await FlashcardRepository.shared.all(sessionId: target)
@@ -584,6 +612,27 @@ final class SessionDetailViewModel: ObservableObject {
         } catch {
             AppState.shared.setError("Flashcards failed: \(error.localizedDescription)")
         }
+    }
+
+    /// The cards in a reply, one `front || back` per line; other lines are
+    /// skipped.
+    static func parseFlashcards(_ raw: String, sessionId: String, model: String?, createdAt: Int64) -> [Flashcard] {
+        var cards: [Flashcard] = []
+        for line in raw.split(separator: "\n") {
+            let parts = String(line).components(separatedBy: "||")
+            guard parts.count >= 2 else { continue }
+            let front = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            let back = parts.dropFirst().joined(separator: "||").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !front.isEmpty, !back.isEmpty else { continue }
+            cards.append(Flashcard(id: nil,
+                                   sessionId: sessionId,
+                                   front: front,
+                                   back: back,
+                                   sourceModel: model,
+                                   createdAt: createdAt,
+                                   sortOrder: cards.count))
+        }
+        return cards
     }
 
     func copyFlashcardsForAnki() {
@@ -602,27 +651,35 @@ final class SessionDetailViewModel: ObservableObject {
               !s.segments.isEmpty,
               let tool = selectedStudyTool else { return }
         let target = s.session.id
-        isGeneratingStudyTool = true
-        streamingStudyToolId = tool.id
-        streamingStudyToolMarkdown = ""
+        let job = SessionJobs.shared.state(for: target)
+        guard !job.isGeneratingStudyTool else { return }
+        job.isGeneratingStudyTool = true
+        job.streamingStudyToolId = tool.id
+        job.streamingStudyToolMarkdown = ""
         defer {
-            isGeneratingStudyTool = false
-            streamingStudyToolId = nil
-            streamingStudyToolMarkdown = ""
-            transcriptTruncatedNotice = ""
+            job.isGeneratingStudyTool = false
+            job.streamingStudyToolId = nil
+            job.streamingStudyToolMarkdown = ""
+            job.transcriptTruncatedNotice = ""
+            SessionJobs.shared.jobDidFinish(sessionId: target, by: self)
         }
         let config = AppState.shared.apiConfig
-        let llm = EngineFactory.makeLLM(config: config, backend: AppState.shared.llmBackend)
+        let llm = makeLLM(config: config, backend: AppState.shared.llmBackend)
         let messages = LecturePrompt.messages(courseContext: courseContext.promptBlock,
-                                              transcript: budgetedTranscript(StudyTools.transcriptForLLM(s.segments)),
+                                              transcript: budgetedTranscript(StudyTools.transcriptForLLM(s.segments),
+                                                                             job: job),
                                               instructions: tool.systemPrompt)
         do {
             var markdown = ""
             for try await delta in llm.chat(messages: messages, model: config.activeLLMModel, temperature: 0.25)
             {
                 markdown += delta
-                guard currentSessionId == target else { continue }
-                streamingStudyToolMarkdown = markdown
+                job.streamingStudyToolMarkdown = markdown
+            }
+            // Saved, an empty reply would replace this tool's last result.
+            guard !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                AppState.shared.setError(L10n.t("studyTools.error.empty"))
+                return
             }
             let result = StudyToolResult(id: UUID().uuidString,
                                          sessionId: target,
@@ -643,11 +700,14 @@ final class SessionDetailViewModel: ObservableObject {
     /// full pass stays for a language or model change.
     func retranslate(failedOnly: Bool) async {
         guard let sid = currentSessionId else { return }
-        isRetranslating = true
-        retranslateProgress = (0, 0)
+        let job = SessionJobs.shared.state(for: sid)
+        guard !job.isRetranslating else { return }
+        job.isRetranslating = true
+        job.retranslateProgress = (0, 0)
         defer {
-            isRetranslating = false
-            retranslateProgress = nil
+            job.isRetranslating = false
+            job.retranslateProgress = nil
+            SessionJobs.shared.jobDidFinish(sessionId: sid, by: self)
         }
         do {
             // Its own orchestrator: the shared one belongs to the live
@@ -656,10 +716,7 @@ final class SessionDetailViewModel: ObservableObject {
             let stillFailed = try await worker.retranslateSession(
                 sessionId: sid,
                 failedOnly: failedOnly,
-                onProgress: { [weak self] done, total in
-                    guard let self, self.currentSessionId == sid else { return }
-                    self.retranslateProgress = (done, total)
-                })
+                onProgress: { done, total in job.retranslateProgress = (done, total) })
             guard currentSessionId == sid else { return }
             await load(sessionId: sid)
             if stillFailed > 0 {
@@ -698,13 +755,19 @@ final class SessionDetailViewModel: ObservableObject {
     /// by the ticker instead — the same idiom the orchestrator uses.
     private func ensurePlayer() -> AVAudioPlayer? {
         if let player { return player }
+        // The file is still being written, the player bar is hidden (so there
+        // is no Pause), and the microphone would record the playback.
+        guard !isSessionRecording else { return nil }
         guard let path = session?.session.audioPath,
               FileManager.default.fileExists(atPath: path) else { return nil }
         let url = URL(fileURLWithPath: path)
         // Opening a recording that is only in iCloud would block the UI for
-        // the whole download.
-        if CloudFile.needsDownload(url) {
-            downloadThenPlay(url)
+        // the whole download. What the caller wanted is kept in
+        // `pendingPlayback` and done once the file is here.
+        if pendingPlayback != nil { return nil }
+        if cloudFiles.needsDownload(url) {
+            pendingPlayback = PendingPlayback()
+            download(url)
             return nil
         }
         do {
@@ -719,25 +782,40 @@ final class SessionDetailViewModel: ObservableObject {
         }
     }
 
-    private func downloadThenPlay(_ url: URL) {
-        guard !isDownloadingAudio else { return }
+    private func download(_ url: URL) {
         isDownloadingAudio = true
         let sessionId = currentSessionId
         Task {
             do {
-                try await CloudFile.ensureDownloaded(url)
+                try await cloudFiles.download(url)
                 isDownloadingAudio = false
-                // Play was what was asked for, unless another session is now on screen.
-                if currentSessionId == sessionId, !isPlaying { togglePlayPause() }
+                // Unless another session is now on screen, or playback was
+                // stopped meanwhile (which drops the request).
+                guard currentSessionId == sessionId, let request = pendingPlayback else { return }
+                pendingPlayback = nil
+                guard let p = ensurePlayer() else { return }
+                if let ms = request.positionMs {
+                    p.currentTime = min(max(0, Double(ms) / 1000), p.duration)
+                    playheadMs = Int64(p.currentTime * 1000)
+                }
+                if request.play {
+                    p.play()
+                    isPlaying = true
+                    startTicker()
+                }
             } catch {
                 isDownloadingAudio = false
+                pendingPlayback = nil
                 AppState.shared.setError(error.localizedDescription)
             }
         }
     }
 
     func togglePlayPause() {
-        guard let p = ensurePlayer() else { return }
+        guard let p = ensurePlayer() else {
+            pendingPlayback?.togglePlay()
+            return
+        }
         if p.isPlaying {
             // Stop the ticker first: `pause()` clears `isPlaying`, which the
             // ticker would otherwise read as "reached the end".
@@ -754,7 +832,11 @@ final class SessionDetailViewModel: ObservableObject {
     /// Tapping a transcript line means "play from here", so this starts
     /// playback if it is not already running.
     func seek(to startMs: Int64) {
-        guard let p = ensurePlayer() else { return }
+        guard let p = ensurePlayer() else {
+            pendingPlayback?.seek(to: startMs)
+            showPendingPosition()
+            return
+        }
         p.currentTime = min(max(0, Double(startMs) / 1000), p.duration)
         playheadMs = Int64(p.currentTime * 1000)
         if !p.isPlaying {
@@ -768,13 +850,25 @@ final class SessionDetailViewModel: ObservableObject {
     /// scrubber on a paused recording must leave it paused — `seek(to:)` is the
     /// other half of the pair, for "play from this line".
     func scrub(to ms: Int64) {
-        guard let p = ensurePlayer() else { return }
+        guard let p = ensurePlayer() else {
+            pendingPlayback?.scrub(to: ms)
+            showPendingPosition()
+            return
+        }
         p.currentTime = min(max(0, Double(ms) / 1000), p.duration)
         playheadMs = Int64(p.currentTime * 1000)
     }
 
+    /// Moves the playhead to where playback will start once the download
+    /// ends, so ±10 s and the scrubber still answer meanwhile.
+    private func showPendingPosition() {
+        guard let ms = pendingPlayback?.positionMs else { return }
+        playheadMs = playbackDurationMs > 0 ? min(max(0, ms), playbackDurationMs) : max(0, ms)
+    }
+
     func stopPlayback() {
         stopTicker()
+        pendingPlayback = nil
         player?.stop()
         player = nil
         isPlaying = false
@@ -954,11 +1048,12 @@ final class SessionDetailViewModel: ObservableObject {
         streamingBuffer = ""
         streamingHighlightThinking = ""
         streamingHighlightId = highlightId
-        let llm = EngineFactory.makeLLM(config: config, backend: AppState.shared.llmBackend)
+        let llm = makeLLM(config: config, backend: AppState.shared.llmBackend)
         // Captured now: a session switch mid-stream would otherwise explain
         // this range with another course's glossary.
         let coursePrompt = courseContext.promptBlock
         let transcript = Self.fitToEngine(StudyTools.transcriptForLLM(segments)).text
+        let sessionId = currentSessionId
 
         let task = Task { [weak self] in
             guard let self else { return }
@@ -993,6 +1088,8 @@ final class SessionDetailViewModel: ObservableObject {
                 self.streamingBuffer = ""
                 self.streamingHighlightThinking = ""
                 await self.reloadHighlights()
+                // Shown on a later visit to the session too; see `SessionJobs`.
+                if let sessionId { SessionJobs.shared.jobDidFinish(sessionId: sessionId, by: self) }
             } catch is CancellationError {
                 self.streamingHighlightId = nil
                 self.streamingBuffer = ""
@@ -1063,12 +1160,15 @@ final class SessionDetailViewModel: ObservableObject {
                     throw SessionExporter.ExportError.noAudio
                 }
                 let ext = (path as NSString).pathExtension.isEmpty ? "m4a" : (path as NSString).pathExtension
-                try saveFileWithPanel(suggestedName: SessionExporter.suggestedFilename(input, ext: ext),
-                                       utType: .audio) { dest in
-                    try SessionExporter.copyAudio(from: input, to: dest)
+                guard let dest = chooseDestination(suggestedName: SessionExporter.suggestedFilename(input, ext: ext),
+                                                   utType: .audio) else { return }
+                exportInBackground {
+                    try await SessionExporter.exportAudio(input, to: dest)
+                    return dest
                 }
             case .bundle:
-                try saveBundleWithPanel(input: input, suggestedFolderName: input.session.title)
+                guard let url = chooseDestination(suggestedName: input.session.title, utType: .folder) else { return }
+                exportInBackground { try await SessionExporter.exportBundle(input, to: url) }
             }
         } catch {
             AppState.shared.setError("\(L10n.t("session.export.failed")): \(error.localizedDescription)")
@@ -1076,31 +1176,34 @@ final class SessionDetailViewModel: ObservableObject {
     }
 
     private func saveTextWithPanel(content: String, suggestedName: String, utType: UTType) throws {
-        try saveFileWithPanel(suggestedName: suggestedName, utType: utType) { dest in
-            try SessionExporter.writeText(content, to: dest)
-        }
+        guard let url = chooseDestination(suggestedName: suggestedName, utType: utType) else { return }
+        try SessionExporter.writeText(content, to: url)
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
-    private func saveFileWithPanel(suggestedName: String,
-                                    utType: UTType,
-                                    write: (URL) throws -> Void) throws {
+    private func chooseDestination(suggestedName: String, utType: UTType) -> URL? {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = suggestedName
         panel.allowedContentTypes = [utType]
         panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        try write(url)
-        NSWorkspace.shared.activateFileViewerSelecting([url])
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
     }
 
-    private func saveBundleWithPanel(input: SessionExporter.Input, suggestedFolderName: String) throws {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = suggestedFolderName
-        panel.allowedContentTypes = [.folder]
-        panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        let written = try SessionExporter.writeBundle(input, to: url)
-        NSWorkspace.shared.activateFileViewerSelecting([written])
+    /// For an export that copies the recording, which may first have to come
+    /// down from iCloud: it runs off the main actor while the ⋯ button shows
+    /// progress, and the result is shown in Finder when it is written.
+    private func exportInBackground(_ write: @escaping @Sendable () async throws -> URL) {
+        isExporting = true
+        Task {
+            defer { isExporting = false }
+            do {
+                let written = try await write()
+                NSWorkspace.shared.activateFileViewerSelecting([written])
+            } catch {
+                AppState.shared.setError("\(L10n.t("session.export.failed")): \(error.localizedDescription)")
+            }
+        }
     }
 
     private func formatTimecode(_ ms: Int64) -> String {
@@ -1115,9 +1218,9 @@ final class SessionDetailViewModel: ObservableObject {
     /// Transcript for a one-shot prompt. The cloud path is untouched; the local
     /// sidecar gets a head-and-tail shortening and the UI says so, because a
     /// silently halved lecture reads as a bad model rather than a full context.
-    private func budgetedTranscript(_ text: String) -> String {
+    private func budgetedTranscript(_ text: String, job: SessionJobState) -> String {
         let result = Self.fitToEngine(text)
-        transcriptTruncatedNotice = result.wasTruncated ? L10n.t("notes.local.truncated") : ""
+        job.transcriptTruncatedNotice = result.wasTruncated ? L10n.t("notes.local.truncated") : ""
         return result.text
     }
 
@@ -1136,4 +1239,27 @@ struct SessionWithSegments {
 /// Where playback is. Only the views that show the playhead observe it.
 final class PlaybackClock: ObservableObject {
     @Published var playheadMs: Int64 = 0
+}
+
+/// What the transport was asked to do while the recording was still coming
+/// down from iCloud: the last position asked for, and whether to play from
+/// it. A scrub or ±10 s only moves it; Play, or a line clicked, also plays.
+struct PendingPlayback: Equatable {
+    var positionMs: Int64?
+    var play = false
+
+    mutating func togglePlay() { play.toggle() }
+
+    mutating func seek(to ms: Int64) {
+        positionMs = ms
+        play = true
+    }
+
+    mutating func scrub(to ms: Int64) { positionMs = ms }
+}
+
+/// iCloud Drive as the player sees it; see `CloudFile`.
+struct CloudFileAccess {
+    var needsDownload: (URL) -> Bool = { CloudFile.needsDownload($0) }
+    var download: @Sendable (URL) async throws -> Void = { try await CloudFile.ensureDownloaded($0) }
 }

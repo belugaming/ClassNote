@@ -17,7 +17,7 @@ enum SessionExporter {
         var id: String { rawValue }
     }
 
-    struct Input {
+    struct Input: Sendable {
         let session: Session
         let segments: [Segment]
         let note: Note?
@@ -195,6 +195,29 @@ enum SessionExporter {
         }
         do {
             try FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: url)
+        } catch {
+            throw ExportError.ioFailure(error.localizedDescription)
+        }
+    }
+
+    /// `copyAudio` for a caller on the main actor. A recording that is only
+    /// in iCloud is downloaded first, and the copy runs off the actor: copying
+    /// an evicted file downloads it synchronously, which froze the app.
+    static func exportAudio(_ input: Input, to url: URL) async throws {
+        try await downloadAudio(of: input)
+        try copyAudio(from: input, to: url)
+    }
+
+    /// `writeBundle` for a caller on the main actor; see `exportAudio`.
+    static func exportBundle(_ input: Input, to url: URL) async throws -> URL {
+        try await downloadAudio(of: input)
+        return try writeBundle(input, to: url)
+    }
+
+    private static func downloadAudio(of input: Input) async throws {
+        guard let path = input.session.audioPath, FileManager.default.fileExists(atPath: path) else { return }
+        do {
+            try await CloudFile.ensureDownloaded(URL(fileURLWithPath: path))
         } catch {
             throw ExportError.ioFailure(error.localizedDescription)
         }
