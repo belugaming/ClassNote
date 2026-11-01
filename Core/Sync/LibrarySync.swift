@@ -59,6 +59,8 @@ struct SyncTombstone: Codable {
 /// - Changed on one side: that side wins. Changed on both: the later
 ///   `modifiedAt` wins, for the whole lecture.
 /// - A deletion leaves a tombstone in `Deleted/`, and loses to an edit made after it.
+///   The recording outlives it for `deletedRecordingGracePeriod`, so a lecture
+///   that such an edit brings back still has it.
 /// - A lecture being recorded or transcribed on this Mac is left alone until done.
 /// - A finished recording moves into its lecture's folder, so iCloud holds the one copy.
 /// - Settings and API keys stay on each Mac.
@@ -70,6 +72,20 @@ struct LibrarySync: Sendable {
     static let busyStates: Set<String> = [SessionState.recording.rawValue,
                                           SessionState.transcribing.rawValue,
                                           SessionState.interrupted.rawValue]
+
+    /// How long a deleted lecture's recording stays in its folder after its
+    /// session.json is gone. An edit made on a Mac the deletion had not reached
+    /// yet brings the lecture back, and that Mac may sleep or stay offline for
+    /// weeks before it syncs; iCloud would pass a deleted recording on to every
+    /// Mac at once, leaving none with a copy.
+    static let deletedRecordingGracePeriod: Int64 = 30 * 24 * 60 * 60 * 1000
+
+    /// Busy because of something this Mac is doing. A busy state that came from
+    /// another Mac (an older ClassNote could push a lecture mid re-transcription)
+    /// and is unchanged here since is not: nothing here would ever end it.
+    static func isBusyHere(state: String, modifiedAt: Int64, exchangedAt: Int64?) -> Bool {
+        busyStates.contains(state) && modifiedAt != exchangedAt
+    }
 
     /// iCloud Drive's own folder. Present when iCloud Drive is on.
     static var iCloudDriveURL: URL {
@@ -88,6 +104,8 @@ struct LibrarySync: Sendable {
     let recordingsRoot: URL
     let deviceName: String
     var voiceMemoDirectories: [URL] = VoiceMemosLibrary.defaultDirectories
+    /// Milliseconds; see `deletedRecordingGracePeriod`.
+    var recordingGracePeriod: Int64 = LibrarySync.deletedRecordingGracePeriod
 
     struct Report: Sendable {
         var pushed = 0
@@ -131,6 +149,7 @@ struct LibrarySync: Sendable {
         let remoteTombstones = readRemoteTombstones(into: &report)
         applyRemoteTombstones(remoteTombstones, into: &report)
         pushLocalTombstones(into: &report)
+        purgeRecordingsOfDeletedLectures(remoteTombstones, into: &report)
         // Courses first: a lecture's course must exist before the lecture.
         syncCourses(remoteTombstones, into: &report)
         syncSessions(remoteTombstones, into: &report)
@@ -178,8 +197,13 @@ struct LibrarySync: Sendable {
                     let modifiedAt: Int64 = row["modified_at"]
                     // Edited here after it was deleted there: the edit wins and is pushed back.
                     guard modifiedAt <= tombstone.deletedAt else { return nil }
-                    if table == "session", let state: String = row["state"], Self.busyStates.contains(state) {
-                        return nil
+                    if table == "session", let state: String = row["state"] {
+                        let exchangedAt = try Int64.fetchOne(db, sql: """
+                            SELECT local_modified_at FROM sync_state WHERE kind = 'session' AND id = ?
+                            """, arguments: [tombstone.id])
+                        if Self.isBusyHere(state: state, modifiedAt: modifiedAt, exchangedAt: exchangedAt) {
+                            return nil
+                        }
                     }
                     var audioPath: String?
                     if table == "session" { audioPath = row["audio_path"] }
@@ -258,7 +282,10 @@ struct LibrarySync: Sendable {
                         try db.write { db in try forget(kind: item.kind, id: item.id, in: db) }
                         continue
                     }
-                    try removeCoordinated(item.kind == "session" ? sessionDirectory(item.id) : remote)
+                    // The lecture only: its recording stays for the grace period,
+                    // in case an edit on another Mac brings the lecture back.
+                    try removeCoordinated(remote)
+                    if item.kind == "session" { removeIfEmpty(sessionDirectory(item.id)) }
                 }
                 // Never synced: nothing anywhere needs to hear of it.
                 if remoteExists || item.synced {
@@ -268,6 +295,44 @@ struct LibrarySync: Sendable {
                 try db.write { db in try forget(kind: item.kind, id: item.id, in: db) }
             } catch {
                 report.failures.append("\(item.kind) \(item.id): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// A deleted lecture's folder, by then just its recording, goes once the
+    /// deletion is older than the grace period and nothing brought it back:
+    /// no session.json reappeared, and this Mac has no such lecture.
+    private func purgeRecordingsOfDeletedLectures(_ tombstones: [String: SyncTombstone],
+                                                  into report: inout Report) {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let fm = FileManager.default
+        // A UUID: the id names a folder to delete, and the file is another Mac's.
+        let expired = tombstones.values.filter { tombstone in
+            tombstone.kind == "session" && UUID(uuidString: tombstone.id) != nil
+                && tombstone.deletedAt < now - recordingGracePeriod
+                && fm.fileExists(atPath: sessionDirectory(tombstone.id).path)
+        }
+        guard !expired.isEmpty else { return }
+        let present: Set<String>
+        do {
+            present = try db.read { db in Set(try String.fetchAll(db, sql: "SELECT id FROM session")) }
+        } catch {
+            report.failures.append(error.localizedDescription)
+            return
+        }
+        for tombstone in expired where !present.contains(tombstone.id) {
+            do {
+                try coordinateWriting(sessionDirectory(tombstone.id), options: .forDeleting) { folder in
+                    // Checked under coordination, so a lecture brought back just now keeps it.
+                    guard !fm.fileExists(atPath: folder.appendingPathComponent("session.json").path) else { return }
+                    do {
+                        try fm.removeItem(at: folder)
+                    } catch CocoaError.fileNoSuchFile {
+                        return
+                    }
+                }
+            } catch {
+                report.failures.append("session \(tombstone.id): \(error.localizedDescription)")
             }
         }
     }
@@ -388,7 +453,8 @@ struct LibrarySync: Sendable {
             return
         }
         for id in Set(remoteIds).union(local.keys).sorted() {
-            if let state = local[id]?.state, Self.busyStates.contains(state) { continue }
+            if let entry = local[id], Self.isBusyHere(state: entry.state, modifiedAt: entry.modifiedAt,
+                                                      exchangedAt: states[id]?.localModifiedAt) { continue }
             do {
                 let action = try decide(localModifiedAt: local[id]?.modifiedAt, file: sessionFile(id),
                                         state: states[id],
@@ -398,8 +464,7 @@ struct LibrarySync: Sendable {
                 switch action {
                 case .push:
                     if try moveRecordingIntoSyncFolder(id) { report.changedSessionIds.insert(id) }
-                    try pushSession(id)
-                    report.pushed += 1
+                    if try pushSession(id) { report.pushed += 1 }
                 case .pull:
                     if try pullSession(id, expectedLocalModifiedAt: local[id]?.modifiedAt,
                                        remoteTombstones: remoteTombstones) {
@@ -448,8 +513,9 @@ struct LibrarySync: Sendable {
         }
     }
 
-    private func pushSession(_ id: String) throws {
-        guard let snapshot = try db.read({ db in try sessionSnapshot(id, in: db) }) else { return }
+    /// False when nothing was written: the lecture is gone, or busy since the pass began.
+    private func pushSession(_ id: String) throws -> Bool {
+        guard let snapshot = try db.read({ db in try sessionSnapshot(id, in: db) }) else { return false }
         try FileManager.default.createDirectory(at: sessionDirectory(id), withIntermediateDirectories: true)
         let file = sessionFile(id)
         try writeJSON(snapshot, to: file)
@@ -457,10 +523,15 @@ struct LibrarySync: Sendable {
             try saveState(kind: "session", id: id, localModifiedAt: snapshot.modifiedAt,
                           revision: snapshot.revision, fingerprint: Self.fingerprint(of: file) ?? "", in: db)
         }
+        return true
     }
 
     private func sessionSnapshot(_ id: String, in db: GRDB.Database) throws -> SessionSnapshot? {
         guard var session = try Session.fetchOne(db, key: id) else { return nil }
+        // Read now, not when the pass began: a re-transcription may have started
+        // since, and its state must not reach the other Macs. The pass after it
+        // ends pushes the result.
+        guard !Self.busyStates.contains(session.state) else { return nil }
         let modifiedAt = try Int64.fetchOne(db, sql: "SELECT modified_at FROM session WHERE id = ?",
                                             arguments: [id]) ?? 0
         let audio = syncedAudio(for: session.audioPath, sessionId: id)
@@ -522,6 +593,9 @@ struct LibrarySync: Sendable {
             guard currentModifiedAt == expectedLocalModifiedAt else { return false }
 
             var session = snapshot.session
+            // Busy on the Mac that wrote it, not here, where nothing would ever
+            // end it; that Mac pushes the result when it is done.
+            if Self.busyStates.contains(session.state) { session.state = SessionState.transcribed.rawValue }
             if let courseId = session.courseId, try !Course.exists(db, key: courseId) {
                 // Deleted: the lecture is unfiled, as it was on the Mac that
                 // deleted it. Not arrived yet: wait for it.
@@ -633,10 +707,19 @@ struct LibrarySync: Sendable {
                 }
                 header = read
             }
+            let remote = header?.modifiedAt ?? .min
             switch (localChanged, remoteChanged) {
             case (true, false): return .push
-            case (false, true): return .pull
-            case (true, true): return (header?.modifiedAt ?? .min) > local ? .pull : .push
+            case (false, true):
+                // A version made from this one is always later: every edit moves
+                // modified_at past the one it started from. An earlier one was
+                // made alongside it and lost, and is there only because iCloud
+                // keeps the file written last (a Mac that slept before pushing).
+                // The same moment is this version written again, by a Mac that
+                // lost its sync state; pulling it settles both sides, where
+                // pushing back would have the two Macs rewrite it forever.
+                return remote >= local ? .pull : .push
+            case (true, true): return remote > local ? .pull : .push
             case (false, false): return .none
             }
         }
@@ -737,6 +820,13 @@ struct LibrarySync: Sendable {
             } catch CocoaError.fileNoSuchFile {
                 return
             }
+        }
+    }
+
+    /// rmdir, which leaves a folder that is not empty: whatever is in it stays.
+    private func removeIfEmpty(_ directory: URL) {
+        try? coordinateWriting(directory, options: .forDeleting) { url in
+            _ = rmdir(url.path)
         }
     }
 

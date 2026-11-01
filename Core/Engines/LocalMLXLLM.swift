@@ -4,12 +4,19 @@ enum LocalMLXLLMError: Error, LocalizedError {
     case launchFailed(String)
     case readyTimeout
     case engineError(String)
+    /// The sidecar went away with requests still unanswered.
+    case exited
+    /// The app stopped the sidecar (to free memory for a recording, or to
+    /// delete the model) before it answered.
+    case stopped
 
     var errorDescription: String? {
         switch self {
         case .launchFailed(let msg): return "本地大模型启动失败: \(msg)"
         case .readyTimeout: return "本地大模型启动超时"
         case .engineError(let msg): return "本地大模型生成失败: \(msg)"
+        case .exited: return L10n.t("localLLM.exited")
+        case .stopped: return L10n.t("localModel.stopped")
         }
     }
 }
@@ -73,11 +80,14 @@ actor LocalMLXLLMProcess {
     /// Starts the sidecar if it isn't already up. Concurrent callers share one
     /// start attempt rather than racing to spawn several processes.
     func ensureStarted(onProgress: (@Sendable (String) -> Void)? = nil) async throws {
-        if isRunning { return }
+        // A start in flight comes first: `process` is set before READY, so
+        // `isRunning` is already true while the model loads, and a request
+        // written then sits unread until READY, or forever if loading fails.
         if let starting {
             try await starting.value
             return
         }
+        if isRunning { return }
         let task = Task { try await self.launch(onProgress: onProgress) }
         starting = task
         defer { starting = nil }
@@ -96,6 +106,9 @@ actor LocalMLXLLMProcess {
         guard let script = Bundle.main.path(forResource: "llm_server", ofType: "py") else {
             throw LocalMLXLLMError.launchFailed("找不到 llm_server.py")
         }
+
+        // A previous sidecar may have died halfway through a line.
+        buffer.removeAll()
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: LocalASREnvironment.shared.pythonExecutablePath)
@@ -118,7 +131,11 @@ actor LocalMLXLLMProcess {
         // this pipe its buffer fills and Python blocks on write() forever.
         stderr.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
+            guard !data.isEmpty else {
+                // EOF: the handler would otherwise fire nonstop until shutdown.
+                handle.readabilityHandler = nil
+                return
+            }
             // Also feeds the handshake watchdog: a ~2.4 GB first download is
             // otherwise silent on stdout between STAGE heartbeats.
             activity.touch()
@@ -154,24 +171,77 @@ actor LocalMLXLLMProcess {
             self.stdinPipe = nil
             self.stdoutPipe = nil
             self.stderrPipe = nil
-            throw Self.mapHandshakeFailure(error)
+            let mapped = Self.mapHandshakeFailure(error)
+            // `ensureStarted` keeps requests out until READY, but anything that
+            // did get in would otherwise wait for an answer forever.
+            failPending(mapped)
+            throw mapped
         }
 
         // Only start routing responses once READY has been consumed, so the
         // handshake lines never reach the JSON parser.
-        stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        //
+        // One ordered stream of stdout chunks, drained by one task, as in
+        // `LocalMLXTranslatorProcess`: a Task per chunk may reach the actor out
+        // of order, and a line split across two reads is then reassembled
+        // wrongly and dropped, leaving its answer spinning forever.
+        let (chunks, sink) = AsyncStream<Data>.makeStream()
+        stdout.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
-            Task { await self?.ingest(data) }
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                sink.finish()
+            } else {
+                sink.yield(data)
+            }
         }
         // Whatever shared a read with READY has to go through the parser before
-        // the handler above can see anything, or those bytes are lost and the
-        // request they belong to never completes.
+        // the stream above can deliver anything, or those bytes are lost and
+        // the request they belong to never completes.
         if !leftover.isEmpty { ingest(leftover) }
+        Task { [weak self] in
+            for await chunk in chunks { await self?.ingest(chunk) }
+            // stdout closed: the sidecar is gone, and nothing will answer.
+            await self?.processEnded(proc)
+        }
+        proc.terminationHandler = { [weak self] ended in
+            Task { await self?.processEnded(ended) }
+        }
         // A prewarm from Settings never makes a request, so without this nothing
         // would ever start the countdown that gives the model's ~2.4 GB back. A
         // request-driven start cancels it again in `register()`.
         scheduleIdleShutdown()
+    }
+
+    /// Fails every request still waiting. A sidecar that died (out of memory
+    /// next to the speech and translation models, say) answers nothing, so
+    /// without this a notes generation spun forever, and its pending entry
+    /// kept the idle timer from ever freeing the model.
+    ///
+    /// Reached from both stdout EOF and `terminationHandler`; `proc` keeps a
+    /// late call about an old child from failing a newer one's requests.
+    private func processEnded(_ proc: Process) {
+        guard proc === process else { return }
+        failPending(LocalMLXLLMError.exited)
+        guard !proc.isRunning else { return }
+        SidecarRegistry.shared.unregister(proc.processIdentifier)
+        process = nil
+        stdinPipe = nil
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+        stdoutPipe = nil
+        stderrPipe?.fileHandleForReading.readabilityHandler = nil
+        stderrPipe = nil
+        // Nothing left to free; the next request starts a new sidecar.
+        idleTask?.cancel()
+        idleTask = nil
+    }
+
+    private func failPending(_ error: Error) {
+        let waiting = pending
+        pending.removeAll()
+        for (_, continuation) in waiting {
+            continuation.finish(throwing: error)
+        }
     }
 
     private static func mapHandshakeFailure(_ error: Error) -> Error {
@@ -210,14 +280,19 @@ actor LocalMLXLLMProcess {
         }
     }
 
-    private func send(_ payload: [String: Any]) {
-        guard let stdinPipe,
-              var data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+    /// False when the request did not reach the sidecar. Never writes to a
+    /// child that has exited: with no reader the write fails with EPIPE.
+    @discardableResult
+    private func send(_ payload: [String: Any]) -> Bool {
+        guard let stdinPipe, isRunning,
+              var data = try? JSONSerialization.data(withJSONObject: payload) else { return false }
         data.append(UInt8(ascii: "\n"))
         do {
             try stdinPipe.fileHandleForWriting.write(contentsOf: data)
+            return true
         } catch {
             NSLog("[LocalMLXLLM] write failed: \(error)")
+            return false
         }
     }
 
@@ -231,10 +306,16 @@ actor LocalMLXLLMProcess {
     }
 
     fileprivate func request(id: Int, messages: [ChatMessage], temperature: Double, maxTokens: Int) {
-        send(["id": id,
-              "messages": messages.map { ["role": $0.role.rawValue, "content": $0.content] },
-              "temperature": temperature,
-              "max_tokens": maxTokens])
+        let sent = send(["id": id,
+                         "messages": messages.map { ["role": $0.role.rawValue, "content": $0.content] },
+                         "temperature": temperature,
+                         "max_tokens": maxTokens])
+        // The sidecar can die between `ensureStarted` and here; a request that
+        // never reached it must not wait for an answer.
+        if !sent {
+            pending.removeValue(forKey: id)?.finish(throwing: LocalMLXLLMError.exited)
+            scheduleIdleShutdown()
+        }
     }
 
     fileprivate func cancel(id: Int) {
@@ -267,7 +348,9 @@ actor LocalMLXLLMProcess {
     func shutdown() async {
         idleTask?.cancel()
         idleTask = nil
-        for (_, continuation) in pending { continuation.finish() }
+        // Failed, not finished: a notes generation cut off here was saved as
+        // if it were complete.
+        for (_, continuation) in pending { continuation.finish(throwing: LocalMLXLLMError.stopped) }
         pending.removeAll()
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stdoutPipe = nil

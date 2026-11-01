@@ -13,6 +13,12 @@ final class AppState: ObservableObject {
     /// Raised by the ⌘⇧N menu command and lowered by the sidebar once it has
     /// opened its new-course sheet.
     @Published var presentNewCourseSheet: Bool = false
+    /// Raised by ⌘I and the Voice Memos menu item, lowered by the main window
+    /// once it has opened the picker. A notification posted right after
+    /// opening that window reached it before it was listening, so no picker
+    /// appeared.
+    @Published var presentFileImporter: Bool = false
+    @Published var presentVoiceMemosImport: Bool = false
     @Published var apiConfig: ApiConfig = .default
     /// False until `loadConfig()` has read the stored config. `apiConfig` holds
     /// `.default` before that, so saving during this window would overwrite the
@@ -54,6 +60,9 @@ final class AppState: ObservableObject {
     private var microphoneQuery: Task<Void, Never>?
     @AppStorage("preferredMicrophoneDeviceID", store: AppEnvironment.defaults) var preferredMicrophoneDeviceID: String = MicrophoneInputDevice.systemDefaultID
     @Published private var importOrchestrators: [String: SessionOrchestrator] = [:]
+    /// Builds the orchestrator each import and re-transcription runs on. A test
+    /// swaps in one with a stub engine.
+    var makeImportWorker: @MainActor () -> SessionOrchestrator = { SessionOrchestrator() }
     /// Task Center ids for the running imports/re-transcriptions, keyed the same
     /// way, so the live window's own Cancel button can mark the task cancelled
     /// instead of leaving it running forever.
@@ -70,6 +79,8 @@ final class AppState: ObservableObject {
 
     let orchestrator: SessionOrchestrator
     let taskCenter = TaskCenter()
+    /// Every session this process creates starts after this.
+    private let createdAtMs = Int64(Date().timeIntervalSince1970 * 1000)
 
     private init() {
         self.orchestrator = SessionOrchestrator()
@@ -254,7 +265,19 @@ final class AppState: ObservableObject {
     }
 
     func refreshInterruptedSessions() async {
-        interruptedSessions = await RecoveryCoordinator.scanInterruptedSessions()
+        interruptedSessions = await RecoveryCoordinator.scanInterruptedSessions(isInUse: isWriting)
+    }
+
+    /// Whether this process is writing `session` right now: the live
+    /// recording, or a re-transcription.
+    func isWriting(_ session: Session) -> Bool {
+        if session.id == orchestrator.currentSessionId || importOrchestrators[session.id] != nil {
+            return true
+        }
+        // A starting recording's row is written before its id reaches the
+        // orchestrator, and only this process can have made a row that started
+        // after it launched.
+        return isStartingRecording && session.startedAt >= createdAtMs
     }
 
     func recoverInterruptedSession(_ session: Session) async {
@@ -333,7 +356,7 @@ final class AppState: ObservableObject {
                          translationEnabled: Bool? = nil) async -> String? {
         guard !isStartingRecording, !isRecording else { return nil }
         guard !isAudioServiceUnresponsive else {
-            setError(L10n.t("record.error.audioServiceUnresponsive"))
+            setError(L10n.t("record.error.audioServiceUnresponsive"), bringForward: true)
             return nil
         }
         isStartingRecording = true
@@ -349,7 +372,7 @@ final class AppState: ObservableObject {
             NotificationCenter.default.post(name: .openLiveSession, object: Self.liveWindowId)
             return sessionId
         } catch {
-            self.setError(error.localizedDescription)
+            self.setError(error.localizedDescription, bringForward: true)
             self.isRecording = false
             return nil
         }
@@ -358,7 +381,7 @@ final class AppState: ObservableObject {
     func startEphemeralTranslation(source: AudioSourceKind = .microphone) {
         guard !isStartingRecording, !isRecording else { return }
         guard !isAudioServiceUnresponsive else {
-            setError(L10n.t("record.error.audioServiceUnresponsive"))
+            setError(L10n.t("record.error.audioServiceUnresponsive"), bringForward: true)
             return
         }
         isStartingRecording = true
@@ -371,7 +394,7 @@ final class AppState: ObservableObject {
                 self.isRecording = true
                 NotificationCenter.default.post(name: .openLiveSession, object: Self.liveWindowId)
             } catch {
-                self.setError(error.localizedDescription)
+                self.setError(error.localizedDescription, bringForward: true)
                 self.isRecording = false
             }
         }
@@ -446,12 +469,11 @@ final class AppState: ObservableObject {
         var registeredSessionId: String?
         defer {
             if let registeredSessionId {
-                importOrchestrators[registeredSessionId] = nil
-                importTaskIds[registeredSessionId] = nil
+                unregister(importOrchestrator, sessionId: registeredSessionId)
             }
         }
         do {
-            let worker = SessionOrchestrator()
+            let worker = makeImportWorker()
             importOrchestrator = worker
             onWorkerReady?(worker)
             let sessionId = try await worker.ingestFile(item, courseId: courseId)
@@ -557,17 +579,22 @@ final class AppState: ObservableObject {
     /// Re-transcribes a session from its own recording, on its own orchestrator
     /// so a live recording is never stomped. Same Task Center shape as an import.
     func retranscribe(session: Session) async {
+        // One job per session. A second one took over the first's entry, and
+        // the first's cleanup then removed it: the second's window lost its
+        // orchestrator, the model Delete guard stopped applying, and quitting
+        // left it running.
+        guard importOrchestrators[session.id] == nil else {
+            NotificationCenter.default.post(name: .openLiveSession, object: session.id)
+            return
+        }
         let taskId = taskCenter.start(title: L10n.t("task.retranscribe.title"),
                                       detail: session.title,
                                       icon: "arrow.clockwise",
                                       progress: 0)
-        let worker = SessionOrchestrator()
+        let worker = makeImportWorker()
         importOrchestrators[session.id] = worker
         importTaskIds[session.id] = taskId
-        defer {
-            importOrchestrators[session.id] = nil
-            importTaskIds[session.id] = nil
-        }
+        defer { unregister(worker, sessionId: session.id) }
         taskCenter.configureActions(id: taskId,
                                     retry: { [weak self] in
                                         await self?.retranscribe(session: session)
@@ -596,6 +623,13 @@ final class AppState: ObservableObject {
             taskCenter.fail(id: taskId, detail: session.title, error: error)
             setError(error.localizedDescription)
         }
+    }
+
+    /// Drops a finished job's entry, unless another job holds it by now.
+    private func unregister(_ worker: SessionOrchestrator?, sessionId: String) {
+        guard let worker, importOrchestrators[sessionId] === worker else { return }
+        importOrchestrators[sessionId] = nil
+        importTaskIds[sessionId] = nil
     }
 
     func saveTemporaryTranslationAsSession(courseId: String? = nil) async -> String? {
@@ -664,8 +698,20 @@ final class AppState: ObservableObject {
         }
     }
 
-    func setError(_ message: String) {
+    /// Shown by the main window's alert, the only place `lastError` appears.
+    /// `bringForward` is for a failure of what the user just asked for, such
+    /// as a start from ⌘⇧R or the menu bar with the main window closed, which
+    /// used to fail in silence: the window comes up and to the front for it.
+    /// Other errors leave the window alone. They mostly arrive mid-lecture,
+    /// and taking focus from the Zoom call or slides the student is watching
+    /// is worse than seeing the alert when the window is next opened.
+    func setError(_ message: String, bringForward: Bool = false) {
         self.lastError = message
+        // The test host must not open windows or take focus.
+        guard !AppEnvironment.isRunningTests else { return }
+        if bringForward {
+            WindowRouter.shared.openMain()
+        }
     }
 
     /// True when something the app is configured to use needs a cloud key that
@@ -737,8 +783,6 @@ struct DiagnosticCheck: Identifiable, Hashable, Sendable {
 extension Notification.Name {
     static let openLiveSession = Notification.Name("openLiveSession")
     static let toggleOverlay = Notification.Name("toggleOverlay")
-    static let requestImportFile = Notification.Name("requestImportFile")
-    static let requestVoiceMemosImport = Notification.Name("requestVoiceMemosImport")
 }
 
 enum SttBackend: String, CaseIterable, Identifiable {

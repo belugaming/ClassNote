@@ -47,7 +47,13 @@ enum LocalNetworkAccess {
         }
         guard isLocalNetworkHost(host: host) else { return .notLocal }
 
-        let port = NWEndpoint.Port(rawValue: UInt16(url.port ?? (url.scheme == "https" ? 443 : 80))) ?? 80
+        // `URL` accepts any digits as a port, and `UInt16(_:)` traps on one
+        // above 65535: typing such a URL in Settings crashed the app.
+        // Nothing can listen there, so there is nothing to probe.
+        guard let number = UInt16(exactly: url.port ?? (url.scheme == "https" ? 443 : 80)) else {
+            return .unreachable
+        }
+        let port = NWEndpoint.Port(rawValue: number) ?? 80
         let params = NWParameters.tcp
         let connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: params)
 

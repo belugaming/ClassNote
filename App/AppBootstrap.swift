@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 enum AppBootstrap {
@@ -5,6 +6,7 @@ enum AppBootstrap {
     /// is injected into the real app, so this would otherwise open their
     /// database and bind their global hotkeys on every ⌘U. Tests that need the
     /// database call `Database.shared.setup()` themselves.
+    @MainActor
     static func run() {
         // The test host is the real app, so its windows still hit the
         // repositories (MainWindowViewModel.refresh runs on first render) and
@@ -15,9 +17,38 @@ enum AppBootstrap {
             try Database.shared.setup()
         } catch {
             NSLog("[ClassNote] Database setup failed: \(error)")
+            // Every repository force-unwraps the pool, so carrying on only
+            // turned this into a crash at the first query, at every launch.
+            if !AppEnvironment.isRunningTests { quitForUnopenableDatabase(error) }
         }
         guard !AppEnvironment.isRunningTests else { return }
         GlobalShortcuts.register()
+    }
+
+    /// Where `Database.setup()` opens the library.
+    private static var databaseURL: URL {
+        applicationSupportURL.appendingPathComponent("classnote.sqlite")
+    }
+
+    /// Says why ClassNote cannot run, offers to show the file, and quits.
+    /// Before any scene exists, so nothing can reach the missing pool first.
+    @MainActor
+    private static func quitForUnopenableDatabase(_ error: Error) -> Never {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.regular)
+        app.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = L10n.t("database.error.title")
+        alert.informativeText = String(format: L10n.t("database.error.message"), error.localizedDescription)
+        alert.addButton(withTitle: L10n.t("menubar.quit"))
+        alert.addButton(withTitle: L10n.t("database.error.reveal"))
+        if alert.runModal() == .alertSecondButtonReturn {
+            let file = databaseURL
+            let target = FileManager.default.fileExists(atPath: file.path) ? file : applicationSupportURL
+            NSWorkspace.shared.activateFileViewerSelecting([target])
+        }
+        exit(EXIT_FAILURE)
     }
 
     /// The one place that answers "where does ClassNote keep its data" — the
@@ -58,7 +89,9 @@ enum AppBootstrap {
     static func deleteManagedRecording(path: String?) {
         guard let path, !path.isEmpty else { return }
         let url = URL(fileURLWithPath: path)
-        guard isManagedRecording(url) || isSyncedRecording(url) else { return }
+        // One in the sync folder is LibrarySync's to remove, once the deletion
+        // can no longer lose to an edit made on another Mac.
+        guard isManagedRecording(url), !isSyncedRecording(url) else { return }
         do {
             try FileManager.default.removeItem(at: url)
         } catch CocoaError.fileNoSuchFile {
@@ -105,9 +138,9 @@ enum AppBootstrap {
         return removed
     }
 
-    /// A recording LibrarySync moved into the sync folder is still ClassNote's
-    /// own. Never swept as an orphan, though: another Mac's library owns the
-    /// rest of that folder.
+    /// A recording LibrarySync moved into the sync folder. Neither deleted with
+    /// its lecture nor swept as an orphan: the other Macs share that folder, and
+    /// one of them may still bring the lecture back.
     private static func isSyncedRecording(_ url: URL) -> Bool {
         let root = LibrarySync.defaultRoot.appendingPathComponent("Sessions", isDirectory: true)
         return url.standardizedFileURL.path.hasPrefix(root.standardizedFileURL.path + "/")

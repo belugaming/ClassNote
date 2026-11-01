@@ -186,7 +186,8 @@ final class DatabaseTests: XCTestCase {
         custom.targetLanguage = "ko"
         custom.sourceLanguage = "auto"
         ApiConfigBackupStore.save(custom)
-        XCTAssertEqual(ApiConfigBackupStore.read()?.apiKey, "backup-key")
+        // Keys never go into UserDefaults; the database's stays.
+        XCTAssertEqual(ApiConfigBackupStore.read()?.apiKey, "")
 
         try await Database.shared.dbPool.write { db in
             var defaultConfig = ApiConfig.default
@@ -196,7 +197,7 @@ final class DatabaseTests: XCTestCase {
 
         let restored = try await ApiConfigRepository.shared.load()
         XCTAssertEqual(restored.baseUrl, "https://backup.example.test/v1")
-        XCTAssertEqual(restored.apiKey, "backup-key")
+        XCTAssertEqual(restored.apiKey, "database-key")
         XCTAssertEqual(restored.sttModel, "backup-stt")
         XCTAssertEqual(restored.translationModel, "backup-translation")
         XCTAssertEqual(restored.llmModel, "backup-llm")
@@ -563,7 +564,7 @@ final class ApiConfigBackupTests: XCTestCase {
 
         let backup = ApiConfigBackupStore.read()
         XCTAssertEqual(backup?.baseUrl, "https://example.test/v1")
-        XCTAssertEqual(backup?.apiKey, "sk-regression-test")
+        XCTAssertEqual(backup?.apiKey, "", "API keys must not be written to UserDefaults")
     }
 
     func testSavedConfigIsAuthoritativeEvenWhenItEqualsTheDefaults() async throws {
@@ -598,7 +599,8 @@ final class ApiConfigBackupTests: XCTestCase {
 
         let loaded = try await ApiConfigRepository.shared.load()
         XCTAssertEqual(loaded.baseUrl, "https://example.test/v1")
-        XCTAssertEqual(loaded.apiKey, "sk-restore-me")
+        // The key was only in the lost row: the backup does not hold keys.
+        XCTAssertEqual(loaded.apiKey, "")
     }
 }
 

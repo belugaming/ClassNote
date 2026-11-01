@@ -151,8 +151,18 @@ private struct MenuBarPanel: View {
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
+        // A stuck coreaudiod refuses every start; say so here instead.
         .disabled(appState.isStartingRecording || appState.isStoppingRecording
-                  || appState.isMissingCloudCredentialForRecording)
+                  || appState.isMissingCloudCredentialForRecording
+                  || appState.isAudioServiceUnresponsive)
+
+        if appState.isAudioServiceUnresponsive {
+            Label(L10n.t("menubar.audioServiceUnresponsive"), systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(Theme.warning)
+                .fixedSize(horizontal: false, vertical: true)
+                .help(L10n.t("record.error.audioServiceUnresponsive"))
+        }
 
         RecordingOptionsView(source: $prefs.source,
                              intent: $prefs.intent,

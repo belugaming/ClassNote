@@ -6,6 +6,8 @@ enum LocalMLXTranslatorError: Error, LocalizedError {
     case engineError(String)
     /// The sidecar went away with requests still unanswered.
     case exited
+    /// The app stopped the sidecar before it answered.
+    case stopped
 
     var errorDescription: String? {
         switch self {
@@ -13,6 +15,7 @@ enum LocalMLXTranslatorError: Error, LocalizedError {
         case .readyTimeout: return "本地翻译引擎启动超时"
         case .engineError(let msg): return "本地翻译失败: \(msg)"
         case .exited: return "本地翻译引擎意外退出"
+        case .stopped: return L10n.t("localModel.stopped")
         }
     }
 }
@@ -146,11 +149,14 @@ actor LocalMLXTranslatorProcess {
     /// Starts the sidecar if it isn't already up. Concurrent callers share one
     /// start attempt rather than racing to spawn several processes.
     func ensureStarted(onProgress: (@Sendable (String) -> Void)? = nil) async throws {
-        if isRunning { return }
+        // A start in flight comes first: `process` is set before READY, so
+        // `isRunning` is already true while the model loads, and a request
+        // written then sits unread until READY, or forever if loading fails.
         if let starting {
             try await starting.value
             return
         }
+        if isRunning { return }
         let task = Task { try await self.launch(onProgress: onProgress) }
         starting = task
         defer { starting = nil }
@@ -194,7 +200,11 @@ actor LocalMLXTranslatorProcess {
         // this pipe its buffer fills and Python blocks on write() forever.
         stderr.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
+            guard !data.isEmpty else {
+                // EOF: the handler would otherwise fire nonstop until shutdown.
+                handle.readabilityHandler = nil
+                return
+            }
             // Also feeds the handshake watchdog: a ~1 GB download is otherwise
             // silent on stdout for minutes at a time.
             activity.touch()
@@ -232,7 +242,12 @@ actor LocalMLXTranslatorProcess {
             self.stdinPipe = nil
             self.stdoutPipe = nil
             self.stderrPipe = nil
-            throw Self.mapHandshakeFailure(error)
+            let mapped = Self.mapHandshakeFailure(error)
+            // `ensureStarted` keeps requests out until READY, but anything that
+            // did get in would otherwise stay "translating" for the rest of
+            // the lecture.
+            failPending(mapped)
+            throw mapped
         }
 
         // Only start routing responses once READY has been consumed, so the
@@ -260,10 +275,10 @@ actor LocalMLXTranslatorProcess {
         Task { [weak self] in
             for await chunk in chunks { await self?.ingest(chunk) }
             // stdout closed: the sidecar is gone, and nothing will answer.
-            await self?.processEnded()
+            await self?.processEnded(proc)
         }
-        proc.terminationHandler = { [weak self] _ in
-            Task { await self?.processEnded() }
+        proc.terminationHandler = { [weak self] ended in
+            Task { await self?.processEnded(ended) }
         }
     }
 
@@ -271,19 +286,26 @@ actor LocalMLXTranslatorProcess {
     /// next to the speech model, say) answers nothing, and the next request
     /// starts a new one, so without this the sentences that were in flight
     /// stayed "translating" for the rest of the lecture.
-    private func processEnded() {
+    ///
+    /// `proc` keeps a late call about an old child from failing a newer
+    /// one's requests.
+    private func processEnded(_ proc: Process) {
+        guard proc === process else { return }
+        failPending(LocalMLXTranslatorError.exited)
+        guard !proc.isRunning else { return }
+        SidecarRegistry.shared.unregister(proc.processIdentifier)
+        process = nil
+        stdinPipe = nil
+        stdoutPipe = nil
+        stderrPipe?.fileHandleForReading.readabilityHandler = nil
+        stderrPipe = nil
+    }
+
+    private func failPending(_ error: Error) {
         let waiting = pending
         pending.removeAll()
         for (_, continuation) in waiting {
-            continuation.finish(throwing: LocalMLXTranslatorError.exited)
-        }
-        if let process, !process.isRunning {
-            SidecarRegistry.shared.unregister(process.processIdentifier)
-            self.process = nil
-            stdinPipe = nil
-            stdoutPipe = nil
-            stderrPipe?.fileHandleForReading.readabilityHandler = nil
-            stderrPipe = nil
+            continuation.finish(throwing: error)
         }
     }
 
@@ -321,10 +343,11 @@ actor LocalMLXTranslatorProcess {
         }
     }
 
-    /// False when the request did not reach the sidecar.
+    /// False when the request did not reach the sidecar. Never writes to a
+    /// child that has exited: with no reader the write fails with EPIPE.
     @discardableResult
     private func send(_ payload: [String: Any]) -> Bool {
-        guard let stdinPipe,
+        guard let stdinPipe, isRunning,
               var data = try? JSONSerialization.data(withJSONObject: payload) else { return false }
         data.append(UInt8(ascii: "\n"))
         do {
@@ -362,7 +385,9 @@ actor LocalMLXTranslatorProcess {
     }
 
     func shutdown() async {
-        for (_, continuation) in pending { continuation.finish() }
+        // Failed, not finished, so a line cut off here is marked for retry
+        // instead of keeping a partial translation as done.
+        for (_, continuation) in pending { continuation.finish(throwing: LocalMLXTranslatorError.stopped) }
         pending.removeAll()
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stdoutPipe = nil

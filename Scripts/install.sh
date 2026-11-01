@@ -8,16 +8,22 @@ cd "$(dirname "$0")/.."
 echo "→ Regenerating Xcode project..."
 xcodegen generate >/dev/null
 
+# A DerivedData folder of this checkout's own, as CI uses: searching
+# ~/Library/Developer/Xcode/DerivedData picked whichever ClassNote build was
+# listed first, which with a second clone or a worktree could be a stale one.
+DERIVED=build/DerivedData
+
 echo "→ Building Release (this takes ~30s)..."
 xcodebuild -project ClassNote.xcodeproj \
            -scheme ClassNote \
            -configuration Release \
            -destination 'platform=macOS,arch=arm64' \
+           -derivedDataPath "$DERIVED" \
            -skipMacroValidation \
            build 2>&1 | tail -5
 
-SRC=$(find ~/Library/Developer/Xcode/DerivedData -path "*Release/ClassNote.app" -type d 2>/dev/null | head -1)
-if [[ -z "$SRC" ]]; then
+SRC="$DERIVED/Build/Products/Release/ClassNote.app"
+if [[ ! -d "$SRC" ]]; then
     echo "✗ Couldn't find built ClassNote.app"
     exit 1
 fi

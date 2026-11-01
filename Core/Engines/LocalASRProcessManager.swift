@@ -98,7 +98,12 @@ actor LocalASRProcessManager {
         // socket on the Swift side minutes later. Drain it continuously.
         stderr.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
+            guard !data.isEmpty else {
+                // EOF: the sidecar is gone. Left installed, the handler fires
+                // nonstop with empty reads until shutdown().
+                handle.readabilityHandler = nil
+                return
+            }
             // Feeds the handshake watchdog: while the first-run weights come
             // down, huggingface_hub's progress bars are the only traffic
             // anywhere, and a silent 950 MB fetch must not read as a stall.
@@ -150,7 +155,7 @@ actor LocalASRProcessManager {
         // print from a library would otherwise fill the 64 KB pipe and block
         // the sidecar in write() forever, looking exactly like a dead engine.
         stdout.fileHandleForReading.readabilityHandler = { handle in
-            _ = handle.availableData
+            if handle.availableData.isEmpty { handle.readabilityHandler = nil }
         }
         let url = URL(string: "ws://127.0.0.1:\(port)")!
         NSLog("[LocalASRProcessManager] sidecar ready at \(url)")

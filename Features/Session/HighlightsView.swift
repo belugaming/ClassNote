@@ -79,7 +79,15 @@ private struct HighlightDetail: View {
             }
             .id(h.id)
             .onAppear { noteDraft = h.userNote }
-            .onChange(of: vm.selectedHighlightId) { _, _ in noteDraft = vm.selectedHighlight?.userNote ?? "" }
+            // The draft is the previous highlight's until it is replaced here,
+            // and `onDisappear` does not fire on a switch, so save it first.
+            .onChange(of: vm.selectedHighlightId) { oldId, _ in
+                if let previous = vm.highlights.first(where: { $0.id == oldId }), noteDraft != previous.userNote {
+                    let draft = noteDraft
+                    Task { await vm.setHighlightNote(previous, note: draft) }
+                }
+                noteDraft = vm.selectedHighlight?.userNote ?? ""
+            }
             .onDisappear {
                 if noteDraft != h.userNote { Task { await vm.setHighlightNote(h, note: noteDraft) } }
             }
@@ -114,7 +122,7 @@ private struct HighlightDetail: View {
             }
             .fixedSize()
             .disabled(!vm.canAdjustRange(h))
-            if vm.hasAudio {
+            if canPlay {
                 Button {
                     vm.seek(to: currentRange(h)?.start ?? h.timestampMs)
                 } label: {
@@ -140,8 +148,11 @@ private struct HighlightDetail: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 ForEach(lines.sentenceBlocks) { block in
-                    SentenceBlockView(block: block, fontSize: 14, canSeek: vm.hasAudio,
-                                      onSeek: { vm.seek(to: $0.startMs) })
+                    SentenceBlockView(block: block, fontSize: 14,
+                                      retrying: block.lines.contains { vm.retryingSegmentIds.contains($0.rowKey) },
+                                      canSeek: canPlay,
+                                      onSeek: { vm.seek(to: $0.startMs) },
+                                      onRetry: { line in Task { await vm.retryTranslation(for: line) } })
                 }
             }
             .padding(10)
@@ -216,6 +227,10 @@ private struct HighlightDetail: View {
         let preset = HighlightPrompts.find(key: key).map { L10n.t($0.labelKey) } ?? key
         return "\(model) · \(DateLabels.dateTime(Date(timeIntervalSince1970: TimeInterval(ts) / 1000))) · \(preset)"
     }
+
+    /// As in the transcript: while the lecture still records, the player bar
+    /// that would pause it is hidden and the microphone would pick it up.
+    private var canPlay: Bool { vm.hasAudio && !vm.isSessionRecording }
 
     private func currentRange(_ h: Highlight) -> (start: Int64, end: Int64)? {
         if let s = h.rangeStartMs, let e = h.rangeEndMs { return (s, e) }

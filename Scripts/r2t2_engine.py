@@ -16,8 +16,10 @@ algorithm onto mlx-audio's Qwen3-ASR model, which loads the same weights:
   current, so a two-hour lecture costs the same per step as its first minute.
 * The prompt is built here rather than by mlx-audio, whose helper adds a
   newline after the system prompt that the model was not trained with.
-* Audio that piles up while a step runs is decoded together in the next one,
-  so a slow machine falls behind by one step rather than by a growing queue.
+* Audio that piles up while a step runs is decoded together in the next one
+  (asr_server hands over everything queued at once), with a token budget
+  sized to it, so a slow machine falls behind by one step rather than by a
+  growing queue.
 
 Only ``R2T2Model`` touches MLX. ``R2T2Stream`` is plain Python over a small
 model interface (generate/encode/decode), which is what the tests drive.
@@ -25,6 +27,7 @@ model interface (generate/encode/decode), which is what the tests drive.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -46,10 +49,23 @@ WINDOW_DROP_S = 8
 # Tokens held back from each decode: the last one may still change once more
 # audio arrives. 1 is what every reference caller uses.
 UNFIXED_TOKENS = 1
-# Tokens generated per step. Small on purpose: a step only needs to reach a
-# little past what is already committed, and each token costs a forward pass.
+# Tokens a step may generate per second of new audio, on top of the one it
+# holds back: 3 at a 160 ms step, 17 at a 2 s one. A step has to commit at
+# least what was said during it, or the decoder falls behind for good and the
+# window trim then drops audio it never reached. Lecture speech runs at up to
+# ~5 tokens/s in English and Chinese alike (measured with R2T2's tokenizer:
+# 220 words/min, 360 characters/min), so this is about twice that, leaving
+# room to catch up. Decoding stops at EOS, so the headroom costs nothing while
+# the decoder keeps up.
+STEP_TOKENS_PER_S = 8
+# While nothing is stable yet the budget grows from BASE_NEW_TOKENS, a step at
+# a time, up to MAX_NEW_TOKENS.
 BASE_NEW_TOKENS = 2
 MAX_NEW_TOKENS = 8
+# The most new audio one step takes in, the same as asr_server's file-import
+# step. A longer backlog is decoded in several steps, each within its budget
+# and the window, so none of it is trimmed away before it has been decoded.
+MAX_STEP_S = 2
 # A flush (a pause, or the end of audio) commits everything, so it may need to
 # write out a whole trailing clause.
 FLUSH_NEW_TOKENS = 32
@@ -195,24 +211,34 @@ class R2T2Stream:
         """Committed text still inside the window (the prompt prefix)."""
         return "".join(p.text for p in self.pieces)
 
-    def accept(self, samples: np.ndarray) -> list[tuple[str, int]]:
-        """Adds audio and runs a step if enough has arrived. Returns the newly
-        committed pieces as (text, absolute end sample)."""
+    def add(self, samples: np.ndarray):
+        """Adds audio for the next step without running one."""
         if len(samples):
             self.pending = np.concatenate([self.pending, samples.astype(np.float32)])
-        # The first step waits for two chunks: one step plus one of look-ahead,
-        # as the reference caller does.
-        needed = self.step_samples * (2 if self.steps == 0 and not len(self.audio) else 1)
-        if len(self.pending) < needed:
-            return []
-        return self._step(flush=False)
+
+    def accept(self, samples: np.ndarray) -> list[tuple[str, int]]:
+        """Adds audio and runs a step if enough has arrived (several, for more
+        than MAX_STEP_S). Returns the newly committed pieces as (text,
+        absolute end sample)."""
+        self.add(samples)
+        out: list[tuple[str, int]] = []
+        while True:
+            # The first step waits for two chunks: one step plus one of
+            # look-ahead, as the reference caller does.
+            needed = self.step_samples * (2 if self.steps == 0 and not len(self.audio) else 1)
+            if len(self.pending) < needed:
+                return out
+            out += self._step(flush=False)
 
     def flush(self) -> list[tuple[str, int]]:
         """Commits everything the audio so far supports, the held-back token
         included. Used on a pause and at the end of the stream."""
         if not len(self.pending) and not len(self.audio):
             return []
-        return self._step(flush=True)
+        out: list[tuple[str, int]] = []
+        while len(self.pending) > MAX_STEP_S * SAMPLE_RATE:
+            out += self._step(flush=False)
+        return out + self._step(flush=True)
 
     def reset_text(self):
         """Starts afresh after a decoder loop. The audio goes too: decoding
@@ -226,9 +252,10 @@ class R2T2Stream:
     # ---- internals ------------------------------------------------------
 
     def _step(self, flush: bool) -> list[tuple[str, int]]:
-        if len(self.pending):
-            self.audio = np.concatenate([self.audio, self.pending])
-            self.pending = np.zeros(0, np.float32)
+        chunk = self.pending[:MAX_STEP_S * SAMPLE_RATE]
+        if len(chunk):
+            self.audio = np.concatenate([self.audio, chunk])
+            self.pending = self.pending[len(chunk):]
         self._trim_window()
         self.steps += 1
 
@@ -238,7 +265,10 @@ class R2T2Stream:
             prefix = f"language {self.detected_language}{ASR_TEXT_TAG}" + prefix_text
         prefix = prefix.split("|")[0]
 
-        budget = FLUSH_NEW_TOKENS if flush else int(self.new_tokens)
+        if flush:
+            budget = FLUSH_NEW_TOKENS
+        else:
+            budget = max(int(self.new_tokens), self.step_budget(len(chunk)))
         if not self.language and not self.detected_language:
             # Auto-detect: the model writes "language X<asr_text>" before any
             # text, which a step's usual budget cannot reach.
@@ -274,6 +304,12 @@ class R2T2Stream:
         if is_hallucinating(self.committed):
             self.reset_text()
         return out
+
+    @staticmethod
+    def step_budget(new_samples: int) -> int:
+        """Tokens for a step that takes in `new_samples` of new audio: what
+        that audio can hold at STEP_TOKENS_PER_S, plus the one held back."""
+        return UNFIXED_TOKENS + math.ceil(STEP_TOKENS_PER_S * new_samples / SAMPLE_RATE)
 
     def _roll_back(self, text: str) -> str:
         """`text` minus its last UNFIXED_TOKENS tokens, stepping back further

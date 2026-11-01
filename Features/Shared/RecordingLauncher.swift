@@ -53,6 +53,10 @@ enum RecordingLauncher {
     /// Starts a recording with the remembered choices, into `courseId`, or
     /// stops the one running.
     static func toggle(_ appState: AppState, courseId: String? = nil) {
+        // While the last recording is finishing, a press joins that stop and
+        // starts nothing: a second press of ⌘⇧R from someone unsure the first
+        // one took must not begin a new recording. The ⌘N item, the toolbar
+        // and the menu bar all read "Finishing…" and are disabled meanwhile.
         if appState.isRecording {
             appState.stopRecording()
             return
