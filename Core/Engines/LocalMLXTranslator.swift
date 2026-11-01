@@ -6,6 +6,8 @@ enum LocalMLXTranslatorError: Error, LocalizedError {
     case engineError(String)
     /// The sidecar went away with requests still unanswered.
     case exited
+    /// The app stopped the sidecar before it answered.
+    case stopped
 
     var errorDescription: String? {
         switch self {
@@ -13,6 +15,7 @@ enum LocalMLXTranslatorError: Error, LocalizedError {
         case .readyTimeout: return "本地翻译引擎启动超时"
         case .engineError(let msg): return "本地翻译失败: \(msg)"
         case .exited: return "本地翻译引擎意外退出"
+        case .stopped: return L10n.t("localModel.stopped")
         }
     }
 }
@@ -382,7 +385,9 @@ actor LocalMLXTranslatorProcess {
     }
 
     func shutdown() async {
-        for (_, continuation) in pending { continuation.finish() }
+        // Failed, not finished, so a line cut off here is marked for retry
+        // instead of keeping a partial translation as done.
+        for (_, continuation) in pending { continuation.finish(throwing: LocalMLXTranslatorError.stopped) }
         pending.removeAll()
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stdoutPipe = nil

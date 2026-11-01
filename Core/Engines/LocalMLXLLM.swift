@@ -6,6 +6,9 @@ enum LocalMLXLLMError: Error, LocalizedError {
     case engineError(String)
     /// The sidecar went away with requests still unanswered.
     case exited
+    /// The app stopped the sidecar (to free memory for a recording, or to
+    /// delete the model) before it answered.
+    case stopped
 
     var errorDescription: String? {
         switch self {
@@ -13,6 +16,7 @@ enum LocalMLXLLMError: Error, LocalizedError {
         case .readyTimeout: return "本地大模型启动超时"
         case .engineError(let msg): return "本地大模型生成失败: \(msg)"
         case .exited: return L10n.t("localLLM.exited")
+        case .stopped: return L10n.t("localModel.stopped")
         }
     }
 }
@@ -344,7 +348,9 @@ actor LocalMLXLLMProcess {
     func shutdown() async {
         idleTask?.cancel()
         idleTask = nil
-        for (_, continuation) in pending { continuation.finish() }
+        // Failed, not finished: a notes generation cut off here was saved as
+        // if it were complete.
+        for (_, continuation) in pending { continuation.finish(throwing: LocalMLXLLMError.stopped) }
         pending.removeAll()
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stdoutPipe = nil
