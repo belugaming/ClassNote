@@ -466,7 +466,8 @@ final class PreReleaseStorageSyncTests: XCTestCase {
     private func scratchDefaults() throws -> (UserDefaults, String) {
         let name = "com.beluga.classnote.tests.prerelease.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
-        addTeardownBlock { defaults.removePersistentDomain(forName: name) }
+        // A fresh handle in the teardown, so the closure captures only the name.
+        addTeardownBlock { UserDefaults(suiteName: name)?.removePersistentDomain(forName: name) }
         return (defaults, name)
     }
 
