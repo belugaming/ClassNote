@@ -75,6 +75,21 @@ struct SessionDetailView: View {
             guard let ids = note.userInfo?["sessionIds"] as? Set<String>, ids.contains(sessionId) else { return }
             Task { await vm.load(sessionId: sessionId) }
         }
+        // A job on this lecture ended in the view model of an earlier visit to
+        // it, which saved the result but has nothing on screen. The one that
+        // ran it here has already shown it.
+        .onReceive(NotificationCenter.default.publisher(for: .sessionContentDidChange)) { note in
+            guard note.userInfo?["sessionId"] as? String == sessionId,
+                  (note.object as? SessionDetailViewModel) !== vm else { return }
+            Task { await vm.load(sessionId: sessionId) }
+        }
+        // AppState keeps a re-transcription's worker by session, so this also
+        // holds in a view opened after it started, or one started from the
+        // recovery banner; the 3-second refresh only runs while recording.
+        .onChange(of: isTranscribing) { wasTranscribing, transcribing in
+            guard wasTranscribing, !transcribing else { return }
+            Task { await vm.load(sessionId: sessionId) }
+        }
         .confirmationDialog(L10n.t("session.action.retranscribe"),
                             isPresented: $confirmingRetranscribe, titleVisibility: .visible) {
             Button(L10n.t("session.action.retranscribe"), role: .destructive) {
@@ -110,6 +125,9 @@ struct SessionDetailView: View {
     private var isLive: Bool {
         vm.isSessionRecording && appState.isRecording && appState.currentSessionId == sessionId
     }
+
+    /// A re-transcription (or an import) of this session is running.
+    private var isTranscribing: Bool { appState.orchestrator(for: sessionId) != nil }
 
     private func applyJump(_ target: SegmentJumpTarget?) {
         vm.applyJump(target)
@@ -211,7 +229,7 @@ struct SessionDetailView: View {
             .disabled(vm.isGeneratingNotes || !hasTranscript)
 
             PopUpMenuButton(entries: moreMenuEntries) {
-                if vm.isRetranslating {
+                if vm.isRetranslating || vm.isExporting {
                     ProgressView().controlSize(.small)
                 } else {
                     Image(systemName: "ellipsis.circle")
@@ -255,11 +273,12 @@ struct SessionDetailView: View {
         entries.append(.item(L10n.t("session.action.retranslateAll"), enabled: hasTranscript && !busy) {
             Task { await vm.retranslate(failedOnly: false) }
         })
-        entries.append(.item(L10n.t("session.action.retranscribe"), enabled: vm.hasAudio && !vm.isSessionRecording) {
+        entries.append(.item(L10n.t("session.action.retranscribe"),
+                             enabled: vm.hasAudio && !vm.isSessionRecording && !isTranscribing) {
             confirmingRetranscribe = true
         })
         entries.append(.separator)
-        entries.append(.submenu(L10n.t("session.action.export"), enabled: hasTranscript, exports))
+        entries.append(.submenu(L10n.t("session.action.export"), enabled: hasTranscript && !vm.isExporting, exports))
         entries.append(.separator)
         entries.append(.item(L10n.t("main.deleteSession"), enabled: !isLive) {
             confirmingDelete = true
