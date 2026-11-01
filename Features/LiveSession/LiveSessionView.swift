@@ -120,7 +120,11 @@ private struct LiveContent: View {
                     }
                 }
                 HStack(spacing: 6) {
-                    Text(statusLabel)
+                    if isLiveWindow, isActive, let warning = orchestrator.captureWarning {
+                        Label(warning, systemImage: "mic.slash").foregroundStyle(.orange)
+                    } else {
+                        Text(statusLabel)
+                    }
                     if isLiveWindow {
                         Text("·")
                         Text(TimeLabel.string(ms: orchestrator.currentTimestampMs)).monospacedDigit()

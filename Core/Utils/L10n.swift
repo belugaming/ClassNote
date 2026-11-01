@@ -701,6 +701,10 @@ enum L10n {
         // Pipeline, capture and re-transcription (wave 2)
         "live.engineReconnecting": "Engine restarting… subtitles resume shortly",
         "live.engineGaveUp": "The local engine could not be restarted. Audio is still being recorded; you can re-transcribe afterwards.",
+        "live.mic.silent": "Microphone lost · reconnecting…",
+        "live.mic.silent.alert": "No sound has reached ClassNote from the microphone for %d seconds, so that part of the lecture is not being recorded. ClassNote is reconnecting the microphone and carries on recording as soon as it is back.",
+        "live.mic.restartFailed": "The microphone input changed and ClassNote could not restart it (%@). It keeps trying, and recording from the microphone resumes as soon as an input is available.",
+        "live.mic.fellBack": "“%@” was disconnected. Recording continues from the system default microphone.",
         "session.action.retranscribe": "Re-transcribe from audio",
         "session.retranscribe.confirm.message": "The existing transcript is replaced. Notes and flashcards made from the old transcript are kept but will be out of date.",
         "retranscribe.noAudio": "This session has no saved recording.",
@@ -1398,6 +1402,10 @@ enum L10n {
         // 管道、采集与重新转写(第二轮)
         "live.engineReconnecting": "引擎重启中…字幕稍后恢复",
         "live.engineGaveUp": "本地引擎无法重启。录音仍在继续,结束后可以重新转写。",
+        "live.mic.silent": "麦克风中断 · 正在重连…",
+        "live.mic.silent.alert": "已经 %d 秒没有收到麦克风的声音，这段课程没有录进去。ClassNote 正在重新连接麦克风，恢复后会自动接着录。",
+        "live.mic.restartFailed": "麦克风输入发生了变化，ClassNote 没能重新启动它（%@）。它会继续尝试，一旦有可用的输入就会恢复录音。",
+        "live.mic.fellBack": "「%@」已断开连接，录音改用系统默认麦克风继续。",
         "session.action.retranscribe": "用录音重新转写",
         "session.retranscribe.confirm.message": "现有逐字稿会被替换。基于旧逐字稿生成的笔记和卡片会保留,但内容会过时。",
         "retranscribe.noAudio": "这场会话没有保存录音。",

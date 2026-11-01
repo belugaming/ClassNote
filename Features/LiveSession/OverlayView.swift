@@ -61,10 +61,16 @@ private struct InnerOverlayView: View {
                 .frame(width: 8, height: 8)
                 .scaleEffect(appState.isActivelyRecording ? 1.0 : 0.85)
                 .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: appState.isActivelyRecording)
-            Text(appState.isStoppingRecording ? L10n.t("record.finishing")
-                 : appState.isActivelyRecording ? L10n.t("live.statusLive") : L10n.t("live.statusIdle"))
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.9))
+            if appState.isActivelyRecording, let warning = orchestrator.captureWarning {
+                Label(warning, systemImage: "mic.slash")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+            } else {
+                Text(appState.isStoppingRecording ? L10n.t("record.finishing")
+                     : appState.isActivelyRecording ? L10n.t("live.statusLive") : L10n.t("live.statusIdle"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+            }
             Spacer()
 
             Menu {
