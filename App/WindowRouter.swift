@@ -24,13 +24,6 @@ final class WindowRouter: ObservableObject {
     /// router brings this one forward instead.
     private weak var mainWindow: NSWindow?
 
-    /// Whether the main window is open and not minimized, so its alert can
-    /// be seen.
-    var isMainWindowOnScreen: Bool {
-        guard let mainWindow, !NSApp.isHidden else { return false }
-        return mainWindow.isVisible && !mainWindow.isMiniaturized
-    }
-
     /// Tracked by the overlay itself, so a toggle is right however it was
     /// closed last time.
     @Published var isOverlayVisible = false

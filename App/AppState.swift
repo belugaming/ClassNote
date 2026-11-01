@@ -699,16 +699,17 @@ final class AppState: ObservableObject {
     }
 
     /// Shown by the main window's alert, the only place `lastError` appears.
-    /// With that window closed or minimized nothing showed it: a start from
-    /// ⌘⇧R or the menu bar failed in silence, and the stale alert popped up
-    /// whenever the window next opened. So the window is brought up for it.
-    /// `bringForward` is for a failure of what the user just asked for, often
-    /// from another app: the window then comes to the front even if it is open.
+    /// `bringForward` is for a failure of what the user just asked for, such
+    /// as a start from ⌘⇧R or the menu bar with the main window closed, which
+    /// used to fail in silence: the window comes up and to the front for it.
+    /// Other errors leave the window alone. They mostly arrive mid-lecture,
+    /// and taking focus from the Zoom call or slides the student is watching
+    /// is worse than seeing the alert when the window is next opened.
     func setError(_ message: String, bringForward: Bool = false) {
         self.lastError = message
         // The test host must not open windows or take focus.
         guard !AppEnvironment.isRunningTests else { return }
-        if bringForward || !WindowRouter.shared.isMainWindowOnScreen {
+        if bringForward {
             WindowRouter.shared.openMain()
         }
     }
