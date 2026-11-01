@@ -186,20 +186,53 @@ extension ApiConfig {
     }
 }
 
+/// The settings in UserDefaults, so a lost or reset database does not take
+/// them along (see `ApiConfigRepository.load`). Never the API keys: UserDefaults
+/// is a plain-text plist, and the keys live only in the database.
 enum ApiConfigBackupStore {
-    private static let key = "classnote.apiConfig.backup.v1"
+    static let key = "classnote.apiConfig.backup.v1"
+    /// Blanked rather than left out, so a build whose decoder requires
+    /// `api_key` still reads the backup.
+    private static let keyFields = [ApiConfig.CodingKeys.apiKey.rawValue,
+                                    ApiConfig.CodingKeys.anthropicApiKey.rawValue]
 
-    static func read() -> ApiConfig? {
-        guard let data = AppEnvironment.defaults.data(forKey: key) else { return nil }
-        return try? JSONDecoder().decode(ApiConfig.self, from: data)
+    static func read(from defaults: UserDefaults = AppEnvironment.defaults) -> ApiConfig? {
+        guard let data = defaults.data(forKey: key),
+              let backup = try? JSONDecoder().decode(ApiConfig.self, from: data) else { return nil }
+        return withoutKeys(backup)
     }
 
-    static func save(_ config: ApiConfig) {
-        guard let data = try? JSONEncoder().encode(config) else { return }
-        AppEnvironment.defaults.set(data, forKey: key)
+    static func save(_ config: ApiConfig, to defaults: UserDefaults = AppEnvironment.defaults) {
+        guard let data = try? JSONEncoder().encode(withoutKeys(config)) else { return }
+        defaults.set(data, forKey: key)
     }
 
-    static func clear() {
-        AppEnvironment.defaults.removeObject(forKey: key)
+    static func clear(in defaults: UserDefaults = AppEnvironment.defaults) {
+        defaults.removeObject(forKey: key)
+    }
+
+    /// Earlier builds wrote the keys into the backup in plain text. Edits the
+    /// JSON itself, so a backup the decoder cannot read is cleaned too.
+    static func scrubKeys(in defaults: UserDefaults = AppEnvironment.defaults) {
+        guard let data = defaults.data(forKey: key) else { return }
+        guard var fields = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            // Unreadable, so no use as a backup, and it may hold a key.
+            defaults.removeObject(forKey: key)
+            return
+        }
+        guard keyFields.contains(where: { fields[$0] != nil && (fields[$0] as? String) != "" }) else { return }
+        for field in keyFields where fields[field] != nil { fields[field] = "" }
+        guard let scrubbed = try? JSONSerialization.data(withJSONObject: fields) else {
+            defaults.removeObject(forKey: key)
+            return
+        }
+        defaults.set(scrubbed, forKey: key)
+    }
+
+    private static func withoutKeys(_ config: ApiConfig) -> ApiConfig {
+        var copy = config
+        copy.apiKey = ""
+        copy.anthropicApiKey = ""
+        return copy
     }
 }
